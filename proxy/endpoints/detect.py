@@ -104,7 +104,10 @@ async def detect_verify(req: VerifyRequest, request: Request):
         logger.error("Detection engine error for model=%s: %s", req.model_id, e)
         r = _unknown(model_id=req.model_id, error="engine_error")
         if audit:
-            await audit.write(_audit_record(r, req, "pass"))
+            try:
+                await audit.write(_audit_record(r, req, "pass"))
+            except Exception as ae:
+                logger.error("Audit write failed after engine error: %s", ae)
         return r
 
     # Determine action taken
@@ -122,9 +125,12 @@ async def detect_verify(req: VerifyRequest, request: Request):
         error=result.error,
     )
 
-    # Async audit write -- does not block
+    # Async audit write -- does not block; never crashes the response pipeline
     if audit:
-        await audit.write(_audit_record(response, req, action))
+        try:
+            await audit.write(_audit_record(response, req, action))
+        except Exception as e:
+            logger.error("Audit write failed (detection result unaffected): %s", e)
 
     return response
 
