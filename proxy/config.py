@@ -65,6 +65,16 @@ class _DetectionSettings:
     )
     high_risk_action: str = _yaml.get("detection", {}).get("high_risk_action", "warn")
     unknown_action: str = _yaml.get("detection", {}).get("unknown_action", "pass")
+    upstream_url: str = os.environ.get(
+        "ARKHEIA_UPSTREAM_URL",
+        _yaml.get("detection", {}).get("upstream_url", ""),
+    )
+    interception_enabled: bool = str(
+        os.environ.get(
+            "ARKHEIA_INTERCEPTION_ENABLED",
+            str(_yaml.get("detection", {}).get("interception_enabled", False)),
+        )
+    ).lower() in ("true", "1", "yes")
 
 
 class _RegistrySettings:

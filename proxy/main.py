@@ -117,6 +117,14 @@ def create_app() -> FastAPI:
     app.include_router(audit_router)
     app.include_router(admin_router)
 
+    if settings.detection.interception_enabled:
+        from proxy.middleware.interception import AIInterceptionMiddleware
+        app.add_middleware(AIInterceptionMiddleware)
+        logger.info(
+            "AI interception middleware enabled (upstream: %s)",
+            settings.detection.upstream_url,
+        )
+
     @app.get("/")
     async def root():
         return {
