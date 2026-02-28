@@ -21,6 +21,7 @@ services:
     environment:
       - ARKHEIA_API_KEY=${ARKHEIA_API_KEY:-}     # injected from host, empty = registry disabled
       - ARKHEIA_ENV=${ARKHEIA_ENV:-development}
+      - ARKHEIA_REGISTRY_URL=http://registry:8200
     volumes:
       - ./profiles:/app/profiles:ro              # read-only; registry writes go to profile_data
       - profile_data:/etc/arkheia/profiles       # writable; registry updates land here
@@ -29,6 +30,26 @@ services:
     healthcheck:
       test: ["CMD", "python", "-c",
              "import httpx; httpx.get('http://localhost:8099/admin/health').raise_for_status()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  registry:
+    build:
+      context: .
+      dockerfile: registry_server/Dockerfile
+    ports:
+      - "8200:8200"
+    environment:
+      - ARKHEIA_REGISTRY_KEYS=${ARKHEIA_REGISTRY_KEYS:-}
+      - ARKHEIA_REGISTRY_PROFILE_DIR=/app/profiles
+      - ARKHEIA_REGISTRY_BASE_URL=http://localhost:8200
+    volumes:
+      - ./profiles:/app/profiles:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import httpx; httpx.get('http://localhost:8200/health').raise_for_status()"]
       interval: 30s
       timeout: 5s
       retries: 3
