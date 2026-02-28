@@ -11,7 +11,6 @@ If any step fails, the profile is rejected. The existing profile is retained.
 
 import hashlib
 import logging
-from typing import Optional
 
 import yaml
 

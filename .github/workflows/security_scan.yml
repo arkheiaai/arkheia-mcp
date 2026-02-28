@@ -1,0 +1,104 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'   # Every Monday at 6am UTC
+  workflow_dispatch:
+
+jobs:
+  bandit:
+    name: Bandit static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install bandit
+        run: pip install bandit[toml]
+
+      - name: Run bandit (source only, skip tests and venv)
+        run: |
+          bandit -r proxy/ mcp_server/ registry_server/ scripts/ \
+            --exclude proxy/tests,mcp_server/tests,registry_server/tests \
+            --skip B101,B601 \
+            -f json -o bandit-results.json || true
+          bandit -r proxy/ mcp_server/ registry_server/ scripts/ \
+            --exclude proxy/tests,mcp_server/tests,registry_server/tests \
+            --skip B101,B601 \
+            -ll 2>&1 | tee bandit-summary.txt
+          # Fail on HIGH severity only
+          if grep -q "Severity: High" bandit-summary.txt; then
+            echo "HIGH severity findings detected"
+            exit 1
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-results-${{ github.run_number }}
+          path: |
+            bandit-results.json
+            bandit-summary.txt
+          retention-days: 90
+
+  dependency-audit:
+    name: Dependency vulnerability audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit dependencies
+        run: |
+          pip install -r requirements.txt --dry-run 2>/dev/null || true
+          pip-audit -r requirements.txt --format json -o pip-audit-results.json || true
+          pip-audit -r requirements.txt 2>&1 | tee pip-audit-summary.txt
+          # Fail only on critical/high CVEs
+          if pip-audit -r requirements.txt --fail-on-cvss 8.0 2>&1 | grep -q "Found"; then
+            echo "High-severity CVEs found"
+            exit 1
+          fi
+        continue-on-error: true
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-results-${{ github.run_number }}
+          path: |
+            pip-audit-results.json
+            pip-audit-summary.txt
+          retention-days: 90
+
+  secrets-check:
+    name: Check for committed secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for secret scanning
+
+      - name: Scan for secrets with trufflehog
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified
+        continue-on-error: true

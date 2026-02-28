@@ -8,7 +8,6 @@ Does NOT re-implement feature extraction. Does NOT replace the existing
 detection logic -- wraps it.
 """
 
-import hashlib
 import logging
 import uuid
 from dataclasses import dataclass, field

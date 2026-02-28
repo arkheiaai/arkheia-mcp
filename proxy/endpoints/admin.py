@@ -7,7 +7,6 @@ These are not authenticated in Phase 1 -- deploy behind network controls
 
 import logging
 from pathlib import Path
-from typing import Optional
 
 from fastapi import APIRouter, Request
 
