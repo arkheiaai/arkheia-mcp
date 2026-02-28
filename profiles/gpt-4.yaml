@@ -1,0 +1,127 @@
+model: "gpt-4"
+version: "2.0"
+type: api
+generated: "2026-02-09T06:33:52Z"
+
+characterization:
+  date: "2026-02-09"
+  prompts: 196
+  features: 6
+  token_limit: 20
+
+api:
+  provider: openai
+  endpoint: "OpenAI API (https://api.openai.com/v1/chat/completions)"
+  logprobs_available: true
+
+detection:
+  strategy: ensemble
+  polarity: normal
+  alpha: 0.12
+  bias: 1.95
+  min_required_features: 3
+  min_contribution_threshold: 2.0
+  thresholds:
+    low: 0.427962
+    medium: 0.429656
+  features:
+    entropy_std:
+      weight: 1.0590
+      polarity: positive
+      threshold_low: 0.427962
+      threshold_medium: 0.429656
+      cohens_d: -1.0590
+      effect_size: large
+      truth_mean: 0.421189
+      truth_std: 0.077602
+      fab_mean: 0.491745
+      fab_std: 0.053445
+      enabled: true
+    entropy_mean:
+      weight: 0.9747
+      polarity: positive
+      threshold_low: 0.445564
+      threshold_medium: 0.449427
+      cohens_d: -0.9747
+      effect_size: large
+      truth_mean: 0.430110
+      truth_std: 0.169409
+      fab_mean: 0.591088
+      fab_std: 0.160797
+      enabled: true
+    top1_confidence_mean:
+      weight: 0.9178
+      polarity: negative
+      threshold_low: 0.754523
+      threshold_medium: 0.752182
+      cohens_d: 0.9178
+      effect_size: large
+      truth_mean: 0.763887
+      truth_std: 0.108856
+      fab_mean: 0.666344
+      fab_std: 0.103646
+      enabled: true
+    top1_confidence_std:
+      weight: 0.7942
+      polarity: positive
+      threshold_low: 0.294452
+      threshold_medium: 0.295581
+      cohens_d: -0.7942
+      effect_size: medium
+      truth_mean: 0.289935
+      truth_std: 0.069704
+      fab_mean: 0.336985
+      fab_std: 0.046481
+      enabled: true
+    logprob_iqr:
+      weight: 0.7612
+      polarity: positive
+      threshold_low: 0.590259
+      threshold_medium: 0.599735
+      cohens_d: -0.7612
+      effect_size: medium
+      truth_mean: 0.552356
+      truth_std: 0.513120
+      fab_mean: 0.947181
+      fab_std: 0.524164
+      enabled: true
+    median_logprob:
+      weight: 0.6479
+      polarity: negative
+      threshold_low: -0.162744
+      threshold_medium: -0.166369
+      cohens_d: 0.6479
+      effect_size: medium
+      truth_mean: -0.148244
+      truth_std: 0.191412
+      fab_mean: -0.299283
+      fab_std: 0.268432
+      enabled: true
+
+performance:
+  truth_accuracy: 0.6939
+  fab_accuracy: 0.7653
+  combined_accuracy: 0.7296
+  precision: 0.7143
+  recall: 0.7653
+  f1: 0.7389
+  n_truth: 98
+  n_fab: 98
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+
+signals:
+  enabled: [logprobs]
+  required: [logprobs]
+
+metadata:
+  generator: arkheia-model-lab-task23
+  generator_version: "2.0.0"
+  validation_date: "2026-02-09"
+  status: validated
+  dataset_size: 196
+  max_cohen_d: 1.0590
+  notes: "Rich logprob signal. Entropy and confidence features dominant."

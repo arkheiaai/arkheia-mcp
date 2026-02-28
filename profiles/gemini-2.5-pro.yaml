@@ -1,0 +1,151 @@
+model: "gemini-2.5-pro"
+version: "2.5"
+type: api
+generated: "2026-02-14T13:18:00Z"
+
+characterization:
+  date: "2026-02-14"
+  prompts: 200
+  features: 7
+  token_limit: 2048
+  notes: "Heavy thinking model — mean 1555 thinking tokens. TRUTH produces 634 visible tokens vs FAB 336. prompt_token_count excluded (input artifact)."
+
+api:
+  provider: google
+  endpoint: "Google AI API (https://generativelanguage.googleapis.com/v1beta/)"
+  logprobs_available: false
+  thinking_model: true
+
+detection:
+  strategy: ensemble
+  polarity: normal
+  alpha: 0.05
+  bias: 0.40
+  min_required_features: 3
+  min_contribution_threshold: 1.5
+  thresholds:
+    low: 484.75
+    medium: 335.90
+  features:
+    avg_word_length:
+      weight: 1.7981
+      polarity: positive
+      threshold_low: 5.6000
+      threshold_medium: 5.7500
+      cohens_d: -1.7981
+      effect_size: very large
+      truth_mean: 5.3600
+      truth_std: 0.2100
+      fab_mean: 5.7500
+      fab_std: 0.2200
+      enabled: true
+    tokens_per_second:
+      weight: 1.6959
+      polarity: negative
+      threshold_low: 28.0000
+      threshold_medium: 24.0000
+      cohens_d: 1.6959
+      effect_size: very large
+      truth_mean: 32.0000
+      truth_std: 9.5000
+      fab_mean: 16.5000
+      fab_std: 9.0000
+      enabled: true
+    thinking_token_count:
+      weight: 1.5487
+      polarity: positive
+      threshold_low: 1450.0000
+      threshold_medium: 1550.0000
+      cohens_d: -1.5487
+      effect_size: very large
+      truth_mean: 1400.0000
+      truth_std: 190.0000
+      fab_mean: 1700.0000
+      fab_std: 195.0000
+      enabled: true
+    unique_word_ratio:
+      weight: 1.5300
+      polarity: positive
+      threshold_low: 0.7800
+      threshold_medium: 0.8200
+      cohens_d: -1.5300
+      effect_size: very large
+      truth_mean: 0.7200
+      truth_std: 0.0600
+      fab_mean: 0.8200
+      fab_std: 0.0650
+      enabled: true
+    token_count:
+      weight: 1.5273
+      polarity: negative
+      threshold_low: 484.7500
+      threshold_medium: 335.9000
+      cohens_d: 1.5273
+      effect_size: very large
+      truth_mean: 633.6000
+      truth_std: 194.8000
+      fab_mean: 335.9000
+      fab_std: 193.1000
+      enabled: true
+    word_count:
+      weight: 1.2525
+      polarity: negative
+      threshold_low: 350.0000
+      threshold_medium: 240.0000
+      cohens_d: 1.2525
+      effect_size: very large
+      truth_mean: 460.0000
+      truth_std: 170.0000
+      fab_mean: 240.0000
+      fab_std: 165.0000
+      enabled: true
+    sentence_count:
+      weight: 1.2265
+      polarity: negative
+      threshold_low: 20.0000
+      threshold_medium: 14.0000
+      cohens_d: 1.2265
+      effect_size: very large
+      truth_mean: 26.0000
+      truth_std: 10.0000
+      fab_mean: 14.0000
+      fab_std: 9.5000
+      enabled: true
+
+performance:
+  truth_accuracy: 0.780
+  fab_accuracy: 0.790
+  combined_accuracy: 0.785
+  precision: 0.782
+  recall: 0.790
+  f1: 0.786
+  n_truth: 100
+  n_fab: 100
+  notes: "7 features with very large effect sizes. Well-balanced detection — truth_acc and fab_acc within 1pp. F1=0.786."
+
+mode_gate:
+  enabled: true
+  tool_surface:
+    action: suppress
+    triggers:
+      token_count_max: 80
+      is_function_call: true
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+  recommended_max_output_tokens: 2048
+
+signals:
+  enabled: [latency, tokens]
+  required: [latency]
+
+metadata:
+  generator: arkheia-model-lab
+  generator_version: "2.0.0"
+  validation_date: "2026-02-14"
+  status: validated
+  dataset_size: 200
+  max_cohen_d: 1.7981
+  notes: "Thinking model with strong detection surface. thinking_token_count is itself a valid signal (d=-1.55). 7 features at very large effect sizes."

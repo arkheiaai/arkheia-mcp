@@ -1,0 +1,120 @@
+# Arkheia Model Profile Schema -- source of truth
+#
+# All model profiles must conform to this schema.
+# The validator (proxy/registry/validator.py) enforces these constraints
+# before any downloaded profile is applied.
+#
+# Two formats are accepted:
+#   - Real format: top-level "model" key (used by arkheia-model-lab)
+#   - Spec format: "metadata" block (for registry-distributed profiles)
+#
+# The ProfileRouter and DetectionEngine handle both transparently.
+
+# ============================================================================
+# REAL FORMAT (produced by arkheia-model-lab)
+# ============================================================================
+
+# model: string          # exact model identifier (e.g. "claude-sonnet-4-6")
+# version: string        # MAJOR.MINOR (e.g. "1.0")
+# type: string           # "api" | "local"
+# generated: datetime    # ISO8601
+#
+# api:
+#   provider: string                        # "anthropic" | "openai" | "google" | "xai"
+#   logprobs_available: boolean
+#   thinking_model: boolean
+#
+# detection:
+#   strategy: string                        # "ensemble"
+#   min_required_features: integer          # minimum features needed for non-UNKNOWN result
+#   min_contribution_threshold: float       # minimum total weight for non-UNKNOWN result
+#   evidence_depth_limited: boolean         # if true, all detections carry this flag
+#   features:
+#     <feature_name>:                       # e.g. "unique_word_ratio", "mean_logprob"
+#       enabled: boolean
+#       weight: float                       # contribution to confidence score
+#       polarity: "positive" | "negative"   # positive = higher value = more risk
+#       threshold_low: float                # below LOW threshold (positive) or above (negative)
+#       threshold_medium: float             # medium/high boundary
+#       cohens_d: float                     # empirical effect size
+#       truth_mean: float                   # mean value for genuine responses
+#       truth_std: float                    # std dev for genuine responses
+#       fab_mean: float                     # mean value for fabricated responses
+#       fab_std: float                      # std dev for fabricated responses
+#
+# mode_gate:
+#   enabled: boolean
+#   tool_surface:
+#     action: "suppress"
+#     triggers:
+#       token_count_max: integer            # suppress if response shorter than this
+#       is_function_call: boolean
+#
+# smoke_test:
+#   prompt: string                          # known-good prompt
+#   response: string                        # known-good response
+#   expected_risk: "LOW" | "MEDIUM" | "HIGH"
+#   # Profile rejected by validator if smoke test result != expected_risk
+
+# ============================================================================
+# SPEC FORMAT (for registry-distributed profiles)
+# ============================================================================
+
+# metadata:
+#   model_id: string          # exact identifier (e.g. "llama-3-70b")
+#   model_family: string      # e.g. "llama", "claude", "gpt"
+#   version: string           # MAJOR.MINOR
+#   updated_at: datetime      # ISO8601
+#   author: string            # e.g. "arkheia-lab"
+#
+# thresholds:
+#   high_risk: float          # confidence above this = HIGH (e.g. 0.85)
+#   medium_risk: float        # confidence above this = MEDIUM (e.g. 0.55)
+#
+# features:
+#   - name: string
+#     enabled: boolean
+#     weight: float
+#     params: object
+#
+# smoke_test:
+#   prompt: string
+#   response: string
+#   expected_risk: string
+
+# ============================================================================
+# STANDARD FEATURE SET
+# ============================================================================
+#
+# Logprob features (require API logprobs -- not available from all providers):
+#   mean_logprob           -- mean log probability across tokens
+#   median_logprob         -- median log probability
+#   logprob_iqr            -- interquartile range of logprobs
+#   logprob_q25            -- 25th percentile logprob
+#   entropy_mean           -- mean per-token entropy (requires top_logprobs)
+#   entropy_std            -- std dev of per-token entropy
+#   top1_confidence_mean   -- mean probability of chosen token
+#   top1_confidence_std    -- std dev of chosen token probability
+#
+# Timing/token features:
+#   tokens_per_second      -- output tokens / total wall time
+#   token_count            -- total output tokens
+#   total_time_s           -- total wall time in seconds
+#   thinking_token_count   -- reasoning tokens (thinking models only)
+#   thinking_per_second    -- thinking tokens / total time
+#
+# Reasoning model features (GPT-5-Codex, o-series):
+#   reasoning_tokens       -- tokens consumed in hidden reasoning chain
+#   visible_tokens         -- tokens in visible output
+#   reasoning_ratio        -- reasoning_tokens / output_tokens
+#   output_tokens          -- total output tokens
+#
+# Structural features (text analysis -- always available):
+#   word_count             -- number of words in response
+#   char_count             -- number of characters
+#   unique_word_ratio      -- unique words / total words
+#   avg_word_length        -- mean characters per word
+#   sentence_count         -- number of sentences (period-split)
+#   words_per_token        -- word_count / token_count
+#   chars_per_token        -- char_count / token_count
+#   token_density          -- token_count / char_count

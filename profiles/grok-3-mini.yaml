@@ -1,0 +1,176 @@
+model: "grok-3-mini"
+version: "2.0"
+type: api
+generated: "2026-02-27T00:36:42Z"
+
+characterization:
+  date: "2026-02-27"
+  prompts: 200
+  features: 8
+  token_limit: 250
+  domains_tested: [prose]
+  status: prose_validated
+  notes: >
+    Prose corpus prose_v1 (100 TRUTH + 100 FAB, 250 tok, matched-pair design).
+    Reasoning model: code_v2 logprob signal below cross-domain threshold.
+    Latency features excluded (confirmed 46-60% FPR on uncertain TRUTH).
+    Prose-only logprob features. Best calibrated for prose-type queries.
+
+api:
+  provider: xai
+  endpoint: "xAI API (https://api.x.ai/v1/chat/completions)"
+  logprobs_available: true
+
+detection:
+  strategy: multi_feature
+  polarity: normal
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  cross_domain_validated: false
+  features:
+    entropy_std:
+      weight: 1.7546
+      polarity: negative
+      threshold_low: 0.222312
+      threshold_medium: 0.241062
+      cohens_d: -1.7546
+      effect_size: very large
+      truth_mean: 0.216628
+      truth_std: 0.026464
+      fab_mean: 0.265497
+      fab_std: 0.029174
+      enabled: true
+      cross_domain_stable: false
+      notes: "FAB responses show more variable token entropy. Prose-only validation."
+    entropy_mean:
+      weight: 1.6959
+      polarity: negative
+      threshold_low: 0.091692
+      threshold_medium: 0.107101
+      cohens_d: -1.6959
+      effect_size: very large
+      truth_mean: 0.087518
+      truth_std: 0.019598
+      fab_mean: 0.126684
+      fab_std: 0.026127
+      enabled: true
+      cross_domain_stable: false
+      notes: "FAB responses show higher average token entropy. Prose-only validation."
+    top1_confidence_mean:
+      weight: 1.5479
+      polarity: positive
+      threshold_low: 0.923579
+      threshold_medium: 0.933838
+      cohens_d: 1.5479
+      effect_size: very large
+      truth_mean: 0.945675
+      truth_std: 0.013714
+      fab_mean: 0.922
+      fab_std: 0.016727
+      enabled: true
+      cross_domain_stable: false
+      notes: "TRUTH responses show higher top-1 token confidence. Prose-only validation."
+    top1_confidence_std:
+      weight: 1.4538
+      polarity: negative
+      threshold_low: 0.159629
+      threshold_medium: 0.17471
+      cohens_d: -1.4538
+      effect_size: very large
+      truth_mean: 0.158439
+      truth_std: 0.023004
+      fab_mean: 0.190981
+      fab_std: 0.021747
+      enabled: true
+      cross_domain_stable: false
+      notes: "FAB responses show more variable top-1 confidence. Prose-only validation."
+    mean_logprob:
+      weight: 1.4157
+      polarity: positive
+      threshold_low: -0.132271
+      threshold_medium: -0.110436
+      cohens_d: 1.4157
+      effect_size: very large
+      truth_mean: -0.086912
+      truth_std: 0.02499
+      fab_mean: -0.13396
+      fab_std: 0.039803
+      enabled: true
+      cross_domain_stable: false
+      notes: "TRUTH responses have higher (less negative) mean logprob. Prose-only validation."
+    perplexity_mean:
+      weight: 1.3832
+      polarity: negative
+      threshold_low: 1.092655
+      threshold_medium: 1.1177
+      cohens_d: -1.3832
+      effect_size: very large
+      truth_mean: 1.09114
+      truth_std: 0.027466
+      fab_mean: 1.144261
+      fab_std: 0.046854
+      enabled: true
+      cross_domain_stable: false
+      notes: "FAB responses have higher average perplexity. Prose-only validation."
+    unique_token_ratio:
+      weight: 0.8427
+      polarity: negative
+      threshold_low: 0.556844
+      threshold_medium: 0.581834
+      cohens_d: -0.8427
+      effect_size: large
+      truth_mean: 0.5662
+      truth_std: 0.035616
+      fab_mean: 0.597468
+      fab_std: 0.038539
+      enabled: true
+      cross_domain_stable: false
+      notes: "FAB responses show higher unique token ratio. Prose-only validation."
+    logprob_q25:
+      weight: 0.6751
+      polarity: positive
+      threshold_low: -0.021613
+      threshold_medium: -0.00866
+      cohens_d: 0.6751
+      effect_size: medium
+      truth_mean: -0.0009
+      truth_std: 0.006607
+      fab_mean: -0.016419
+      fab_std: 0.031831
+      enabled: true
+      cross_domain_stable: false
+      notes: "TRUTH responses have higher 25th percentile logprob. Prose-only validation."
+
+performance:
+  prose:
+    truth_n: 100
+    fab_n: 100
+    notes: "prose_v1 corpus, 250 tok, matched-pair design."
+  code:
+    truth_n: 0
+    fab_n: 0
+    notes: "Code logprob signal below threshold for this reasoning model."
+  cross_domain:
+    stable_features: 0
+    notes: "Reasoning model: code logprob suppressed by chain-of-thought. Prose-only profile."
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+  notes: "Prose-validated. Code detection not validated. Hard_neg FPR: latency profiles had 46-60% FPR; logprob profiles expected ~10-15%."
+
+signals:
+  enabled: [logprobs]
+  required: [logprobs]
+
+metadata:
+  generator: arkheia-model-lab
+  generator_version: "2.0.0"
+  validation_date: "2026-02-27"
+  status: prose_validated
+  dataset_size: 200
+  max_cohen_d: 1.7546
+  corpus_prose: prose_v1_matched_200
+  corpus_code: not_validated
+  reasoning_model_note: "Chain-of-thought suppresses code logprob signal. Prose logprobs retain strong discrimination."

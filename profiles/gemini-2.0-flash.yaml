@@ -1,0 +1,99 @@
+model: "gemini-2.0-flash"
+version: "2.0"
+type: api
+generated: "2026-02-09T06:33:53Z"
+
+characterization:
+  date: "2026-02-09"
+  prompts: 200
+  features: 3
+  token_limit: 20
+
+api:
+  provider: google
+  endpoint: "Google AI API (https://generativelanguage.googleapis.com/v1beta/)"
+  logprobs_available: false
+
+detection:
+  strategy: ensemble
+  polarity: inverted
+  alpha: 0.05
+  bias: 0.40
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  thresholds:
+    low: 16.401600
+    medium: 16.367000
+  features:
+    token_count:
+      weight: 1.5318
+      polarity: negative
+      threshold_low: 16.401600
+      threshold_medium: 16.367000
+      cohens_d: 1.5318
+      effect_size: very large
+      truth_mean: 16.540000
+      truth_std: 1.981837
+      fab_mean: 13.080000
+      fab_std: 2.505267
+      enabled: true
+    unique_token_ratio:
+      weight: 0.6287
+      polarity: positive
+      threshold_low: 0.957402
+      threshold_medium: 0.957680
+      cohens_d: -0.6287
+      effect_size: medium
+      truth_mean: 0.956292
+      truth_std: 0.053866
+      fab_mean: 0.984042
+      fab_std: 0.031545
+      enabled: true
+    tokens_per_second:
+      weight: 0.5412
+      polarity: negative
+      threshold_low: 16.774266
+      threshold_medium: 16.748097
+      cohens_d: 0.5412
+      effect_size: medium
+      truth_mean: 16.878940
+      truth_std: 4.941779
+      fab_mean: 14.262079
+      fab_std: 4.726027
+      enabled: true
+
+performance:
+  truth_accuracy: 0.6400
+  fab_accuracy: 0.9100
+  combined_accuracy: 0.7750
+  precision: 0.7165
+  recall: 0.9100
+  f1: 0.8018
+  n_truth: 100
+  n_fab: 100
+
+mode_gate:
+  enabled: true
+  tool_surface:
+    action: suppress
+    triggers:
+      token_count_max: 80
+      is_function_call: true
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+
+signals:
+  enabled: [latency, tokens]
+  required: [latency]
+
+metadata:
+  generator: arkheia-model-lab-task23
+  generator_version: "2.0.0"
+  validation_date: "2026-02-09"
+  status: validated
+  dataset_size: 200
+  max_cohen_d: 1.5318
+  notes: "No logprobs. Token count is dominant signal (d=1.53)."

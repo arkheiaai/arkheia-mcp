@@ -1,0 +1,139 @@
+model: "grok-4-1-fast-non-reasoning"
+version: "2.0"
+type: api
+generated: "2026-02-27T00:31:53Z"
+
+characterization:
+  date: "2026-02-27"
+  prompts: 400
+  features: 5
+  token_limit: 250
+  domains_tested: [prose, code]
+  status: cross_domain_validated
+  notes: >
+    Prose corpus prose_v1 (100 TRUTH + 100 FAB, 250 tok) +
+    code corpus code_v2 (100 TRUTH + 100 FAB, 250 tok).
+    Both corpora use matched-pair design at 250 tokens.
+    Only features with |d| >= 0.5 in both domains and
+    consistent polarity retained.
+
+api:
+  provider: xai
+  endpoint: "xAI API (https://api.x.ai/v1/chat/completions)"
+  logprobs_available: true
+
+detection:
+  strategy: multi_feature
+  polarity: normal
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  cross_domain_validated: true
+  features:
+    entropy_mean:
+      weight: 2.0622
+      polarity: negative
+      threshold_low: 0.127676
+      threshold_medium: 0.147346
+      cohens_d: -2.0622
+      cohens_d_code: -0.6388
+      effect_size: huge
+      truth_mean: 0.114707
+      truth_std: 0.030904
+      fab_mean: 0.191282
+      fab_std: 0.042456
+      enabled: true
+      cross_domain_stable: true
+      notes: "FAB responses show higher average token entropy."
+    entropy_std:
+      weight: 2.0341
+      polarity: negative
+      threshold_low: 0.25243
+      threshold_medium: 0.279824
+      cohens_d: -2.0341
+      cohens_d_code: -0.6079
+      effect_size: huge
+      truth_mean: 0.240417
+      truth_std: 0.037637
+      fab_mean: 0.318497
+      fab_std: 0.039121
+      enabled: true
+      cross_domain_stable: true
+      notes: "FAB responses show more variable token entropy."
+    top1_confidence_mean:
+      weight: 1.8431
+      polarity: positive
+      threshold_low: 0.903602
+      threshold_medium: 0.917673
+      cohens_d: 1.8431
+      cohens_d_code: 0.5518
+      effect_size: very large
+      truth_mean: 0.936554
+      truth_std: 0.016939
+      fab_mean: 0.898322
+      fab_std: 0.023952
+      enabled: true
+      cross_domain_stable: true
+      notes: "TRUTH responses show higher top-1 token confidence."
+    mean_logprob:
+      weight: 1.7498
+      polarity: positive
+      threshold_low: -0.163299
+      threshold_medium: -0.137327
+      cohens_d: 1.7498
+      cohens_d_code: 0.5224
+      effect_size: very large
+      truth_mean: -0.103041
+      truth_std: 0.030112
+      fab_mean: -0.172245
+      fab_std: 0.047136
+      enabled: true
+      cross_domain_stable: true
+      notes: "TRUTH responses have higher (less negative) mean logprob."
+    perplexity_mean:
+      weight: 1.7324
+      polarity: negative
+      threshold_low: 1.114403
+      threshold_medium: 1.147892
+      cohens_d: -1.7324
+      cohens_d_code: -0.5199
+      effect_size: very large
+      truth_mean: 1.109036
+      truth_std: 0.033575
+      fab_mean: 1.189279
+      fab_std: 0.056245
+      enabled: true
+      cross_domain_stable: true
+      notes: "FAB responses have higher average perplexity."
+
+performance:
+  prose:
+    truth_n: 100
+    fab_n: 100
+    notes: "prose_v1 corpus, 250 tok, matched-pair design."
+  code:
+    truth_n: 100
+    fab_n: 100
+    notes: "code_v2 corpus, 250 tok, matched-pair design."
+  cross_domain:
+    stable_features: 5
+    notes: "Both corpora matched-pair at 250 tok. Features consistent in direction and |d| >= 0.5."
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+  notes: "Cross-domain validated, both corpora matched-pair at 250 tokens."
+
+signals:
+  enabled: [logprobs]
+  required: [logprobs]
+
+metadata:
+  generator: arkheia-model-lab
+  generator_version: "2.0.0"
+  validation_date: "2026-02-27"
+  status: validated
+  dataset_size: 400
+  max_cohen_d: 2.0622
+  corpus_prose: prose_v1_matched_200
+  corpus_code: code_v2_matched_200

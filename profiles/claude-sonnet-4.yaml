@@ -1,0 +1,135 @@
+model: "claude-sonnet-4"
+version: "3.0"
+type: api
+generated: "2026-02-15T01:00:00Z"
+
+characterization:
+  date: "2026-02-15"
+  prompts: 200
+  runs: 3
+  total_calls: 600
+  features: 5
+  token_limit: 250
+  domains_tested: [code]
+  status: validated
+  notes: "Recalibrated from 200-prompt validation suite (600 total calls). Code-domain prompts. Structural features only — no logprobs from Anthropic API. Prior v2.0 profile had 83% FPR on code; thresholds were derived from prose-only characterization."
+
+api:
+  provider: anthropic
+  endpoint: "Anthropic API (https://api.anthropic.com/v1/messages)"
+  logprobs_available: false
+
+detection:
+  strategy: ensemble
+  polarity: normal
+  min_required_features: 3
+  min_contribution_threshold: 1.0
+  features:
+    char_count:
+      weight: 0.5132
+      polarity: positive
+      threshold_low: 978.0779
+      threshold_medium: 1016.7719
+      cohens_d: -0.5132
+      effect_size: medium
+      truth_mean: 900.690000
+      truth_std: 77.387900
+      fab_mean: 938.653300
+      fab_std: 70.391700
+      enabled: true
+      notes: "FAB higher. |d|=0.51. Best overall feature."
+    tokens_per_second:
+      weight: 0.4852
+      polarity: negative
+      threshold_low: 39.4369
+      threshold_medium: 36.8560
+      cohens_d: 0.4852
+      effect_size: small
+      truth_mean: 44.598800
+      truth_std: 5.161900
+      fab_mean: 42.127100
+      fab_std: 5.026300
+      enabled: false
+      notes: "TRUTH higher. |d|=0.49. Timing feature — DISABLED: CC+Railway streaming produces 3-6 tok/sec vs training 42-45, completely out of distribution."
+    word_count:
+      weight: 0.4488
+      polarity: positive
+      threshold_low: 117.4204
+      threshold_medium: 123.0923
+      cohens_d: -0.4488
+      effect_size: small
+      truth_mean: 106.076700
+      truth_std: 11.343700
+      fab_mean: 111.176700
+      fab_std: 11.384100
+      enabled: true
+      notes: "FAB higher. |d|=0.45."
+    total_time_s:
+      weight: 0.3747
+      polarity: positive
+      threshold_low: 6.4600
+      threshold_medium: 6.8444
+      cohens_d: -0.3747
+      effect_size: small
+      truth_mean: 5.691200
+      truth_std: 0.768800
+      fab_mean: 6.056100
+      fab_std: 1.142300
+      enabled: false
+      notes: "FAB higher. |d|=0.37. Timing feature — DISABLED: Railway streaming latency inflates all times beyond training distribution."
+    unique_word_ratio:
+      weight: 0.3290
+      polarity: positive
+      threshold_low: 0.7661
+      threshold_medium: 0.7967
+      cohens_d: -0.3290
+      effect_size: small
+      truth_mean: 0.705000
+      truth_std: 0.061100
+      fab_mean: 0.723800
+      fab_std: 0.052800
+      enabled: true
+      notes: "FAB higher. |d|=0.33."
+  excluded_features:
+    avg_word_length:
+      reason: "Negligible overall (|d|=0.12). Strong in fake_file_paths (|d|=0.83) but direction flips in wrong_signatures and fake_packages. Unstable."
+      overall_d: -0.1247
+    output_tokens:
+      reason: "Zero variance — all responses hit 250 token cap. |d|=0.00."
+
+performance:
+  validation_suite:
+    old_profile_fpr: 0.83
+    old_profile_detect: 0.88
+    notes: "v2.0 profile flagged 83% of TRUTH as HIGH (false positives) on code domain. Recalibrated thresholds are wider."
+  expected:
+    notes: "With max |d|=0.51, structural-only detection provides weak separation. Expect high FPR or low detection rate — there is no threshold setting that gives both. This profile uses wider thresholds (min_required_features: 3) to reduce false positives at the cost of detection rate."
+
+mode_gate:
+  enabled: true
+  tool_surface:
+    action: suppress
+    triggers:
+      token_count_max: 80
+      is_function_call: true
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+  caveat: "Structural features alone provide weak discrimination for Claude Sonnet code responses. Max effect size is medium (d=0.51). This profile will catch outliers but will miss fabrications that are structurally similar to truth."
+
+signals:
+  enabled: [structural, timing]
+  required: [structural]
+
+metadata:
+  generator: analyze_validation.py
+  generator_version: "1.0.0"
+  validation_date: "2026-02-15"
+  status: validated
+  dataset_size: 600
+  max_cohen_d: 0.5132
+  previous_version: "2.0"
+  previous_max_cohen_d: 1.0806
+  notes: "Recalibrated from 200-prompt x 3-run validation suite. v2.0 thresholds were from prose-only data and produced 83% FPR on code. New thresholds are wider. min_required_features raised from 2 to 3 to reduce false positives. Fundamental limitation: without logprobs, structural features provide only weak signal."

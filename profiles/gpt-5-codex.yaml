@@ -1,0 +1,144 @@
+model: "gpt-5-codex"
+version: "3.0"
+type: api
+generated: "2026-02-14T12:00:00Z"
+
+characterization:
+  date: "2026-02-14"
+  prompts: 600  # 400 at 250tok + 200 at 100tok
+  features: 7
+  token_limit: 100  # Optimal for code domain
+  note: "100-token code domain thresholds (v3.0). All features stronger than 250-token baseline."
+
+api:
+  provider: openai
+  endpoint: "OpenAI Responses API (https://api.openai.com/v1/responses)"
+  logprobs_available: false
+  reasoning_tokens_available: true
+
+detection:
+  strategy: ensemble
+  polarity: normal
+  alpha: 0.12
+  bias: 1.95
+  min_required_features: 3
+  min_contribution_threshold: 2.0
+  thresholds:
+    low: 0.45
+    medium: 0.55
+  features:
+    reasoning_tokens:
+      weight: 1.7146
+      polarity: positive
+      threshold_low: 41.4359
+      threshold_medium: 57.2718
+      cohens_d: -1.7146
+      effect_size: very_large
+      truth_mean: 25.60
+      truth_std: 31.6718
+      fab_mean: 64.00
+      fab_std: 0.0
+      enabled: true
+    visible_tokens:
+      weight: 1.9968
+      polarity: negative
+      threshold_low: 42.7293
+      threshold_medium: 20.4187
+      cohens_d: 1.9968
+      effect_size: very_large
+      truth_mean: 65.04
+      truth_std: 44.6213
+      fab_mean: 1.34
+      fab_std: 6.6505
+      enabled: true
+    reasoning_ratio:
+      weight: 1.9948
+      polarity: positive
+      threshold_low: 0.5727
+      threshold_medium: 0.7958
+      cohens_d: -1.9948
+      effect_size: very_large
+      truth_mean: 0.3496
+      truth_std: 0.4462
+      fab_mean: 0.9863
+      fab_std: 0.068
+      enabled: true
+    word_count:
+      weight: 1.9451
+      polarity: negative
+      threshold_low: 17.2510
+      threshold_medium: 7.4220
+      cohens_d: 1.9451
+      effect_size: very_large
+      truth_mean: 27.08
+      truth_std: 19.6581
+      fab_mean: 0.04
+      fab_std: 0.2828
+      enabled: true
+    char_count:
+      weight: 1.9134
+      polarity: negative
+      threshold_low: 118.8941
+      threshold_medium: 49.2882
+      cohens_d: 1.9134
+      effect_size: very_large
+      truth_mean: 188.50
+      truth_std: 139.2118
+      fab_mean: 0.14
+      fab_std: 0.9899
+      enabled: true
+    output_tokens:
+      weight: 2.0703
+      polarity: negative
+      threshold_low: 82.6644
+      threshold_medium: 74.6889
+      cohens_d: 2.0703
+      effect_size: very_large
+      truth_mean: 90.64
+      truth_std: 15.9511
+      fab_mean: 65.34
+      fab_std: 6.6505
+      enabled: true
+    tokens_per_second:
+      weight: 1.4223
+      polarity: negative
+      threshold_low: 61.4872
+      threshold_medium: 54.8185
+      cohens_d: 1.4223
+      effect_size: very_large
+      truth_mean: 68.1558
+      truth_std: 13.3373
+      fab_mean: 52.8742
+      fab_std: 7.28
+      enabled: true
+
+performance:
+  code_100tok_accuracy: 0.95
+  code_250tok_accuracy: 0.82
+  improvement: "+13% accuracy from 100-token window"
+  n_truth: 250
+  n_fab: 250
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+  recommended_max_output_tokens: 100
+
+signals:
+  enabled: [reasoning_tokens, structural]
+  required: []
+
+metadata:
+  generator: char_gpt5_codex_100tok.py
+  generator_version: "3.0.0"
+  validation_date: "2026-02-14"
+  status: validated
+  dataset_size: 600
+  max_cohen_d: 2.0703
+  notes: >
+    v3.0: Updated with 100-token code domain thresholds. All 7 features show
+    stronger separation than the 250-token baseline. Reasoning_ratio d=-1.99
+    (was -1.20). Output_tokens d=+2.07 (was +0.95). At 100 tokens, fabricated
+    content burns all tokens on reasoning (64 reasoning, 0 visible) while
+    truthful content produces 100 visible tokens with 0 reasoning.

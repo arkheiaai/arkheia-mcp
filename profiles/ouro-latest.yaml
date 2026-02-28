@@ -1,0 +1,171 @@
+model: "zoecohn4/Ouro:latest"
+version: "1.0"
+type: local_ollama
+generated: "2026-02-26T10:50:00Z"
+
+characterization:
+  date: "2026-02-26"
+  prompts: 200
+  features: 5
+  token_limit: 500
+  domains_tested: [prose]
+  status: validated
+  notes: >
+    Single-corpus characterization (prose factual Q&A, 100 TRUTH + 100 FAB).
+    Loop-generation / thinking-phase: 0/200 responses used <think> tags —
+    Ouro does NOT surface thinking tokens externally on this corpus type.
+    Dominant signal is verbosity + confidence variance, not logprob magnitude.
+    Cross-domain validation (code corpus) not yet performed — verbosity features
+    flagged as prose-only until validated.
+
+api:
+  provider: ollama_local
+  endpoint: "http://localhost:11434/api/chat"
+  logprobs_available: true
+  logprobs_mode: streaming
+  notes: "Ollama /api/chat with logprobs:true, top_logprobs:5. 4.7GB model, ~17 tok/s."
+
+detection:
+  strategy: multi_feature
+  polarity: normal
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  cross_domain_validated: false
+  features:
+    top1_confidence_std:
+      weight: 1.2921
+      polarity: positive
+      threshold_low: 0.2439
+      threshold_medium: 0.2518
+      cohens_d: -1.2921
+      effect_size: very large
+      truth_mean: 0.2359
+      truth_std: 0.0123
+      fab_mean: 0.2518
+      fab_std: 0.0123
+      enabled: true
+      cross_domain_stable: unknown
+      notes: >
+        Strongest feature. FAB has higher variance in top-1 token confidence.
+        Per-response normalized — expected to be cross-domain stable (not validated yet).
+        Note: grok profile found this feature flipped direction across domains — monitor.
+
+    entropy_std:
+      weight: 1.2699
+      polarity: positive
+      threshold_low: 0.4980
+      threshold_medium: 0.5085
+      cohens_d: -1.2699
+      effect_size: very large
+      truth_mean: 0.4875
+      truth_std: 0.0175
+      fab_mean: 0.5085
+      fab_std: 0.0156
+      enabled: true
+      cross_domain_stable: unknown
+      notes: >
+        FAB has higher entropy variability across tokens. Per-response normalized.
+        Closely correlated with top1_confidence_std — may reduce to one feature
+        if confirmed redundant after cross-domain validation.
+
+    avg_word_length:
+      weight: 1.1759
+      polarity: positive
+      threshold_low: 4.9276
+      threshold_medium: 5.0798
+      cohens_d: -1.1759
+      effect_size: large
+      truth_mean: 4.7753
+      truth_std: 0.2291
+      fab_mean: 5.0798
+      fab_std: 0.2857
+      enabled: false
+      cross_domain_stable: unknown
+      notes: >
+        DISABLED pending cross-domain validation. FAB responses use longer/more complex
+        words on prose corpus (4.78 vs 5.08 chars). Likely domain-sensitive:
+        code domain has different word-length distribution. Enable after code validation.
+
+    top1_confidence_mean:
+      weight: 0.6484
+      polarity: negative
+      threshold_low: 0.7404
+      threshold_medium: 0.7297
+      cohens_d: 0.6484
+      effect_size: medium
+      truth_mean: 0.7511
+      truth_std: 0.0327
+      fab_mean: 0.7297
+      fab_std: 0.0334
+      enabled: true
+      cross_domain_stable: unknown
+      notes: >
+        TRUTH has higher top-1 confidence (0.751 vs 0.730). Fires when value drops
+        below threshold. Standard logprob-derived feature. Complements entropy_std.
+
+    mean_logprob:
+      weight: 0.4232
+      polarity: negative
+      threshold_low: -0.6788
+      threshold_medium: -0.7015
+      cohens_d: 0.4232
+      effect_size: small
+      truth_mean: -0.6561
+      truth_std: 0.1052
+      fab_mean: -0.7015
+      fab_std: 0.1097
+      enabled: true
+      cross_domain_stable: unknown
+      notes: >
+        Small but significant (p=0.003). TRUTH less negative (higher confidence).
+        Ouro's mean_logprob range (-0.65 to -0.70) is notably lower than Grok
+        (-0.13 to -0.21) — this model has higher baseline uncertainty overall.
+
+  excluded_features:
+    char_count:
+      reason: "Prompt-length dependent. FAB responses longer (1624 vs 1201 chars, d=-1.07) but this may reflect prompt complexity not fabrication."
+      cohens_d: -1.0714
+    token_count:
+      reason: "Prompt-length dependent. Same as char_count (d=-1.02). Included in ans_token_est which is also excluded."
+      cohens_d: -1.0249
+    total_time_s:
+      reason: "Derived from token_count — inherits same prompt-length dependency."
+      cohens_d: -1.0177
+    word_count:
+      reason: "Prompt-length dependent (d=-0.91). Not a reliable per-response signal."
+      cohens_d: -0.9074
+    tokens_per_second:
+      reason: "FAB slightly faster (17.0 vs 16.4 tok/s, d=-0.70) — surprising but may be hardware/caching artifact. Medium effect but mechanistically unclear."
+      cohens_d: -0.7040
+
+performance:
+  prose:
+    truth_n: 100
+    fab_n: 100
+    large_features: 10
+    medium_features: 12
+    max_cohens_d: 1.2921
+    notes: "Single-corpus run. Strong separation on confidence variance and verbosity features."
+  cross_domain:
+    stable_features: null
+    notes: "Cross-domain validation not yet performed. Schedule code-corpus run to validate."
+
+thinking_phase:
+  thinking_detected: false
+  thinking_rate: 0.0
+  thinking_tags_observed: "<think></think>"
+  notes: >
+    Despite being marketed as a loop-generation / chain-of-thought model,
+    Ouro does NOT produce <think> tags on factual Q&A prompts.
+    Loop-generation may be internal only (no external token surfacing),
+    or may only activate on specific prompt types not present in this corpus.
+    The thinking-phase logprob features (thinking_mean_logprob, logprob_phase_delta)
+    are identical to mean_logprob since no thinking was observed.
+
+deployment:
+  recommended_for_production: false
+  requires_api_key: false
+  notes: >
+    Local Ollama model only. Do not deploy to Railway proxy (not accessible via API).
+    Profile is for local detection use via the NSSM proxy service.
+    Promote to recommended_for_production=true after cross-domain validation.

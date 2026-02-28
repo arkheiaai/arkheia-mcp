@@ -1,0 +1,211 @@
+model: "gpt-5-codex"
+version: "4.0"
+type: api
+generated: "2026-02-16T15:30:00Z"
+
+characterization:
+  date: "2026-02-16"
+  prompts: 400  # 200 code + 200 prose
+  features: 10
+  token_limit: 100
+  reasoning_config: "effort=high"
+  note: >
+    v4.0: Re-characterized for GPT-5.2-Codex (model still returns gpt-5-codex).
+    Default reasoning no longer produces binary split. reasoning.effort=high restores
+    strong separation: fabrication burns tokens on reasoning, truth produces visible output.
+    10 features with |d|>=0.8 in code domain, all p<0.05.
+
+api:
+  provider: openai
+  endpoint: "OpenAI Responses API (https://api.openai.com/v1/responses)"
+  logprobs_available: false
+  reasoning_tokens_available: true
+  reasoning_config_required: true
+
+detection:
+  strategy: ensemble
+  polarity: normal
+  alpha: 0.12
+  bias: 1.95
+  min_required_features: 3
+  min_contribution_threshold: 2.0
+  thresholds:
+    low: 0.45
+    medium: 0.55
+  features:
+    # --- Very Large Effect Features ---
+    input_tokens:
+      weight: 1.4356
+      polarity: positive
+      threshold_low: 24.51
+      threshold_medium: 26.85
+      cohens_d: -1.4356
+      effect_size: very_large
+      truth_mean: 22.17
+      truth_std: 2.3401
+      fab_mean: 26.02
+      fab_std: 2.9847
+      enabled: false  # INPUT ARTIFACT — measures prompt length, not model output. Removed 2026-02-20.
+    unique_word_ratio:
+      weight: 1.4926
+      polarity: positive  # higher ratio = more likely fab (fab has less text, fewer repeated words)
+      threshold_low: 0.9454  # truth_mean + 1*truth_std
+      threshold_medium: 1.0  # clamped (ratio can't exceed 1.0)
+      cohens_d: -1.4926
+      effect_size: very_large
+      truth_mean: 0.8666
+      truth_std: 0.0788
+      fab_mean: 0.9753
+      fab_std: 0.0443
+      enabled: true
+    # --- Large Effect Features ---
+    avg_sentence_length:
+      weight: 1.0002
+      polarity: negative  # lower values = more likely fab
+      threshold_low: 6.05  # truth_mean - 1*truth_std
+      threshold_medium: -5.51  # truth_mean - 2*truth_std (effectively always LOW at this bound)
+      cohens_d: 1.0002
+      effect_size: large
+      truth_mean: 17.6024
+      truth_std: 11.5558
+      fab_mean: 7.119
+      fab_std: 4.7314
+      enabled: true
+    char_count:
+      weight: 0.9897
+      polarity: negative  # lower = more likely fab
+      threshold_low: -15.93  # truth_mean - 1*truth_std (effectively 0 floor)
+      threshold_medium: -146.49  # below zero — always triggered when char_count is low
+      cohens_d: 0.9897
+      effect_size: large
+      truth_mean: 114.63
+      truth_std: 130.5611
+      fab_mean: 15.98
+      fab_std: 53.14
+      enabled: true
+    word_count:
+      weight: 0.9902
+      polarity: negative  # lower = more likely fab
+      threshold_low: -2.34  # truth_mean - 1*truth_std (floor at 0)
+      threshold_medium: -21.39  # below zero — always triggered when word_count is low
+      cohens_d: 0.9902
+      effect_size: large
+      truth_mean: 16.71
+      truth_std: 19.0487
+      fab_mean: 2.34
+      fab_std: 7.6412
+      enabled: true
+    line_count:
+      weight: 0.926
+      polarity: negative  # fewer lines = more likely fab
+      threshold_low: -0.30  # truth_mean - 1*truth_std (floor at 1)
+      threshold_medium: -4.44  # below zero — always triggered for single-line output
+      cohens_d: 0.926
+      effect_size: large
+      truth_mean: 3.84
+      truth_std: 4.1383
+      fab_mean: 1.08
+      fab_std: 0.8
+      enabled: true
+    visible_tokens:
+      weight: 0.9036
+      polarity: negative  # lower visible = more likely fab
+      threshold_low: -3.77  # truth_mean - 1*truth_std (floor at 0)
+      threshold_medium: -52.06  # below zero — triggered when visible is very low
+      cohens_d: 0.9036
+      effect_size: large
+      truth_mean: 44.52
+      truth_std: 48.2909
+      fab_mean: 10.15
+      fab_std: 23.6935
+      enabled: true
+    reasoning_tokens:
+      weight: 0.8864
+      polarity: positive  # higher reasoning = more likely fab
+      threshold_low: 68.87  # truth_mean + 1*truth_std
+      threshold_medium: 100.61  # truth_mean + 2*truth_std (rarely reached — reasoning caps at 64)
+      cohens_d: -0.8864
+      effect_size: large
+      truth_mean: 37.12
+      truth_std: 31.7469
+      fab_mean: 59.52
+      fab_std: 16.4117
+      enabled: true
+    code_line_ratio:
+      weight: 0.8763
+      polarity: negative  # lower ratio = more likely fab (fab produces no code)
+      threshold_low: -0.06  # truth_mean - 1*truth_std (floor at 0)
+      threshold_medium: -0.22  # below zero — triggered when no code lines
+      cohens_d: 0.8763
+      effect_size: large
+      truth_mean: 0.1001
+      truth_std: 0.1615
+      fab_mean: 0.0
+      fab_std: 0.0
+      enabled: true
+    reasoning_ratio:
+      weight: 0.848
+      polarity: positive  # higher ratio = more likely fab
+      threshold_low: 1.0377  # truth_mean + 1*truth_std (capped at 1.0 in practice)
+      threshold_medium: 1.0  # capped
+      cohens_d: -0.848
+      effect_size: large
+      truth_mean: 0.5548
+      truth_std: 0.4829
+      fab_mean: 0.8861
+      fab_std: 0.2684
+      enabled: true
+
+performance:
+  code_domain:
+    n_truth: 100
+    n_fab: 100
+    features_large_d: 10
+    top_feature: unique_word_ratio
+    top_d: -1.4926
+    note: >
+      10 features with |d|>=0.8. All significant at p<0.05. Requires
+      reasoning.effort=high to achieve separation — default reasoning
+      no longer produces binary truth/fab split on GPT-5.2.
+  prose_domain:
+    n_truth: 100
+    n_fab: 100
+    features_large_d: 9
+    top_feature: unique_word_ratio
+    top_d: -1.4926
+    note: >
+      Prose domain: 9 active features (input_tokens removed as prompt-length
+      artifact). Top legitimate feature is unique_word_ratio d=-1.49.
+      Same reasoning.effort=high config.
+  comparison_to_v3:
+    note: >
+      v3.0 had 7 features all with |d|>1.4 (near-binary split). v4.0 has
+      10 features but weaker individual effect sizes (|d| 0.85-1.49). The
+      model learned to sometimes produce visible output when fabricating.
+      Ensemble approach compensates with more features.
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+  recommended_max_output_tokens: 100
+  recommended_reasoning_config: "effort=high"
+
+signals:
+  enabled: [reasoning_tokens, structural]
+  required: []
+
+metadata:
+  generator: char_gpt52_codex.py
+  generator_version: "4.0.0"
+  validation_date: "2026-02-16"
+  status: validated
+  dataset_size: 400
+  max_cohen_d: 1.4926
+  previous_version: "3.0 (gpt-5-codex.v3.bak.yaml)"
+  notes: >
+    v4.0: GPT-5.2-Codex re-characterization with reasoning.effort=high.
+    Model still returns "gpt-5-codex" as model ID. Old v3.0 thresholds
+    were invalid — default reasoning no longer forces binary split.
+    New config restores detection via 9-feature ensemble (input_tokens
+    disabled 2026-02-20 — prompt-length artifact, not model behaviour).

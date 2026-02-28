@@ -1,0 +1,97 @@
+model: "gpt-5.1-codex-mini"
+version: "1.0"
+type: api
+generated: "2026-02-25T12:00:00Z"
+
+characterization:
+  date: "2026-02-25"
+  prompts: 200
+  features: 3
+  token_limit: 100
+  domains_tested: [code]
+  status: provisional
+  notes: "Code-domain only. 200/200 prompts completed. TRUTH=100, FAB=100 (code corpus). Uses OpenAI Responses API — no logprobs available. Structural/timing features only."
+
+api:
+  provider: openai
+  endpoint: "OpenAI Responses API (https://api.openai.com/v1/responses)"
+  logprobs_available: false
+
+detection:
+  strategy: multi_feature
+  polarity: normal
+  min_required_features: 2
+  min_contribution_threshold: 0.5
+  cross_domain_validated: false
+  features:
+    unique_token_ratio:
+      weight: 0.7879
+      polarity: positive
+      threshold_low: 0.910000
+      threshold_medium: 0.941000
+      cohens_d: 0.7879
+      effect_size: medium
+      truth_mean: 0.886466
+      truth_std: 0.078515
+      fab_mean: 0.942299
+      fab_std: 0.058643
+      enabled: true
+      cross_domain_stable: null
+      notes: "FAB responses have higher unique token ratio (shorter, more lexically diverse). d=+0.79. Structural — no logprobs needed."
+    token_count:
+      weight: 0.5775
+      polarity: negative
+      threshold_low: 19.000000
+      threshold_medium: 11.000000
+      cohens_d: -0.5775
+      effect_size: medium
+      truth_mean: 27.650000
+      truth_std: 16.880672
+      fab_mean: 17.490000
+      fab_std: 18.275940
+      enabled: true
+      cross_domain_stable: null
+      notes: "FAB responses are shorter (mean 17 vs 28 tokens). d=-0.58. Codex fabrications tend to be terse denials or minimal outputs."
+    time_to_first_token_ms:
+      weight: 0.5212
+      polarity: positive
+      threshold_low: 950.000000
+      threshold_medium: 1250.000000
+      cohens_d: 0.5212
+      effect_size: medium
+      truth_mean: 351.020980
+      truth_std: 598.515021
+      fab_mean: 715.898210
+      fab_std: 788.612440
+      enabled: true
+      cross_domain_stable: null
+      notes: "FAB has higher TTFT (non-streaming Responses API — single latency value). High variance reduces reliability. d=+0.52."
+
+performance:
+  code:
+    n_truth: 100
+    n_fab: 100
+    notes: "Symmetric corpus. All 200 prompts completed."
+  cross_domain:
+    stable_features: null
+    notes: "Cross-domain validation not yet performed."
+
+deployment:
+  recommended_for_production: false
+  requires_api_key: true
+  cost_per_query: variable
+  notes: "Provisional — structural-only, code domain only. Max d=0.79 is moderate. Similar ceiling to Claude structural detection. Upgrade path: if OpenAI adds logprob support to Responses API."
+
+signals:
+  enabled: [structural, timing]
+  required: []
+
+metadata:
+  generator: arkheia-model-lab
+  generator_version: "1.0.0"
+  validation_date: null
+  status: provisional
+  dataset_size: 200
+  max_cohen_d: 0.7879
+  characterization_runs: [106]
+  notes: "Structural-only profile (Responses API has no logprobs). Max d=0.79 (unique_token_ratio). Compare: gpt-5.1-codex-max max d=0.27 — not deployable. gpt-5.1-codex-mini is the viable Codex variant. Pending: prose characterisation and cross-domain validation."

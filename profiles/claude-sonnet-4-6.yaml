@@ -1,0 +1,122 @@
+model: "claude-sonnet-4-6"
+version: "1.0"
+type: api
+generated: "2026-02-21T09:00:00Z"
+
+characterization:
+  date: "2026-02-21"
+  prompts: 200
+  features: 2
+  token_limit: 250
+  notes: >
+    v1.0: Code-domain characterization (200 prompts, 100 TRUTH/100 FAB).
+    Timing cluster (mean/p50/p95/p99/max latency, all d≈1.07) is serially
+    correlated — collapsed to single representative: tokens_per_second.
+    unique_token_ratio provides independent structural signal. Both features
+    cross-domain stable (prose: d=+0.45**, d=-0.35*). truth_mean/std estimated
+    from Cohen's d and fab group statistics.
+
+api:
+  provider: anthropic
+  endpoint: "Anthropic Messages API (https://api.anthropic.com/v1/messages)"
+  logprobs_available: false
+  thinking_model: false
+
+detection:
+  strategy: ensemble
+  polarity: normal
+  alpha: 0.05
+  bias: 0.50
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  evidence_depth_limited: true  # Code-domain profile — evidence_depth_limited on all detections
+  features:
+    tokens_per_second:
+      weight: 1.133
+      polarity: negative  # lower tok/s = more likely fab (fabrication generates more slowly)
+      threshold_low: 22.44   # truth_mean - 1×truth_std (26.44 - 4.0)
+      threshold_medium: 18.44  # truth_mean - 2×truth_std (26.44 - 8.0)
+      cohens_d: -1.133
+      effect_size: large
+      truth_mean: 26.44
+      truth_std: 4.0
+      fab_mean: 23.10
+      fab_std: 2.95
+      enabled: false  # Disabled: unreliable via local proxy (total_time_s includes Railway latency)
+    unique_token_ratio:
+      weight: 0.736
+      polarity: positive  # higher ratio = more likely fab (code truth repeats keywords; fab uses diverse invented vocab)
+      threshold_low: 0.760   # truth_mean + 1×truth_std (0.705 + 0.055)
+      threshold_medium: 0.815  # truth_mean + 2×truth_std (0.705 + 0.110)
+      cohens_d: 0.736
+      effect_size: medium
+      truth_mean: 0.705
+      truth_std: 0.055
+      fab_mean: 0.747
+      fab_std: 0.057
+      enabled: true
+
+performance:
+  code_domain:
+    n_truth: 100
+    n_fab: 100
+    features_significant: 2
+    top_feature: tokens_per_second
+    top_d: -1.133
+    note: >
+      Both features significant at p<0.01. Latency cluster (6 features, all
+      d≈1.07) collapsed to tokens_per_second as sole timing representative.
+      unique_token_ratio (d=+0.74) provides independent structural signal.
+  prose_domain:
+    n_truth: 100
+    n_fab: 100
+    features_significant: 2
+    top_feature: unique_token_ratio
+    top_d: 0.454
+    note: >
+      Weaker in prose: unique_token_ratio d=+0.45**, tokens_per_second d=-0.35*.
+      Profile calibrated on code domain — timing threshold conservative for prose.
+      unique_token_ratio is primary discriminator in prose.
+
+mode_gate:
+  enabled: true
+  tool_surface:
+    action: suppress
+    triggers:
+      token_count_max: 500  # Raised from 80: local proxy timing is distorted by Railway
+      # latency, making tokens_per_second unreliable for all but very long responses.
+      # unique_token_ratio alone is insufficient for analytical prose (code-domain profile
+      # only). Suppress all CC responses < 500 words locally; rely on Railway for detection.
+      is_function_call: true
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+  detection_capability: moderate
+  scope: code_domain_only
+  warning: >
+    evidence_depth_limited — calibrated on code-domain prompts only.
+    Do not use for prose or general-purpose queries: false positive rate
+    is not validated and prose signal is substantially weaker (max d=0.45).
+    All detections carry evidence_depth_limited=true by design.
+  notes: >
+    2-feature profile. Code domain max d=1.13, prose max d=0.45.
+    unique_token_ratio requires streaming token collection.
+    tokens_per_second uses server-side output_tokens + total_time_s (privacy-preserving).
+
+signals:
+  enabled: [latency, tokens]
+  required: []
+
+metadata:
+  generator: arkheia-model-lab
+  generator_version: "1.0.0"
+  validation_date: "2026-02-21"
+  status: experimental
+  dataset_size: 200
+  max_cohen_d: 1.133
+  notes: >
+    v1.0 experimental. truth_mean/std estimated from fab group statistics + Cohen's d
+    (DB stores fab group only). Recommend re-characterization with larger corpus
+    and prose-domain calibration before full production deployment.

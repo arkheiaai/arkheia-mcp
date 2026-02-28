@@ -1,0 +1,37 @@
+# Arkheia Enterprise Proxy -- configuration template
+# No secrets in this file. All secrets via OS environment variables.
+#
+# Required environment variables:
+#   ARKHEIA_API_KEY  -- registry authentication (leave unset to disable registry)
+#
+# Optional environment variable overrides:
+#   ARKHEIA_PROFILES_DIR  -- override detection.profile_dir (useful for local dev)
+#   ARKHEIA_AUDIT_LOG     -- override audit.log_path
+#   ARKHEIA_CONFIG        -- path to this config file
+
+proxy:
+  host: 0.0.0.0
+  port: 8099
+  log_level: INFO
+
+detection:
+  profile_dir: /etc/arkheia/profiles   # populated by registry client or manually
+  high_risk_action: warn               # warn | block
+  unknown_action: pass                 # pass | warn | block
+
+registry:
+  url: https://registry.arkheia.ai
+  # api_key injected from ARKHEIA_API_KEY environment variable -- never put here
+  pull_on_startup: true
+  pull_interval_hours: 24
+  pin_major_version: null              # null = always latest; set to 2 to pin v2.x
+
+audit:
+  log_path: /var/log/arkheia/audit.jsonl
+  retention_days: 365
+  include_prompt_hash: true            # sha256 only -- prompt text never logged
+
+mcp_server:
+  enabled: true
+  port: 8100
+  proxy_url: http://localhost:8099

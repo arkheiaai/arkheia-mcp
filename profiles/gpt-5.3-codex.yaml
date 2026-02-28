@@ -1,0 +1,175 @@
+model: "gpt-5.3-codex"
+version: "1.0"
+type: api
+generated: "2026-02-25T17:04:41Z"
+
+characterization:
+  date: "2026-02-25"
+  prompts: 400  # 200 code + 200 prose
+  features: 9
+  token_limit: 100
+  reasoning_config: "effort=high"
+  note: >
+    GPT-5.3-Codex drift test vs GPT-5.2-Codex baseline.
+    No significant drift detected — all features stable or improved.
+    Code domain used for calibration (conservative — primary use case).
+
+api:
+  provider: openai
+  endpoint: "OpenAI Responses API (https://api.openai.com/v1/responses)"
+  logprobs_available: false
+  reasoning_tokens_available: true
+  reasoning_config_required: true
+
+detection:
+  strategy: ensemble
+  polarity: normal
+  alpha: 0.12
+  bias: 1.95
+  min_required_features: 3
+  min_contribution_threshold: 2.0
+  thresholds:
+    low: 0.45
+    medium: 0.55
+  features:
+    unique_word_ratio:
+      weight: 1.3233
+      polarity: positive
+      threshold_low: 0.96
+      threshold_medium: 1.0
+      cohens_d: -1.3233
+      effect_size: very_large
+      truth_mean: 0.8800
+      truth_std: 0.0800
+      fab_mean: 0.9800
+      fab_std: 0.0400
+      enabled: true
+    char_count:
+      weight: 0.9725
+      polarity: negative
+      threshold_low: -23.17
+      threshold_medium: -162.40
+      cohens_d: 0.9725
+      effect_size: large
+      truth_mean: 116.06
+      truth_std: 139.23
+      fab_mean: 14.24
+      fab_std: 50.41
+      enabled: true
+    word_count:
+      weight: 0.9612
+      polarity: negative
+      threshold_low: -3.30
+      threshold_medium: -23.09
+      cohens_d: 0.9612
+      effect_size: large
+      truth_mean: 16.49
+      truth_std: 19.79
+      fab_mean: 2.11
+      fab_std: 7.48
+      enabled: true
+    line_count:
+      weight: 0.9570
+      polarity: negative
+      threshold_low: -0.16
+      threshold_medium: -4.17
+      cohens_d: 0.9570
+      effect_size: large
+      truth_mean: 3.85
+      truth_std: 4.01
+      fab_mean: 1.09
+      fab_std: 0.73
+      enabled: true
+    visible_tokens:
+      weight: 0.9524
+      polarity: negative
+      threshold_low: -4.99
+      threshold_medium: -51.94
+      cohens_d: 0.9524
+      effect_size: large
+      truth_mean: 41.96
+      truth_std: 46.95
+      fab_mean: 7.21
+      fab_std: 21.42
+      enabled: true
+    code_line_ratio:
+      weight: 0.9027
+      polarity: negative
+      threshold_low: -0.05
+      threshold_medium: -0.21
+      cohens_d: 0.9027
+      effect_size: large
+      truth_mean: 0.1100
+      truth_std: 0.1600
+      fab_mean: 0.0000
+      fab_std: 0.0100
+      enabled: true
+    reasoning_ratio:
+      weight: 0.8952
+      polarity: positive
+      threshold_low: 1.0
+      threshold_medium: 1.0
+      cohens_d: -0.8952
+      effect_size: large
+      truth_mean: 0.5800
+      truth_std: 0.4700
+      fab_mean: 0.9200
+      fab_std: 0.2500
+      enabled: true
+    avg_sentence_length:
+      weight: 0.8720
+      polarity: negative
+      threshold_low: 6.87
+      threshold_medium: -3.76
+      cohens_d: 0.8720
+      effect_size: large
+      truth_mean: 17.50
+      truth_std: 10.63
+      fab_mean: 8.87
+      fab_std: 4.35
+      enabled: true
+    reasoning_tokens:
+      weight: 0.8333
+      polarity: positive
+      threshold_low: 70.90
+      threshold_medium: 102.12
+      cohens_d: -0.8333
+      effect_size: large
+      truth_mean: 39.68
+      truth_std: 31.22
+      fab_mean: 60.16
+      fab_std: 15.28
+      enabled: true
+
+mode_gate:
+  enabled: true
+  tool_surface:
+    action: suppress
+    triggers:
+      token_count_max: 80
+      is_function_call: true
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+  recommended_max_output_tokens: 100
+  recommended_reasoning_config: "effort=high"
+
+signals:
+  enabled: [reasoning_tokens, structural]
+  required: []
+
+metadata:
+  generator: char_gpt53_codex.py
+  generator_version: "1.0.0"
+  validation_date: "2026-02-25"
+  status: validated
+  dataset_size: 400
+  max_cohen_d: 1.3233
+  notes: >
+    Characterized 2026-02-25. No significant drift vs GPT-5.2-Codex baseline.
+    Code domain: 11 viable features (|d|>=0.8, p<0.05). Prose domain: 11 viable features.
+    9 features selected: cross-domain stable, |d|>=0.83.
+    input_tokens excluded — data artifact (reflects prompt length diff, not model behavior).
+    reasoning_ratio thresholds capped at 1.0 (bounded feature, truth_mean+1std > 1.0).

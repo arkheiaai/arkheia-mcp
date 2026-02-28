@@ -1,0 +1,134 @@
+model: "grok-3-mini-fast"
+version: "4.0"
+type: api
+generated: "2026-02-14T23:05:00Z"
+
+characterization:
+  date: "2026-02-14"
+  prompts: 400
+  features: 4
+  token_limit: 250
+  domains_tested: [prose, code]
+  status: validated
+  notes: "Cross-domain validated at 250 tokens. Prose corpus (200 prompts) + code corpus (200 prompts). Only features stable across both domains retained."
+
+api:
+  provider: xai
+  endpoint: "xAI API (https://api.x.ai/v1/chat/completions)"
+  logprobs_available: true
+
+detection:
+  strategy: multi_feature
+  polarity: normal
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  cross_domain_validated: true
+  features:
+    mean_logprob:
+      weight: 2.2097
+      polarity: negative
+      threshold_low: -0.167692
+      threshold_medium: -0.187980
+      cohens_d: 2.2097
+      cohens_d_code: 1.3988
+      effect_size: huge
+      truth_mean: -0.127116
+      truth_std: 0.033560
+      fab_mean: -0.208269
+      fab_std: 0.039640
+      enabled: true
+      cross_domain_stable: true
+      notes: "Strongest cross-domain feature. TRUTH higher in both prose (d=+2.21) and code (d=+1.40)."
+    perplexity_mean:
+      weight: 1.7856
+      polarity: positive
+      threshold_low: 1.424566
+      threshold_medium: 1.486633
+      cohens_d: -1.7856
+      cohens_d_code: -1.3986
+      effect_size: very large
+      truth_mean: 1.300432
+      truth_std: 0.108051
+      fab_mean: 1.548700
+      fab_std: 0.164280
+      enabled: true
+      cross_domain_stable: true
+      notes: "FAB higher in both domains. Mathematically linked to mean_logprob."
+    entropy_mean:
+      weight: 1.0682
+      polarity: positive
+      threshold_low: 0.360000
+      threshold_medium: 0.370000
+      cohens_d: -1.0682
+      cohens_d_code: -1.6579
+      effect_size: large
+      truth_mean: 0.341340
+      truth_std: 0.040416
+      fab_mean: 0.378533
+      fab_std: 0.050908
+      enabled: true
+      cross_domain_stable: true
+      notes: "FAB higher in both domains. Stronger in code (d=-1.66) than prose (d=-1.07)."
+    unique_word_ratio:
+      weight: 1.0748
+      polarity: positive
+      threshold_low: 0.644000
+      threshold_medium: 0.655000
+      cohens_d: -1.0748
+      cohens_d_code: -1.0443
+      effect_size: large
+      truth_mean: 0.621200
+      truth_std: 0.050082
+      fab_mean: 0.666000
+      fab_std: 0.034585
+      enabled: true
+      cross_domain_stable: true
+      notes: "FAB higher in both domains. Structural feature — no logprobs needed."
+  excluded_features:
+    top1_confidence_std:
+      reason: "Direction flips between prose (d=+2.21, TRUTH higher) and code (d=-1.22, FAB higher). Unreliable."
+      prose_d: 2.2113
+      code_d: -1.2212
+    logprob_iqr:
+      reason: "Prose-only (d=-1.99). Zero variance in code domain."
+      prose_d: -1.9898
+      code_d: 0.0
+    logprob_q25:
+      reason: "Prose-only (d=+1.99). Zero variance in code domain."
+      prose_d: 1.9896
+      code_d: 0.0
+
+performance:
+  prose:
+    truth_accuracy: 0.79
+    fab_accuracy: 0.91
+    combined_accuracy: 0.85
+    n_truth: 100
+    n_fab: 100
+  code:
+    n_truth: 100
+    n_fab: 50
+    notes: "50 fabrication prompts in code corpus (asymmetric)."
+  cross_domain:
+    stable_features: 4
+    excluded_features: 3
+    notes: "3 features excluded due to direction instability or domain-specific signal."
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+
+signals:
+  enabled: [logprobs, structural]
+  required: [logprobs]
+
+metadata:
+  generator: arkheia-model-lab-rechar
+  generator_version: "4.0.0"
+  validation_date: "2026-02-14"
+  status: validated
+  dataset_size: 400
+  max_cohen_d: 2.2097
+  characterization_runs: [11, 13]
+  notes: "Cross-domain validated profile. 4 features stable across prose and code. 3 features excluded (direction flip or domain-specific). mean_logprob is the anchor feature (d=+2.21 prose, d=+1.40 code)."

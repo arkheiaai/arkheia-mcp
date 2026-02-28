@@ -1,0 +1,92 @@
+model: "claude-sonnet-4-5"
+version: "2.0"
+type: api
+generated: "2026-02-19T19:30:00Z"
+
+characterization:
+  date: "2026-02-19"
+  prompts: 200
+  features: 2
+  token_limit: 250
+  notes: "v2.0: Code domain characterization (200 prompts, 100 TRUTH/100 FAB). Server-side telemetry only — no response text reading. Replaces v1.0 prose-only profile."
+
+api:
+  provider: anthropic
+  endpoint: "Anthropic Messages API (https://api.anthropic.com/v1/messages)"
+  logprobs_available: false
+  thinking_model: false
+
+detection:
+  strategy: ensemble
+  polarity: normal
+  alpha: 0.05
+  bias: 0.40
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  evidence_depth_limited: false
+  thresholds:
+    low: 5.1781
+    medium: 5.4940
+  features:
+    total_time_s:
+      weight: 1.0076
+      polarity: positive
+      threshold_low: 5.1781
+      threshold_medium: 5.4940
+      cohens_d: -1.0076
+      effect_size: large
+      truth_mean: 4.8622
+      truth_std: 0.6318
+      fab_mean: 5.5254
+      fab_std: 0.6835
+      enabled: true
+    tokens_per_second:
+      weight: 0.9849
+      polarity: negative
+      threshold_low: 20.2822
+      threshold_medium: 18.4558
+      cohens_d: 0.9849
+      effect_size: large
+      truth_mean: 22.1086
+      truth_std: 3.6528
+      fab_mean: 19.0639
+      fab_std: 2.4017
+      enabled: true
+
+performance:
+  truth_accuracy: null
+  fab_accuracy: null
+  combined_accuracy: null
+  precision: null
+  recall: null
+  f1: null
+  n_truth: 100
+  n_fab: 100
+  notes: "2 server-side features. total_time_s d=-1.01 (large), tokens_per_second d=0.98 (large). Privacy-preserving — no response text reading required."
+
+mode_gate:
+  enabled: true
+  tool_surface:
+    action: suppress
+    triggers:
+      token_count_max: 80
+      is_function_call: true
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+  detection_capability: moderate
+
+signals:
+  enabled: [latency, tokens]
+  required: [latency]
+
+metadata:
+  generator: arkheia-model-lab
+  generator_version: "3.0.0"
+  validation_date: "2026-02-19"
+  status: validated
+  dataset_size: 200
+  max_cohen_d: 1.0076
+  notes: "Server-side timing features only. Fabrication takes ~14% longer and generates ~16% fewer tokens/second."

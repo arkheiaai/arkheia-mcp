@@ -1,0 +1,163 @@
+model: "gemini-3-pro-preview"
+version: "1.0"
+type: api
+generated: "2026-02-24T00:00:00Z"
+
+characterization:
+  date: "2026-02-24"
+  prompts: 200
+  features: 8
+  token_limit: 2048
+  notes: "Strong detection surface — 8 features, all large or very large effect sizes. TRUTH produces 931 visible tokens vs FAB 688. Highest d features: unique_word_ratio (-2.34), avg_word_length (-2.29). FAB responses use more thinking tokens and fewer output tokens. prompt_token_count excluded (input artifact)."
+
+api:
+  provider: google
+  endpoint: "Google AI API (https://generativelanguage.googleapis.com/v1beta/)"
+  logprobs_available: false
+  thinking_model: true
+
+detection:
+  strategy: ensemble
+  polarity: normal
+  alpha: 0.05
+  bias: 0.40
+  min_required_features: 3
+  min_contribution_threshold: 1.5
+  thresholds:
+    low: 809.65
+    medium: 688.15
+  features:
+    unique_word_ratio:
+      weight: 2.3409
+      polarity: positive
+      threshold_low: 0.5755
+      threshold_medium: 0.6368
+      cohens_d: -2.3409
+      effect_size: very large
+      truth_mean: 0.5142
+      truth_std: 0.0340
+      fab_mean: 0.6368
+      fab_std: 0.0658
+      enabled: true
+    avg_word_length:
+      weight: 2.2922
+      polarity: positive
+      threshold_low: 5.5000
+      threshold_medium: 5.8690
+      cohens_d: -2.2922
+      effect_size: very large
+      truth_mean: 5.1306
+      truth_std: 0.2741
+      fab_mean: 5.8690
+      fab_std: 0.3638
+      enabled: true
+    thinking_token_count:
+      weight: 1.7592
+      polarity: positive
+      threshold_low: 1180.57
+      threshold_medium: 1336.01
+      cohens_d: -1.7592
+      effect_size: very large
+      truth_mean: 1025.13
+      truth_std: 85.1522
+      fab_mean: 1336.01
+      fab_std: 234.9635
+      enabled: true
+    tokens_per_second:
+      weight: 1.6936
+      polarity: negative
+      threshold_low: 38.1885
+      threshold_medium: 31.2090
+      cohens_d: 1.6936
+      effect_size: very large
+      truth_mean: 45.1680
+      truth_std: 5.3222
+      fab_mean: 31.2090
+      fab_std: 10.3705
+      enabled: true
+    word_count:
+      weight: 1.6485
+      polarity: negative
+      threshold_low: 532.46
+      threshold_medium: 435.49
+      cohens_d: 1.6485
+      effect_size: very large
+      truth_mean: 629.43
+      truth_std: 67.5464
+      fab_mean: 435.49
+      fab_std: 152.0485
+      enabled: true
+    sentence_count:
+      weight: 1.6363
+      polarity: negative
+      threshold_low: 41.99
+      threshold_medium: 32.73
+      cohens_d: 1.6363
+      effect_size: very large
+      truth_mean: 51.25
+      truth_std: 10.3352
+      fab_mean: 32.73
+      fab_std: 12.2226
+      enabled: true
+    token_count:
+      weight: 1.3869
+      polarity: negative
+      threshold_low: 809.65
+      threshold_medium: 688.15
+      cohens_d: 1.3869
+      effect_size: very large
+      truth_mean: 931.15
+      truth_std: 102.0354
+      fab_mean: 688.15
+      fab_std: 225.7970
+      enabled: true
+    is_natural_stop:
+      weight: 1.1694
+      polarity: negative
+      threshold_low: 0.34
+      threshold_medium: 0.10
+      cohens_d: 1.1694
+      effect_size: large
+      truth_mean: 0.5800
+      truth_std: 0.4960
+      fab_mean: 0.1000
+      fab_std: 0.3015
+      enabled: true
+
+performance:
+  truth_accuracy: 0.970
+  fab_accuracy: 0.870
+  combined_accuracy: 0.920
+  precision: 0.967
+  recall: 0.870
+  f1: 0.916
+  n_truth: 100
+  n_fab: 100
+  notes: "8 features — 7 very large, 1 large effect size. Strongest individual signals: unique_word_ratio and avg_word_length. thinking_token_count inverted vs flash (FAB uses more thinking). F1=0.916, very high precision (0.967)."
+
+mode_gate:
+  enabled: true
+  tool_surface:
+    action: suppress
+    triggers:
+      token_count_max: 80
+      is_function_call: true
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+  recommended_max_output_tokens: 2048
+
+signals:
+  enabled: [latency, tokens]
+  required: [latency]
+
+metadata:
+  generator: arkheia-model-lab
+  generator_version: "2.0.0"
+  validation_date: "2026-02-24"
+  status: validated
+  dataset_size: 200
+  max_cohen_d: 2.3409
+  notes: "Gemini 3 Pro Preview — 8-feature profile. Largest detection surface of any Gemini model characterised to date. max_cohen_d=2.34 on unique_word_ratio."

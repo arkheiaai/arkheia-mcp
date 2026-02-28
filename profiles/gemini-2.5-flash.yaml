@@ -1,0 +1,129 @@
+model: "gemini-2.5-flash"
+version: "3.0"
+type: api
+generated: "2026-02-19T11:30:00Z"
+
+characterization:
+  date: "2026-02-19"
+  prompts: 200
+  features: 5
+  token_limit: 1000
+  notes: "Thinking model — ~956 thinking tokens per response, ~40 visible tokens. All MAX_TOKENS. prompt_token_count excluded (input artifact). v3.0 adds thinking_per_second (d=1.01)."
+
+api:
+  provider: google
+  endpoint: "Google AI API (https://generativelanguage.googleapis.com/v1beta/)"
+  logprobs_available: false
+  thinking_model: true
+
+detection:
+  strategy: ensemble
+  polarity: normal
+  alpha: 0.05
+  bias: 0.40
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  evidence_depth_limited: true
+  thresholds:
+    low: 0.7393
+    medium: 0.6832
+  features:
+    words_per_token:
+      weight: 1.2464
+      polarity: negative
+      threshold_low: 0.7393
+      threshold_medium: 0.6832
+      cohens_d: 1.2464
+      effect_size: very large
+      truth_mean: 0.7954
+      truth_std: 0.0897
+      fab_mean: 0.6832
+      fab_std: 0.0909
+      enabled: true
+    thinking_per_second:
+      weight: 1.0091
+      polarity: negative
+      threshold_low: 170.0
+      threshold_medium: 164.5
+      cohens_d: 1.0091
+      effect_size: large
+      truth_mean: 175.1802
+      truth_std: 10.6
+      fab_mean: 164.4910
+      fab_std: 10.7
+      enabled: true
+    total_time_s:
+      weight: 0.9997
+      polarity: positive
+      threshold_low: 5.6587
+      threshold_medium: 5.8441
+      cohens_d: -0.9997
+      effect_size: large
+      truth_mean: 5.4732
+      truth_std: 0.3551
+      fab_mean: 5.8441
+      fab_std: 0.3892
+      enabled: true
+    token_density:
+      weight: 0.9591
+      polarity: positive
+      threshold_low: 0.2054
+      threshold_medium: 0.2206
+      cohens_d: -0.9591
+      effect_size: large
+      truth_mean: 0.1902
+      truth_std: 0.0298
+      fab_mean: 0.2206
+      fab_std: 0.0338
+      enabled: true
+    chars_per_token:
+      weight: 0.9268
+      polarity: negative
+      threshold_low: 4.9954
+      threshold_medium: 4.6734
+      cohens_d: 0.9268
+      effect_size: large
+      truth_mean: 5.3173
+      truth_std: 0.6893
+      fab_mean: 4.6734
+      fab_std: 0.6926
+      enabled: true
+
+performance:
+  truth_accuracy: 0.840
+  fab_accuracy: 0.630
+  combined_accuracy: 0.735
+  precision: 0.797
+  recall: 0.630
+  f1: 0.704
+  n_truth: 100
+  n_fab: 100
+  notes: "5 features, all |d| >= 0.93. Limited detection capability — no logprobs available from Google, structural-only signal surface. F1=0.704 reflects weaker FAB recall (0.630) vs strong TRUTH recall (0.840)."
+
+mode_gate:
+  enabled: true
+  tool_surface:
+    action: suppress
+    triggers:
+      token_count_max: 80
+      is_function_call: true
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+  replaces: "gemini-2.0-flash (deprecating 2026-03-31)"
+  detection_capability: limited
+
+signals:
+  enabled: [latency, tokens]
+  required: [latency]
+
+metadata:
+  generator: arkheia-model-lab
+  generator_version: "3.0.0"
+  validation_date: "2026-02-19"
+  status: validated
+  dataset_size: 200
+  max_cohen_d: 1.2464
+  notes: "Thinking model. 5 output-side features with large+ effect sizes. No logprobs — limited detection capability. prompt_token_count (d=5.27) excluded as input artifact."

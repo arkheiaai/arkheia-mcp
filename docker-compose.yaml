@@ -1,0 +1,53 @@
+version: "3.9"
+
+# Arkheia Enterprise Proxy + MCP Trust Server
+#
+# Secrets: inject ARKHEIA_API_KEY from host OS environment.
+# Never put real keys in this file.
+#
+# Usage:
+#   ARKHEIA_API_KEY=your-key docker compose up
+#
+# For local dev without registry:
+#   docker compose up
+
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: proxy/Dockerfile
+    ports:
+      - "8099:8099"
+    environment:
+      - ARKHEIA_API_KEY=${ARKHEIA_API_KEY:-}     # injected from host, empty = registry disabled
+      - ARKHEIA_ENV=${ARKHEIA_ENV:-development}
+    volumes:
+      - ./profiles:/app/profiles:ro              # read-only; registry writes go to profile_data
+      - profile_data:/etc/arkheia/profiles       # writable; registry updates land here
+      - audit_logs:/var/log/arkheia
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import httpx; httpx.get('http://localhost:8099/admin/health').raise_for_status()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  mcp_server:
+    build:
+      context: .
+      dockerfile: mcp_server/Dockerfile
+    depends_on:
+      proxy:
+        condition: service_healthy
+    environment:
+      - ARKHEIA_PROXY_URL=http://proxy:8099
+    # MCP server communicates via stdio by default.
+    # For HTTP/SSE transport, uncomment:
+    # ports:
+    #   - "8100:8100"
+    restart: unless-stopped
+
+volumes:
+  profile_data:
+  audit_logs:

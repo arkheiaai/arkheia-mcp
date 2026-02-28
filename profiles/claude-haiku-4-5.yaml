@@ -1,0 +1,102 @@
+model: "claude-haiku-4-5"
+version: "1.0"
+type: api
+generated: "2026-02-14T00:00:00Z"
+
+characterization:
+  date: "2025-10-01"
+  prompts: 100
+  features: 4
+  token_limit: 250
+  status: production
+  notes: "250-token characterization. Structural and timing features — no logprobs from Anthropic API. Prose domain results."
+
+api:
+  provider: anthropic
+  endpoint: "Anthropic API (https://api.anthropic.com/v1/messages)"
+  logprobs_available: false
+
+detection:
+  strategy: ensemble
+  polarity: normal
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  features:
+    output_tokens:
+      weight: 0.984
+      polarity: positive
+      threshold_low: 238.65
+      threshold_medium: 250.0
+      cohens_d: 0.984
+      effect_size: large
+      truth_mean: 250.0
+      truth_std: 0.0
+      fab_mean: 227.3
+      fab_std: 32.6235
+      enabled: true
+    total_time_s:
+      weight: 0.7926
+      polarity: negative
+      threshold_low: 2.82385
+      threshold_medium: 2.83485
+      cohens_d: -0.7926
+      effect_size: medium
+      truth_mean: 2.6472
+      truth_std: 0.3753
+      fab_mean: 3.0005
+      fab_std: 0.5066
+      enabled: true
+    tokens_per_second:
+      weight: 1.7268
+      polarity: positive
+      threshold_low: 86.3811
+      threshold_medium: 89.0159
+      cohens_d: 1.7268
+      effect_size: very large
+      truth_mean: 96.4585
+      truth_std: 14.8852
+      fab_mean: 76.3037
+      fab_std: 7.1327
+      enabled: true
+    unique_word_ratio:
+      weight: 1.4593
+      polarity: negative
+      threshold_low: 0.7288
+      threshold_medium: 0.7209
+      cohens_d: -1.4593
+      effect_size: very large
+      truth_mean: 0.6951
+      truth_std: 0.0516
+      fab_mean: 0.7625
+      fab_std: 0.04
+      enabled: true
+
+performance:
+  n_truth: 50
+  n_fab: 50
+
+mode_gate:
+  enabled: true
+  tool_surface:
+    action: suppress
+    triggers:
+      token_count_max: 80
+      is_function_call: true
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+
+signals:
+  enabled: [structural, timing]
+  required: [structural]
+
+metadata:
+  generator: claude-code
+  generator_version: "1.0.0"
+  validation_date: "2026-02-14"
+  status: production
+  dataset_size: 100
+  max_cohen_d: 1.7268
+  notes: "Prose domain features from 250-token characterization. 4 significant features with |d| >= 0.5. Input artifact (input_tokens) removed."
