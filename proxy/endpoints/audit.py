@@ -8,7 +8,9 @@ Used by the MCP Trust Server's arkheia_audit_log tool.
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
+
+from proxy.auth import require_auth
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +22,7 @@ async def get_audit_log(
     request: Request,
     session_id: Optional[str] = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
+    _: str = Depends(require_auth),
 ):
     """
     Retrieve detection events from the audit log.

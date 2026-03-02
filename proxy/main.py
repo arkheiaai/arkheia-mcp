@@ -25,6 +25,8 @@ from proxy.registry.validator import ProfileValidator
 from proxy.endpoints.detect import router as detect_router
 from proxy.endpoints.admin import router as admin_router
 from proxy.endpoints.audit import router as audit_router
+from proxy.endpoints.passthrough import router as passthrough_router
+from proxy.endpoints.auth_routes import router as auth_router
 
 logging.basicConfig(
     level=getattr(logging, settings.proxy.log_level, logging.INFO),
@@ -113,9 +115,11 @@ def create_app() -> FastAPI:
         redoc_url=None,
     )
 
+    app.include_router(auth_router)
     app.include_router(detect_router)
     app.include_router(audit_router)
     app.include_router(admin_router)
+    app.include_router(passthrough_router)
 
     if settings.detection.interception_enabled:
         from proxy.middleware.interception import AIInterceptionMiddleware

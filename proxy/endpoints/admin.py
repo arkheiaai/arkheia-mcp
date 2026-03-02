@@ -1,15 +1,17 @@
 """
-Admin endpoints.
+Admin endpoints — protected by Google OAuth + JWT session cookie.
 
-These are not authenticated in Phase 1 -- deploy behind network controls
-(firewall, VPN) in production. Authentication layer is Phase 2.
+Browser endpoint (/admin/ui) redirects unauthenticated requests to /auth/google.
+JSON API endpoints (/admin/health, /admin/registry/pull, etc.) return 401.
 """
 
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import HTMLResponse, RedirectResponse
+
+from proxy.auth import require_auth, COOKIE_NAME, verify_jwt
 
 logger = logging.getLogger(__name__)
 
@@ -652,7 +654,7 @@ _ADMIN_UI_HTML = """<!DOCTYPE html>
 
 
 @router.get("/health")
-async def health(request: Request):
+async def health(request: Request, _: str = Depends(require_auth)):
     """
     Health check. Returns loaded profile count and last registry pull timestamp.
     """
@@ -676,7 +678,7 @@ async def health(request: Request):
 
 
 @router.post("/registry/pull")
-async def manual_registry_pull(request: Request):
+async def manual_registry_pull(request: Request, _: str = Depends(require_auth)):
     """Trigger a manual profile registry pull."""
     registry_client = getattr(request.app.state, "registry_client", None)
     if registry_client is None:
@@ -691,7 +693,7 @@ async def manual_registry_pull(request: Request):
 
 
 @router.post("/profiles/{model_id}/rollback")
-async def rollback_profile(model_id: str, request: Request):
+async def rollback_profile(model_id: str, request: Request, _: str = Depends(require_auth)):
     """
     Roll back a profile to its previous version (.bak file).
 
@@ -721,7 +723,7 @@ async def rollback_profile(model_id: str, request: Request):
 
 
 @router.get("/profiles")
-async def list_profiles(request: Request):
+async def list_profiles(request: Request, _: str = Depends(require_auth)):
     """List all loaded profiles with their versions."""
     profile_router = getattr(request.app.state, "profile_router", None)
     if profile_router is None:
@@ -739,6 +741,12 @@ async def list_profiles(request: Request):
 
 
 @router.get("/ui", response_class=HTMLResponse)
-async def admin_ui():
-    """Serve the self-contained audit log dashboard HTML page."""
+async def admin_ui(request: Request):
+    """Serve the self-contained audit log dashboard HTML page.
+
+    Redirects to /auth/google if the session cookie is missing or invalid.
+    """
+    token = request.cookies.get(COOKIE_NAME)
+    if not token or not verify_jwt(token):
+        return RedirectResponse(url="/auth/google", status_code=302)
     return HTMLResponse(content=_ADMIN_UI_HTML)
