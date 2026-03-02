@@ -1,31 +1,27 @@
 """
 Arkheia MCP Trust Server -- Product 1.
 
-Exposes two tools to Claude (or any MCP-compatible orchestrator):
-  arkheia_verify      -- score a (prompt, response, model) triple for fabrication risk
-  arkheia_audit_log   -- retrieve structured audit evidence
+Exposes tools to Claude (or any MCP-compatible orchestrator):
 
-The server is a thin connector. All detection intelligence lives in the
-Arkheia Enterprise Proxy (proxy/). This server just bridges MCP tool calls
-to HTTP calls on the proxy.
+  Detection & audit:
+    arkheia_verify      -- score a (prompt, response, model) triple
+    arkheia_audit_log   -- retrieve structured audit evidence
 
-Transport: stdio (default for Claude Desktop / Claude Code)
+  Provider wrappers (single source of truth for all inference):
+    run_grok            -- call xAI Grok + screen through Arkheia
+    run_gemini          -- call Google Gemini + screen through Arkheia
+    run_ollama          -- call local Ollama model + screen through Arkheia
+
+All provider tools:
+  1. Check the tool registry (default deny)
+  2. Call the provider API
+  3. Call arkheia_verify on the response
+  4. Return both the response and the risk assessment
+
+If it didn't go through here, it's not in the audit log.
+
+Transport: stdio (default — Claude Code / Claude Desktop)
            HTTP/SSE available via mcp SDK for custom integrations
-
-System prompt to activate Product 1 in a Claude deployment:
-  "You have access to the arkheia_verify tool. Call it on every response you
-   receive from any model or tool before acting on that response or surfacing
-   it to the user.
-
-   Rules:
-   - HIGH risk: do not surface the response. Log detection_id, request
-     clarification from source.
-   - UNKNOWN risk: flag for human review. Include detection_id in your response.
-   - MEDIUM risk: surface with a brief confidence note.
-   - LOW risk: surface normally.
-
-   Never skip this verification step, even for responses that appear obviously
-   correct."
 """
 
 import os
@@ -33,16 +29,21 @@ import logging
 
 from mcp.server.fastmcp import FastMCP
 from mcp_server.proxy_client import ProxyClient
+from mcp_server.tool_registry import check, PolicyViolation
+from mcp_server.tools.providers import call_grok, call_gemini, call_ollama, call_together
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# Proxy URL from environment -- no default hardcoded key
-ARKHEIA_PROXY_URL = os.environ.get("ARKHEIA_PROXY_URL", "http://localhost:8099")
+ARKHEIA_PROXY_URL = os.environ.get("ARKHEIA_PROXY_URL", "http://localhost:8098")
 
-mcp = FastMCP("arkheia-trust")
+mcp   = FastMCP("arkheia-trust")
 proxy = ProxyClient(ARKHEIA_PROXY_URL)
 
+
+# ---------------------------------------------------------------------------
+# Detection & audit
+# ---------------------------------------------------------------------------
 
 @mcp.tool()
 async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
@@ -71,6 +72,7 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
         MEDIUM  -- surface with brief confidence note
         LOW     -- surface normally
     """
+    check("arkheia_verify")
     result = await proxy.verify(prompt=prompt, response=response, model_id=model)
     logger.debug(
         "arkheia_verify: model=%s risk=%s confidence=%.2f",
@@ -95,6 +97,7 @@ async def arkheia_audit_log(session_id: str | None = None, limit: int = 50) -> d
         summary: Aggregate counts by risk level {"LOW": n, "MEDIUM": n, ...}
         error:   Set if audit log could not be retrieved
     """
+    check("arkheia_audit_log")
     limit = min(limit, 500)
     result = await proxy.get_audit_log(session_id=session_id, limit=limit)
     logger.debug(
@@ -103,6 +106,183 @@ async def arkheia_audit_log(session_id: str | None = None, limit: int = 50) -> d
         result.get("summary", {}),
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Provider wrappers — single source of truth for all inference
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def run_grok(
+    prompt: str,
+    model: str = "grok-4-fast-non-reasoning",
+) -> dict:
+    """
+    Call xAI Grok and screen the response through Arkheia.
+
+    Use this instead of calling Grok directly — ensures every response
+    is in the audit log.
+
+    Args:
+        prompt: The prompt to send to Grok
+        model:  Grok model ID (default: grok-4-fast-non-reasoning)
+                Options: grok-4-fast-reasoning, grok-4-1-fast-reasoning,
+                         grok-3, grok-code-fast-1
+
+    Returns:
+        response:           The model's response text
+        model:              Model ID used
+        prompt_hash:        SHA-256 of the prompt (for reproducibility)
+        arkheia:            Full detection result (risk_level, confidence, etc.)
+        error:              Set if provider call failed
+    """
+    try:
+        check("run_grok")
+    except PolicyViolation as e:
+        return {"error": str(e), "risk_level": "UNKNOWN"}
+
+    provider_result = await call_grok(prompt, model)
+    risk = await proxy.verify(
+        prompt=prompt,
+        response=provider_result["response"],
+        model_id=model,
+    )
+    logger.info(
+        "run_grok: model=%s risk=%s confidence=%.2f",
+        model, risk.get("risk_level", "?"), risk.get("confidence", 0.0),
+    )
+    return {**provider_result, "arkheia": risk}
+
+
+@mcp.tool()
+async def run_gemini(
+    prompt: str,
+    model: str = "gemini-2.5-flash",
+) -> dict:
+    """
+    Call Google Gemini and screen the response through Arkheia.
+
+    Use this instead of calling Gemini directly — ensures every response
+    is in the audit log.
+
+    Args:
+        prompt: The prompt to send to Gemini
+        model:  Gemini model ID (default: gemini-2.5-flash)
+                Options: gemini-2.5-pro, gemini-2.5-flash
+
+    Returns:
+        response:     The model's response text
+        model:        Model ID used
+        prompt_hash:  SHA-256 of the prompt
+        arkheia:      Full detection result
+        error:        Set if provider call failed
+    """
+    try:
+        check("run_gemini")
+    except PolicyViolation as e:
+        return {"error": str(e), "risk_level": "UNKNOWN"}
+
+    provider_result = await call_gemini(prompt, model)
+    risk = await proxy.verify(
+        prompt=prompt,
+        response=provider_result["response"],
+        model_id=model,
+    )
+    logger.info(
+        "run_gemini: model=%s risk=%s confidence=%.2f",
+        model, risk.get("risk_level", "?"), risk.get("confidence", 0.0),
+    )
+    return {**provider_result, "arkheia": risk}
+
+
+@mcp.tool()
+async def run_ollama(
+    prompt: str,
+    model: str = "phi4:14b",
+) -> dict:
+    """
+    Call a local Ollama model and screen the response through Arkheia.
+
+    No network egress — local inference only. Use for cost-sensitive or
+    privacy-sensitive workloads where cloud models are not appropriate.
+
+    Args:
+        prompt: The prompt to send to Ollama
+        model:  Ollama model name (default: phi4:14b)
+                Available: phi4:14b, phi4-reasoning:14b, llama3.1:70b,
+                           deepseek-coder:33b-instruct, qwen2:72b-instruct,
+                           codellama:34b-instruct, mixtral:8x7b, ouro:latest
+
+    Returns:
+        response:     The model's response text
+        model:        Model ID used
+        prompt_hash:  SHA-256 of the prompt
+        eval_count:   Token count (if available)
+        arkheia:      Full detection result
+        error:        Set if provider call failed
+    """
+    try:
+        check("run_ollama")
+    except PolicyViolation as e:
+        return {"error": str(e), "risk_level": "UNKNOWN"}
+
+    provider_result = await call_ollama(prompt, model)
+    risk = await proxy.verify(
+        prompt=prompt,
+        response=provider_result["response"],
+        model_id=model,
+    )
+    logger.info(
+        "run_ollama: model=%s risk=%s confidence=%.2f",
+        model, risk.get("risk_level", "?"), risk.get("confidence", 0.0),
+    )
+    return {**provider_result, "arkheia": risk}
+
+
+@mcp.tool()
+async def run_together(
+    prompt: str,
+    model: str = "moonshotai/Kimi-K2.5",
+) -> dict:
+    """
+    Call Together AI and screen the response through Arkheia.
+
+    Use this instead of calling Together AI directly — ensures every response
+    is in the audit log.
+
+    Args:
+        prompt: The prompt to send to the model
+        model:  Together AI model ID (default: moonshotai/Kimi-K2.5)
+                Options: moonshotai/Kimi-K2.5, meta-llama/Llama-3.3-70B-Instruct-Turbo,
+                         deepseek-ai/DeepSeek-R1, Qwen/Qwen2.5-72B-Instruct-Turbo
+
+    Returns:
+        response:     The model's response text
+        model:        Model ID used
+        prompt_hash:  SHA-256 of the prompt
+        usage:        Token usage if available
+        arkheia:      Full detection result (risk_level, confidence, etc.)
+        error:        Set if provider call failed
+
+    Note: Kimi K2.5 is a thinking model — it uses 100-500 tokens internally
+    before producing output. max_tokens is set to 2048 automatically.
+    """
+    try:
+        check("run_together")
+    except PolicyViolation as e:
+        return {"error": str(e), "risk_level": "UNKNOWN"}
+
+    provider_result = await call_together(prompt, model)
+    risk = await proxy.verify(
+        prompt=prompt,
+        response=provider_result["response"],
+        model_id=model,
+    )
+    logger.info(
+        "run_together: model=%s risk=%s confidence=%.2f",
+        model, risk.get("risk_level", "?"), risk.get("confidence", 0.0),
+    )
+    return {**provider_result, "arkheia": risk}
 
 
 if __name__ == "__main__":
