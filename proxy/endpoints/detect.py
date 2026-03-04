@@ -11,6 +11,7 @@ Detection must never crash the pipeline it monitors.
 
 import hashlib
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -18,7 +19,11 @@ from typing import Optional
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
+from proxy.detection_adapter import schedule_push
+
 logger = logging.getLogger(__name__)
+
+_ADAPTER_TENANT_ID = os.getenv("ARKHEIA_TENANT_ID", "default")
 
 router = APIRouter()
 
@@ -132,6 +137,25 @@ async def detect_verify(req: VerifyRequest, request: Request):
         except Exception as e:
             logger.error("Audit write failed (detection result unaffected): %s", e)
 
+    # Push to Arkheia Governance Detection Adapter (fail-open, fire-and-forget)
+    schedule_push(
+        tenant_id=_ADAPTER_TENANT_ID,
+        source_id=req.model_id,
+        event_type="mcp_detection",
+        payload={
+            "detection_id": response.detection_id,
+            "model_id": response.model_id,
+            "risk_level": response.risk_level,
+            "confidence": response.confidence,
+            "features_triggered": response.features_triggered,
+            "profile_version": response.profile_version,
+            "prompt_hash": hashlib.sha256(req.prompt.encode()).hexdigest(),
+            "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
+            "action_taken": action,
+        },
+        risk_level=response.risk_level if response.risk_level in ("LOW", "MEDIUM", "HIGH", "CRITICAL") else "LOW",
+    )
+
     return response
 
 
@@ -156,6 +180,7 @@ def _audit_record(response: VerifyResponse, req: VerifyRequest, action: str) -> 
         "confidence": response.confidence,
         "features_triggered": response.features_triggered,
         "prompt_hash": hashlib.sha256(req.prompt.encode()).hexdigest(),
+        "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
         "response_length": len(req.response),
         "action_taken": action,
         "source": "proxy",
