@@ -31,7 +31,7 @@ from registry_server.storage import ProfileStorage
 # Fixtures
 # ---------------------------------------------------------------------------
 
-VALID_KEY = "ak_live_testkey1234567890abcdef"
+VALID_KEY = "test-fixture-not-a-real-key-00000"
 
 REAL_FORMAT_YAML = """\
 model: test-model
