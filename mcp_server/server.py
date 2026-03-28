@@ -28,6 +28,7 @@ import os
 import logging
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from mcp_server.proxy_client import ProxyClient
 from mcp_server.tool_registry import check, PolicyViolation
 from mcp_server.tools.providers import call_grok, call_gemini, call_ollama, call_together
@@ -52,7 +53,13 @@ proxy = ProxyClient(
 # Detection & audit
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(
+    title="Verify LLM Output for Fabrication",
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+))
 async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
     """
     Verify whether an AI response shows signs of fabrication.
@@ -90,7 +97,13 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(
+    title="Retrieve Fabrication Detection History",
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+))
 async def arkheia_audit_log(session_id: str | None = None, limit: int = 50) -> dict:
     """
     Retrieve structured audit evidence for compliance review.
@@ -119,7 +132,12 @@ async def arkheia_audit_log(session_id: str | None = None, limit: int = 50) -> d
 # Provider wrappers — single source of truth for all inference
 # ---------------------------------------------------------------------------
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(
+    title="Call xAI Grok with Fabrication Screening",
+    readOnlyHint=True,
+    destructiveHint=False,
+    openWorldHint=True,
+))
 async def run_grok(
     prompt: str,
     model: str = "grok-4-fast-non-reasoning",
@@ -161,7 +179,12 @@ async def run_grok(
     return {**provider_result, "arkheia": risk}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(
+    title="Call Google Gemini with Fabrication Screening",
+    readOnlyHint=True,
+    destructiveHint=False,
+    openWorldHint=True,
+))
 async def run_gemini(
     prompt: str,
     model: str = "gemini-2.5-flash",
@@ -202,7 +225,12 @@ async def run_gemini(
     return {**provider_result, "arkheia": risk}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(
+    title="Call Local Ollama Model with Fabrication Screening",
+    readOnlyHint=True,
+    destructiveHint=False,
+    openWorldHint=False,
+))
 async def run_ollama(
     prompt: str,
     model: str = "phi4:14b",
@@ -246,7 +274,12 @@ async def run_ollama(
     return {**provider_result, "arkheia": risk}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(
+    title="Call Together AI with Fabrication Screening",
+    readOnlyHint=True,
+    destructiveHint=False,
+    openWorldHint=True,
+))
 async def run_together(
     prompt: str,
     model: str = "moonshotai/Kimi-K2.5",
@@ -292,7 +325,13 @@ async def run_together(
     return {**provider_result, "arkheia": risk}
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(
+    title="Store Entity in Knowledge Graph",
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+))
 async def memory_store(name: str, entity_type: str, observations: list[str]) -> dict:
     """
     Store an entity and its observations in the persistent knowledge graph.
@@ -317,7 +356,13 @@ async def memory_store(name: str, entity_type: str, observations: list[str]) -> 
     return await store_entity(name=name, entity_type=entity_type, observations=observations)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(
+    title="Search Knowledge Graph",
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+))
 async def memory_retrieve(query: str, entity_type: str | None = None, limit: int = 10) -> dict:
     """
     Retrieve entities and their observations from the persistent knowledge graph.
@@ -342,7 +387,13 @@ async def memory_retrieve(query: str, entity_type: str | None = None, limit: int
     return await retrieve_entities(query=query, entity_type=entity_type, limit=limit)
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(
+    title="Create Relationship Between Entities",
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+))
 async def memory_relate(from_entity: str, relation_type: str, to_entity: str) -> dict:
     """
     Store a named relationship between two entities in the knowledge graph.
