@@ -92,6 +92,80 @@ class TestLocalProxy:
         assert result["error"] == "no_detection_available"
 
 
+    @pytest.mark.asyncio
+    async def test_local_timeout_falls_back_to_hosted(self, client_with_key):
+        """Local proxy timeout → falls back to hosted API (not just ConnectError)."""
+        hosted_response = MagicMock()
+        hosted_response.json.return_value = {
+            "risk": "LOW",
+            "confidence": 0.80,
+            "detection_id": "det_timeout_fb",
+            "features_triggered": [],
+            "detection_method": "structural",
+            "evidence_depth_limited": False,
+        }
+        hosted_response.raise_for_status = MagicMock()
+
+        call_count = 0
+        async def mock_post(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if "/detect/verify" in url:
+                raise httpx.TimeoutException("Read timed out")
+            return hosted_response
+
+        with patch("httpx.AsyncClient.post", side_effect=mock_post):
+            result = await client_with_key.verify("prompt", "response", "gpt-4o")
+
+        assert result["risk_level"] == "LOW"
+        assert result.get("source") == "hosted"
+        assert call_count == 2  # local timed out, then hosted
+
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_flips_after_local_failure(self, client_with_key):
+        """After local proxy fails, _local_available should flip to False."""
+        assert client_with_key._local_available is True  # starts optimistic
+
+        hosted_response = MagicMock()
+        hosted_response.json.return_value = {
+            "risk": "LOW",
+            "confidence": 0.5,
+            "detection_id": "det_cb",
+            "features_triggered": [],
+            "detection_method": None,
+            "evidence_depth_limited": True,
+        }
+        hosted_response.raise_for_status = MagicMock()
+
+        async def mock_post(url, **kwargs):
+            if "/detect/verify" in url:
+                raise httpx.ConnectError("Connection refused")
+            return hosted_response
+
+        with patch("httpx.AsyncClient.post", side_effect=mock_post):
+            await client_with_key.verify("prompt", "response", "gpt-4o")
+
+        # Circuit breaker should now be open — local marked unavailable
+        assert client_with_key._local_available is False, \
+            "_local_available should be False after ConnectError fallback"
+
+    @pytest.mark.asyncio
+    async def test_hosted_generic_http_error(self, client_with_key):
+        """Hosted API returns 500 → generic error, not auth or quota."""
+        client_with_key._local_available = False
+
+        response_500 = httpx.Response(500, request=httpx.Request("POST", "https://app.arkheia.ai/v1/detect"))
+
+        async def mock_post(url, **kwargs):
+            raise httpx.HTTPStatusError("Server error", request=response_500.request, response=response_500)
+
+        with patch("httpx.AsyncClient.post", side_effect=mock_post):
+            result = await client_with_key.verify("prompt", "response", "gpt-4o")
+
+        assert result["risk_level"] == "UNKNOWN"
+        assert result["error"] == "hosted_http_error_500"
+
+
 class TestHostedFallback:
     """Tests for hosted API fallback path."""
 
