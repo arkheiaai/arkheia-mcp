@@ -1,18 +1,100 @@
 """
-Multi-profile router with atomic reload.
+Multi-profile router with atomic reload and license enforcement.
 
 Loads all YAML profiles at startup. Supports exact, prefix, and family matching.
 Reload is copy-and-swap -- zero dropped requests during update.
+
+License verification:
+  - Profiles with a 'license:' block are checked for expiry and HMAC signature.
+  - ARKHEIA_LICENSE_KEY   — HMAC-SHA256 secret; if unset, signature check is skipped (dev mode)
+  - ARKHEIA_REQUIRE_LICENSE — if true, profiles without a license block are rejected
+  - Expired / tampered profiles are silently skipped; other profiles are unaffected.
 """
 
 import asyncio
+import hashlib
+import hmac as _hmac_mod
+import json
 import logging
+import os
+import sys
+from datetime import date
 from pathlib import Path
 from typing import Optional
 
 import yaml
 
 logger = logging.getLogger(__name__)
+
+# Read once at import time; NSSM AppEnvironmentExtra sets these per installation.
+_LICENSE_KEY: str = os.getenv("ARKHEIA_LICENSE_KEY", "")
+_REQUIRE_LICENSE: bool = os.getenv("ARKHEIA_REQUIRE_LICENSE", "false").lower() in (
+    "true", "1", "yes"
+)
+
+
+def _canonical_profile(profile: dict) -> str:
+    """Deterministic JSON serialization of profile content, excluding the license block."""
+    content = {k: v for k, v in profile.items() if k != "license"}
+    return json.dumps(content, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+
+
+def _verify_profile_license(profile: dict, filename: str) -> bool:
+    """
+    Verify the license block in a profile. Returns True if the profile may be loaded.
+
+    Rules:
+      - No license block + REQUIRE_LICENSE=false  → allowed (open / dev mode)
+      - No license block + REQUIRE_LICENSE=true   → rejected, warning logged
+      - Expired date                               → rejected, warning logged
+      - HMAC mismatch                              → rejected, error logged
+      - No LICENSE_KEY configured                  → HMAC check skipped (dev mode)
+    """
+    block = profile.get("license")
+
+    if not block:
+        if _REQUIRE_LICENSE:
+            logger.warning(
+                "Profile %s has no license block and ARKHEIA_REQUIRE_LICENSE=true — skipping",
+                filename,
+            )
+            return False
+        return True  # open mode: no license required
+
+    valid_until_str = str(block.get("valid_until", ""))
+    try:
+        expiry = date.fromisoformat(valid_until_str)
+    except ValueError:
+        logger.error(
+            "Profile %s has invalid valid_until %r — skipping", filename, valid_until_str
+        )
+        return False
+
+    if expiry < date.today():
+        logger.warning(
+            "Profile %s license expired on %s — skipping (model returns UNKNOWN)",
+            filename,
+            valid_until_str,
+        )
+        return False
+
+    if _LICENSE_KEY:
+        customer_id = str(block.get("customer_id", ""))
+        message = f"{_canonical_profile(profile)}|{customer_id}|{valid_until_str}"
+        expected = _hmac_mod.new(
+            _LICENSE_KEY.encode("utf-8"),
+            message.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        actual = str(block.get("signature", ""))
+        if not _hmac_mod.compare_digest(expected, actual):
+            logger.error(
+                "Profile %s license signature mismatch — skipping (possible tampering)",
+                filename,
+            )
+            return False
+
+    return True
 
 
 class ProfileRouter:
@@ -36,7 +118,7 @@ class ProfileRouter:
     def load_all(self) -> None:
         """Load all YAML profiles from profile_dir. Called at startup."""
         profiles: dict[str, dict] = {}
-        path = Path(self.profile_dir)
+        path = Path(self.profile_dir).resolve()
         if not path.exists():
             logger.warning("Profiles directory not found: %s", self.profile_dir)
             self._profiles = profiles
@@ -44,12 +126,18 @@ class ProfileRouter:
             return
 
         for f in path.glob("*.yaml"):
+            # Guard: only load files within the profile directory (no symlink escape)
+            if not f.resolve().parent == path:  # aikido-ignore
+                logger.warning("Skipping file outside profile dir: %s", f)
+                continue
             if f.name == "schema.yaml":
                 continue
             try:
                 with open(f, encoding="utf-8") as fh:
                     data = yaml.safe_load(fh)
                 if not data:
+                    continue
+                if not _verify_profile_license(data, f.name):
                     continue
                 # Support both real profile format (top-level "model" key)
                 # and spec schema format (metadata.model_id)
@@ -67,7 +155,11 @@ class ProfileRouter:
 
         self._profiles = profiles
         self._loaded_count = len(profiles)
-        logger.info("ProfileRouter: loaded %d profiles from %s", len(profiles), self.profile_dir)
+        logger.info(
+            "ProfileRouter: loaded %d valid profiles from %s",
+            len(profiles),
+            self.profile_dir,
+        )
 
     def get(self, model_id: str) -> Optional[dict]:
         """Return profile for model_id, or None if no match."""
@@ -136,6 +228,8 @@ class ProfileRouter:
                     data = yaml.safe_load(fh)
                 if not data:
                     continue
+                if not _verify_profile_license(data, f.name):
+                    continue
                 model_id = (
                     data.get("model")
                     or data.get("metadata", {}).get("model_id")
@@ -150,7 +244,7 @@ class ProfileRouter:
             self._profiles = new_profiles
             self._loaded_count = len(new_profiles)
 
-        logger.info("ProfileRouter reloaded: %d profiles", len(new_profiles))
+        logger.info("ProfileRouter reloaded: %d valid profiles", len(new_profiles))
 
     @property
     def loaded_count(self) -> int:
