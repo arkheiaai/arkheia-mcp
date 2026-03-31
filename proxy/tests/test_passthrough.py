@@ -33,6 +33,8 @@ from proxy.endpoints.passthrough import (
     _extract_gemini_prompt,
     _extract_gemini_model,
     _extract_grok_model,
+    _OPENAI_PATH_RE,
+    _GEMINI_PATH_RE,
 )
 from proxy.detection.engine import DetectionResult
 
@@ -437,3 +439,102 @@ def test_together_passthrough_audit_written(mock_client_cls):
     record = audit_writer.write.call_args[0][0]
     assert record["source"] == "passthrough"
     assert record["risk_level"] == "LOW"
+
+
+# ---------------------------------------------------------------------------
+# Security: path validation regex tests
+# ---------------------------------------------------------------------------
+
+class TestPathValidation:
+    """Verify SSRF mitigation via path allowlists."""
+
+    def test_openai_path_allows_chat_completions(self):
+        assert _OPENAI_PATH_RE.match("chat/completions")
+
+    def test_openai_path_allows_completions(self):
+        assert _OPENAI_PATH_RE.match("completions")
+
+    def test_openai_path_allows_embeddings(self):
+        assert _OPENAI_PATH_RE.match("embeddings")
+
+    def test_openai_path_allows_models(self):
+        assert _OPENAI_PATH_RE.match("models")
+
+    def test_openai_path_blocks_traversal(self):
+        assert not _OPENAI_PATH_RE.match("../../etc/passwd")
+
+    def test_openai_path_blocks_arbitrary(self):
+        assert not _OPENAI_PATH_RE.match("admin/users")
+
+    def test_openai_path_blocks_internal(self):
+        assert not _OPENAI_PATH_RE.match("internal/config")
+
+    def test_gemini_path_allows_model_generate(self):
+        assert _GEMINI_PATH_RE.match("models/gemini-2.5-flash:generateContent")
+
+    def test_gemini_path_allows_models_list(self):
+        assert _GEMINI_PATH_RE.match("models")
+
+    def test_gemini_path_allows_model_name(self):
+        assert _GEMINI_PATH_RE.match("models/gemini-2.5-pro")
+
+    def test_gemini_path_blocks_traversal(self):
+        assert not _GEMINI_PATH_RE.match("../../etc/passwd")
+
+    def test_gemini_path_blocks_arbitrary(self):
+        assert not _GEMINI_PATH_RE.match("admin/config")
+
+
+# ---------------------------------------------------------------------------
+# Security: SSRF rejection integration tests
+# ---------------------------------------------------------------------------
+
+def test_grok_rejects_invalid_path():
+    """Invalid path -> HTTP 400, no upstream request made."""
+    app = _make_app()
+    client = TestClient(app, raise_server_exceptions=True)
+    resp = client.get("/proxy/grok/v1/admin/users")
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_path"
+
+
+def test_together_rejects_invalid_path():
+    """Invalid path -> HTTP 400, no upstream request made."""
+    app = _make_app()
+    client = TestClient(app, raise_server_exceptions=True)
+    resp = client.get("/proxy/together/v1/admin/users")
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_path"
+
+
+def test_gemini_rejects_invalid_path():
+    """Invalid path -> HTTP 400, no upstream request made."""
+    app = _make_app()
+    client = TestClient(app, raise_server_exceptions=True)
+    resp = client.get("/v1beta/admin/config")
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_path"
+
+
+# ---------------------------------------------------------------------------
+# Security: error detail not leaked
+# ---------------------------------------------------------------------------
+
+@patch("proxy.endpoints.passthrough.httpx.AsyncClient")
+def test_grok_error_no_detail_leaked(mock_client_cls):
+    """502 error response must not include exception details."""
+    import httpx as _httpx
+    mock_client = AsyncMock()
+    mock_client.request = AsyncMock(side_effect=_httpx.ConnectError("secret-internal-host:3306"))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    app = _make_app()
+    client = TestClient(app, raise_server_exceptions=True)
+    resp = client.post("/proxy/grok/v1/chat/completions", json=OPENAI_REQUEST)
+
+    assert resp.status_code == 502
+    body = resp.json()
+    assert "secret-internal-host" not in json.dumps(body)
+    assert body["error"] == "upstream_unavailable"

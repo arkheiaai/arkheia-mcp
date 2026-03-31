@@ -26,10 +26,11 @@ USER arkheia
 # Mount arkheia-proxy.yaml at /etc/arkheia/arkheia-proxy.yaml or set ARKHEIA_CONFIG
 ENV ARKHEIA_PROFILES_DIR=/app/profiles
 ENV ARKHEIA_AUDIT_LOG=/var/log/arkheia/audit.jsonl
+ENV ARKHEIA_PROXY_PORT=8098
 
-EXPOSE 8099
+EXPOSE 8098
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8099/admin/health').raise_for_status()"
+    CMD python -c "import httpx; httpx.get('http://localhost:8098/admin/health').raise_for_status()"
 
 CMD ["python", "-m", "proxy.main"]

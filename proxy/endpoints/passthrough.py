@@ -10,7 +10,7 @@ Routes:
   ANY  /v1beta/{path}         -- forward to https://generativelanguage.googleapis.com/v1beta/{path}
 
 Both endpoints:
-  1. Forward the request to the upstream provider (auth headers / query params pass through)
+  1. Forward the request to the upstream provider (safe headers only)
   2. Extract response text for detection
   3. Run Arkheia detection
   4. Return the provider response with X-Arkheia-Risk header
@@ -18,11 +18,17 @@ Both endpoints:
 
 Fail-open: if detection fails for any reason, the provider response is returned
 unchanged with X-Arkheia-Risk: ERROR. The pipeline is never blocked by detection.
+
+Security:
+  - Only allowlisted headers are forwarded upstream (no cookie/internal header leak)
+  - Path segments are validated against provider-specific allowlists (SSRF mitigation)
+  - Error details are never exposed to clients
 """
 
 import hashlib
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -38,6 +44,37 @@ router = APIRouter()
 GROK_UPSTREAM    = "https://api.x.ai/v1"
 GEMINI_UPSTREAM  = "https://generativelanguage.googleapis.com/v1beta"
 TOGETHER_UPSTREAM = "https://api.together.xyz/v1"
+
+# ---------------------------------------------------------------------------
+# Security: header allowlist for upstream forwarding
+# ---------------------------------------------------------------------------
+# Only these headers are forwarded to upstream providers. This prevents
+# leaking internal cookies, auth tokens for other services, or proxy headers.
+_FORWARDED_HEADERS = {
+    "authorization",       # provider API key (Bearer token)
+    "content-type",
+    "accept",
+    "user-agent",
+    "x-request-id",
+    "x-stainless-arch",
+    "x-stainless-lang",
+    "x-stainless-os",
+    "x-stainless-package-version",
+    "x-stainless-runtime",
+    "x-stainless-runtime-version",
+}
+
+# ---------------------------------------------------------------------------
+# Security: path validation for SSRF mitigation
+# ---------------------------------------------------------------------------
+# Only allow paths that match known provider API patterns.
+# This prevents the proxy from being used to reach arbitrary URLs.
+_OPENAI_PATH_RE = re.compile(
+    r"^(chat/completions|completions|embeddings|models|images/generations|audio/.*|moderations)$"
+)
+_GEMINI_PATH_RE = re.compile(
+    r"^models(/[a-zA-Z0-9._-]+(:[a-zA-Z]+)?)?$"
+)
 
 # ---------------------------------------------------------------------------
 # Response text extractors
@@ -182,13 +219,15 @@ async def _forward(
     """
     Forward the request to upstream_url. Returns (body, status_code, headers).
     Raises on network error.
+
+    Security: only allowlisted headers are forwarded (see _FORWARDED_HEADERS).
     """
     body = await request.body()
 
-    # Forward all headers except Host
+    # Only forward safe, allowlisted headers — never cookies, internal tokens, etc.
     forward_headers = {
         k: v for k, v in request.headers.items()
-        if k.lower() != "host"
+        if k.lower() in _FORWARDED_HEADERS
     }
 
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -225,6 +264,13 @@ async def grok_passthrough(path: str, request: Request):
     Configure Grok CLI:
         baseURL: "http://localhost:8098/proxy/grok/v1"
     """
+    if not _OPENAI_PATH_RE.match(path):
+        return Response(
+            content=json.dumps({"error": "invalid_path"}).encode(),
+            status_code=400,
+            media_type="application/json",
+        )
+
     upstream_url = f"{GROK_UPSTREAM}/{path}"
     logger.debug("grok_passthrough: %s %s", request.method, upstream_url)
 
@@ -234,7 +280,7 @@ async def grok_passthrough(path: str, request: Request):
     except Exception as e:
         logger.error("grok_passthrough: upstream error: %s", e)
         return Response(
-            content=json.dumps({"error": "upstream_error", "detail": str(e)}).encode(),
+            content=json.dumps({"error": "upstream_unavailable"}).encode(),
             status_code=502,
             media_type="application/json",
             headers={"X-Arkheia-Risk": "ERROR"},
@@ -273,6 +319,13 @@ async def together_passthrough(path: str, request: Request):
     Configure Together AI client:
         base_url = "http://localhost:8098/proxy/together/v1"
     """
+    if not _OPENAI_PATH_RE.match(path):
+        return Response(
+            content=json.dumps({"error": "invalid_path"}).encode(),
+            status_code=400,
+            media_type="application/json",
+        )
+
     upstream_url = f"{TOGETHER_UPSTREAM}/{path}"
     logger.debug("together_passthrough: %s %s", request.method, upstream_url)
 
@@ -282,7 +335,7 @@ async def together_passthrough(path: str, request: Request):
     except Exception as e:
         logger.error("together_passthrough: upstream error: %s", e)
         return Response(
-            content=json.dumps({"error": "upstream_error", "detail": str(e)}).encode(),
+            content=json.dumps({"error": "upstream_unavailable"}).encode(),
             status_code=502,
             media_type="application/json",
             headers={"X-Arkheia-Risk": "ERROR"},
@@ -321,6 +374,13 @@ async def gemini_passthrough(path: str, request: Request):
         GEMINI_API_BASE_URL=http://localhost:8098
         GOOGLE_GENERATIVE_AI_BASE_URL=http://localhost:8098
     """
+    if not _GEMINI_PATH_RE.match(path):
+        return Response(
+            content=json.dumps({"error": "invalid_path"}).encode(),
+            status_code=400,
+            media_type="application/json",
+        )
+
     upstream_url = f"{GEMINI_UPSTREAM}/{path}"
     logger.debug("gemini_passthrough: %s %s", request.method, upstream_url)
 
@@ -330,7 +390,7 @@ async def gemini_passthrough(path: str, request: Request):
     except Exception as e:
         logger.error("gemini_passthrough: upstream error: %s", e)
         return Response(
-            content=json.dumps({"error": "upstream_error", "detail": str(e)}).encode(),
+            content=json.dumps({"error": "upstream_unavailable"}).encode(),
             status_code=502,
             media_type="application/json",
             headers={"X-Arkheia-Risk": "ERROR"},

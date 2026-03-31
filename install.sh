@@ -113,11 +113,17 @@ if [ -z "$API_KEY" ]; then
         fail "Email cannot be empty."
     fi
 
-    # Call the provisioning endpoint
+    # Validate email format before sending (prevent injection in JSON payload)
+    if ! echo "$EMAIL" | grep -qP '^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$'; then
+        fail "Invalid email format: ${EMAIL}"
+    fi
+
+    # Call the provisioning endpoint — email is validated above, payload built safely
+    PROVISION_PAYLOAD=$(printf '{"email": "%s"}' "$EMAIL")
     PROVISION_RESPONSE=$(curl -sS -w "\n%{http_code}" \
         -X POST "${HOSTED_URL}/v1/provision" \
         -H "Content-Type: application/json" \
-        -d "{\"email\": \"${EMAIL}\"}" 2>&1) || fail "Failed to reach ${HOSTED_URL}"
+        -d "$PROVISION_PAYLOAD" 2>&1) || fail "Failed to reach ${HOSTED_URL}"
 
     HTTP_CODE=$(echo "$PROVISION_RESPONSE" | tail -1)
     BODY=$(echo "$PROVISION_RESPONSE" | sed '$d')
@@ -188,17 +194,18 @@ CONFIG_FILE="${CONFIG_DIR}/claude_desktop_config.json"
 # Create config dir if needed
 mkdir -p "$CONFIG_DIR"
 
-# Build the MCP server entry
-ARKHEIA_CONFIG=$(cat <<JSONEOF
-{
-  "command": "npx",
-  "args": ["@arkheia/mcp-server"],
-  "env": {
-    "ARKHEIA_API_KEY": "${API_KEY}"
-  }
+# Build the MCP server entry as a temp file (avoids shell interpolation injection)
+ARKHEIA_CONFIG_TMP=$(mktemp)
+trap 'rm -f "$ARKHEIA_CONFIG_TMP"' EXIT
+"$PYTHON_CMD" -c "
+import json, sys
+config = {
+    'command': 'npx',
+    'args': ['@arkheia/mcp-server'],
+    'env': {'ARKHEIA_API_KEY': sys.argv[1]}
 }
-JSONEOF
-)
+json.dump(config, sys.stdout, indent=2)
+" "$API_KEY" > "$ARKHEIA_CONFIG_TMP"
 
 if [ -f "$CONFIG_FILE" ]; then
     # Config exists — check if arkheia is already configured
@@ -206,27 +213,31 @@ if [ -f "$CONFIG_FILE" ]; then
         warn "Arkheia is already in ${CONFIG_FILE} — not overwriting."
         warn "Update ARKHEIA_API_KEY manually if needed."
     else
-        # Merge into existing config using Python (available since we checked)
+        # Merge into existing config using Python — reads from temp file, no interpolation
         "$PYTHON_CMD" -c "
 import json, sys
-with open('$CONFIG_FILE', 'r') as f:
+config_path, entry_path = sys.argv[1], sys.argv[2]
+with open(config_path, 'r') as f:
     config = json.load(f)
+with open(entry_path, 'r') as f:
+    entry = json.load(f)
 config.setdefault('mcpServers', {})
-config['mcpServers']['arkheia'] = json.loads('''$ARKHEIA_CONFIG''')
-with open('$CONFIG_FILE', 'w') as f:
+config['mcpServers']['arkheia'] = entry
+with open(config_path, 'w') as f:
     json.dump(config, f, indent=2)
 print('Merged arkheia into existing config.')
-" || warn "Could not merge config — add manually."
+" "$CONFIG_FILE" "$ARKHEIA_CONFIG_TMP" || warn "Could not merge config — add manually."
     fi
 else
-    # Create new config
-    cat > "$CONFIG_FILE" <<CFGEOF
-{
-  "mcpServers": {
-    "arkheia": ${ARKHEIA_CONFIG}
-  }
-}
-CFGEOF
+    # Create new config wrapping the entry
+    "$PYTHON_CMD" -c "
+import json, sys
+with open(sys.argv[1], 'r') as f:
+    entry = json.load(f)
+config = {'mcpServers': {'arkheia': entry}}
+with open(sys.argv[2], 'w') as f:
+    json.dump(config, f, indent=2)
+" "$ARKHEIA_CONFIG_TMP" "$CONFIG_FILE"
     ok "Created ${CONFIG_FILE}"
 fi
 
@@ -242,15 +253,18 @@ if [ -d "$CLAUDE_CODE_DIR" ]; then
             warn "Arkheia is already in Claude Code settings — not overwriting."
         else
             "$PYTHON_CMD" -c "
-import json
-with open('$CLAUDE_CODE_CONFIG', 'r') as f:
+import json, sys
+config_path, entry_path = sys.argv[1], sys.argv[2]
+with open(config_path, 'r') as f:
     config = json.load(f)
+with open(entry_path, 'r') as f:
+    entry = json.load(f)
 config.setdefault('mcpServers', {})
-config['mcpServers']['arkheia'] = json.loads('''$ARKHEIA_CONFIG''')
-with open('$CLAUDE_CODE_CONFIG', 'w') as f:
+config['mcpServers']['arkheia'] = entry
+with open(config_path, 'w') as f:
     json.dump(config, f, indent=2)
 print('Merged arkheia into Claude Code settings.')
-" || warn "Could not merge Claude Code config — add manually."
+" "$CLAUDE_CODE_CONFIG" "$ARKHEIA_CONFIG_TMP" || warn "Could not merge Claude Code config — add manually."
         fi
     fi
 fi

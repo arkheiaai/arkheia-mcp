@@ -49,8 +49,14 @@ _yaml = _load_yaml()
 # ---------------------------------------------------------------------------
 
 class _ProxySettings:
-    host: str = _yaml.get("proxy", {}).get("host", "0.0.0.0")
-    port: int = _yaml.get("proxy", {}).get("port", 8099)
+    host: str = os.environ.get(
+        "ARKHEIA_PROXY_HOST",
+        _yaml.get("proxy", {}).get("host", "0.0.0.0"),  # nosec B104 — intentional bind-all for container/service use
+    )
+    port: int = int(os.environ.get(
+        "ARKHEIA_PROXY_PORT",
+        _yaml.get("proxy", {}).get("port", 8098),  # 8098 = Enterprise Proxy (8099 = Local Proxy)
+    ))
     log_level: str = _yaml.get("proxy", {}).get("log_level", "INFO")
 
 
@@ -99,8 +105,9 @@ class _AuditSettings:
 class _MCPSettings:
     enabled: bool = _yaml.get("mcp_server", {}).get("enabled", True)
     port: int = _yaml.get("mcp_server", {}).get("port", 8100)
-    proxy_url: str = _yaml.get("mcp_server", {}).get(
-        "proxy_url", "http://localhost:8099"
+    proxy_url: str = os.environ.get(
+        "ARKHEIA_PROXY_URL",
+        _yaml.get("mcp_server", {}).get("proxy_url", "http://localhost:8098"),
     )
 
 
