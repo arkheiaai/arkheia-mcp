@@ -11,8 +11,11 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.31.1
 starlette>=0.49.1  # CVE-2025-62727 fix (DoS via Range header); CVE-2025-54121 fix (multipart DoS)
 
+# Auth
+PyJWT>=2.12.0  # CVE-2026-32597: crit header validation
+
 # Pydantic
-pydantic>=2.0.0
+pydantic>=2.10.0  # regex DoS fix
 pydantic-settings>=2.0.0
 
 # YAML

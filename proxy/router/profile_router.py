@@ -219,8 +219,12 @@ class ProfileRouter:
         """
         target = profile_dir or self.profile_dir
         new_profiles: dict[str, dict] = {}
-        path = Path(target)
+        path = Path(target).resolve()
         for f in path.glob("*.yaml"):
+            # Guard: only load files within the profile directory (no symlink escape)
+            if not f.resolve().parent == path:  # aikido-ignore
+                logger.warning("Skipping file outside profile dir: %s", f)
+                continue
             if f.name == "schema.yaml":
                 continue
             try:
