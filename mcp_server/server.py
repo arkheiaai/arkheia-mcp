@@ -38,7 +38,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message
 logger = logging.getLogger(__name__)
 
 ARKHEIA_PROXY_URL = os.environ.get("ARKHEIA_PROXY_URL", "http://localhost:8098")
-ARKHEIA_HOSTED_URL = os.environ.get("ARKHEIA_HOSTED_URL", "https://app.arkheia.ai")
+ARKHEIA_HOSTED_URL = os.environ.get("ARKHEIA_HOSTED_URL", "https://arkheia-proxy-production.up.railway.app")
 ARKHEIA_API_KEY = os.environ.get("ARKHEIA_API_KEY")
 
 mcp   = FastMCP("arkheia-trust")
