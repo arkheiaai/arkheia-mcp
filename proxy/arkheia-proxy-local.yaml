@@ -1,0 +1,38 @@
+# Arkheia Enterprise Proxy -- LOCAL DEV config
+#
+# Runs on port 8098 to avoid conflict with ArkheiaLocalProxy NSSM (8099).
+# Points at existing arkheia-proxy profiles — no separate profile setup needed.
+#
+# Usage:
+#   set ARKHEIA_CONFIG=C:\arkheia-mcp\proxy\arkheia-proxy-local.yaml
+#   set ARKHEIA_API_KEY=ak_live_...
+#   python -m uvicorn proxy.main:app --host 0.0.0.0 --port 8098
+#
+# Consolidation plan: once stable, promote to port 8099 and retire
+# ArkheiaLocalProxy NSSM service.
+
+proxy:
+  host: 0.0.0.0
+  port: 8098
+  log_level: INFO
+
+detection:
+  profile_dir: C:\arkheia-proxy\profiles   # reuse existing characterisation profiles
+  high_risk_action: warn                    # warn | block
+  unknown_action: pass                      # pass | warn | block
+  interception_enabled: false              # standalone detection only for now
+
+registry:
+  url: https://registry.arkheia.ai
+  pull_on_startup: false    # offline for local dev — profiles loaded from disk
+  pull_interval_hours: 0    # 0 = disabled
+
+audit:
+  log_path: C:\arkheia-mcp\audit.jsonl
+  retention_days: 365
+  include_prompt_hash: true
+
+mcp_server:
+  enabled: true
+  port: 8100
+  proxy_url: http://localhost:8098

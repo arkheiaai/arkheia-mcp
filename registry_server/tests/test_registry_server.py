@@ -118,7 +118,7 @@ def test_profiles_invalid_key_returns_401(client):
     """4. GET /profiles with invalid key returns 401."""
     resp = client.get(
         "/profiles",
-        headers={"Authorization": "Bearer ak_live_wrongkey"},
+        headers={"Authorization": "Bearer ak_live_wrongkey"},  # noqa: test fixture, not a real key  # aikido-ignore
     )
     assert resp.status_code == 401
 

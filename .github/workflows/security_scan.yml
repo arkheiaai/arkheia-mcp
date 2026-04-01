@@ -14,10 +14,12 @@ jobs:
     name: Bandit static analysis
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Pin: actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        # Pin: actions/setup-python v5.3.0
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
         with:
           python-version: '3.12'
 
@@ -42,7 +44,8 @@ jobs:
 
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        # Pin: actions/upload-artifact v4.4.3
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
         with:
           name: bandit-results-${{ github.run_number }}
           path: |
@@ -54,10 +57,12 @@ jobs:
     name: Dependency vulnerability audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Pin: actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        # Pin: actions/setup-python v5.3.0
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
         with:
           python-version: '3.12'
 
@@ -78,7 +83,8 @@ jobs:
 
       - name: Upload results
         if: always()
-        uses: actions/upload-artifact@v4
+        # Pin: actions/upload-artifact v4.4.3
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
         with:
           name: pip-audit-results-${{ github.run_number }}
           path: |
@@ -90,12 +96,14 @@ jobs:
     name: Check for committed secrets
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Pin: actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           fetch-depth: 0   # full history for secret scanning
 
       - name: Scan for secrets with trufflehog
-        uses: trufflesecurity/trufflehog@main
+        # Pin: trufflesecurity/trufflehog v3.88.22
+        uses: trufflesecurity/trufflehog@34339eaf08bf5c2a27dbd969812127721f3743ed  # v3.88.22
         with:
           path: ./
           base: ${{ github.event.repository.default_branch }}

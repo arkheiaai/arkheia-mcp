@@ -17,11 +17,15 @@ services:
       context: .
       dockerfile: proxy/Dockerfile
     ports:
-      - "8099:8099"
+      - "8098:8098"                              # Enterprise Proxy on host:8098 (Local Proxy is 8099)
     environment:
       - ARKHEIA_API_KEY=${ARKHEIA_API_KEY:-}     # injected from host, empty = registry disabled
       - ARKHEIA_ENV=${ARKHEIA_ENV:-development}
       - ARKHEIA_REGISTRY_URL=http://registry:8200
+      - ARKHEIA_PROXY_PORT=8098
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
+      - ARKHEIA_LICENSE_KEY=${ARKHEIA_LICENSE_KEY:-}   # HMAC key for surface verification
+      - ARKHEIA_REQUIRE_LICENSE=${ARKHEIA_REQUIRE_LICENSE:-false}
     volumes:
       - ./profiles:/app/profiles:ro              # read-only; registry writes go to profile_data
       - profile_data:/etc/arkheia/profiles       # writable; registry updates land here
@@ -29,7 +33,7 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import httpx; httpx.get('http://localhost:8099/admin/health').raise_for_status()"]
+             "import httpx; httpx.get('http://localhost:8098/admin/health').raise_for_status()"]
       interval: 30s
       timeout: 5s
       retries: 3

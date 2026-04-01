@@ -9,9 +9,15 @@ Instantiates and wires all components:
   - Endpoints: /detect/verify, /audit/log, /admin/*
 """
 
-import logging
+# Load .env BEFORE any proxy.* imports so env vars are available.
 import os
+import sys
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv(usecwd=True), override=True)
+
+import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
@@ -40,12 +46,41 @@ async def lifespan(app: FastAPI):
     # ----------------------------------------------------------------
     # STARTUP
     # ----------------------------------------------------------------
+    # Validate JWT_SECRET at startup (fails fast with clear error, not at import time)
+    from proxy.auth import _get_jwt_secret
+    _get_jwt_secret()  # raises RuntimeError with clear message if missing/short
+
     logger.info("Arkheia Enterprise Proxy starting up")
 
     # 1. Profile router -- loads all YAML profiles
+    profiles_dir = Path(settings.detection.profile_dir)
+    if not profiles_dir.is_dir():
+        logger.error(
+            "[FATAL] ARKHEIA_PROFILES_DIR does not exist: %s. "
+            "Set ARKHEIA_PROFILES_DIR in .env or NSSM AppEnvironmentExtra.",
+            profiles_dir,
+        )
+        raise RuntimeError(f"Cannot start: required directory/config missing")
     profile_router = ProfileRouter(settings.detection.profile_dir)
     logger.info("Loaded %d profiles from %s",
                 profile_router.loaded_count, settings.detection.profile_dir)
+    if profile_router.loaded_count == 0:
+        require_license = os.getenv("ARKHEIA_REQUIRE_LICENSE", "false").lower() in (
+            "true", "1", "yes"
+        )
+        if require_license:
+            logger.error(
+                "[FATAL] Zero valid licensed profiles loaded from %s. "
+                "All surfaces may be expired or unsigned. "
+                "Renew your Arkheia license and restart.",
+                settings.detection.profile_dir,
+            )
+            raise RuntimeError(f"Cannot start: required directory/config missing")
+        logger.warning(
+            "[WARN] Zero profiles loaded from %s — all detections will return UNKNOWN. "
+            "Drop .yaml profile files into that directory and restart.",
+            settings.detection.profile_dir,
+        )
 
     # 2. Detection engine
     engine = DetectionEngine(profile_router)

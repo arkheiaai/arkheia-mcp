@@ -76,13 +76,25 @@ def mock_audit():
 @pytest.fixture
 def client(mock_engine, mock_audit, tmp_path):
     """TestClient with mocked engine and audit writer."""
-    app = create_app()
-    with TestClient(app, raise_server_exceptions=True) as c:
-        # Override AFTER lifespan startup has run (lifespan sets real objects first)
-        app.state.engine = mock_engine
-        app.state.audit_writer = mock_audit
-        app.state.settings = MagicMock()
-        yield c
+    # Provide a temp profiles dir so lifespan doesn't fail on missing directory
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+    with patch("proxy.main.settings") as mock_settings:
+        mock_settings.detection.profile_dir = str(profiles_dir)
+        mock_settings.proxy.log_level = "WARNING"
+        mock_settings.audit.log_path = str(tmp_path / "audit.jsonl")
+        mock_settings.audit.retention_days = 90
+        mock_settings.registry.url = ""
+        from pydantic import SecretStr
+        mock_settings.arkheia_api_key = SecretStr("")
+        mock_settings.synesis = MagicMock()
+        mock_settings.synesis.enabled = False
+        app = create_app()
+        with TestClient(app, raise_server_exceptions=False) as c:
+            # Override AFTER lifespan startup has run
+            app.state.engine = mock_engine
+            app.state.audit_writer = mock_audit
+            yield c
 
 
 # ---------------------------------------------------------------------------

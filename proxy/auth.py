@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import sys
 import time
 from typing import Any
@@ -30,32 +31,39 @@ GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8098/auth/callback")
 
-# SECURITY: No fallback secret - fail fast if not configured.
+# SECURITY: No fallback secret - validated lazily so tests can import this
+# module without the env var, but the app still fails on first real use.
 # Generate with: python -c "import secrets; print(secrets.token_urlsafe(64))"
-JWT_SECRET = os.getenv("JWT_SECRET")
+_jwt_secret: str | None = None
 
-if not JWT_SECRET:
-    print(
-        "FATAL: JWT_SECRET environment variable is not set.\n"
-        "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\"\n"
-        "Then set it via: nssm set ArkheiaEnterpriseProxy AppEnvironmentExtra JWT_SECRET=<value>",
-        file=sys.stderr,
-    )
-    sys.exit(1)
 
-if len(JWT_SECRET) < 32:
-    print(
-        "FATAL: JWT_SECRET must be at least 32 characters long.\n"
-        f"Current length: {len(JWT_SECRET)}\n"
-        "Generate a proper secret with: python -c \"import secrets; print(secrets.token_urlsafe(64))\"",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+def _get_jwt_secret() -> str:
+    """Return the validated JWT_SECRET, caching after first successful read."""
+    global _jwt_secret
+    if _jwt_secret is not None:
+        return _jwt_secret
+
+    raw = os.getenv("JWT_SECRET")
+    if not raw:
+        raise RuntimeError(
+            "JWT_SECRET environment variable is not set.\n"
+            "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\"\n"
+            "Then set it via: nssm set ArkheiaEnterpriseProxy AppEnvironmentExtra JWT_SECRET=<value>"
+        )
+    if len(raw) < 32:
+        raise RuntimeError(
+            f"JWT_SECRET must be at least 32 characters long (current: {len(raw)}).\n"
+            "Generate a proper secret with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+        )
+    _jwt_secret = raw
+    return _jwt_secret
+
 
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRY_SECONDS = int(os.getenv("JWT_EXPIRY_SECONDS", "86400"))  # 24 hours
 
 COOKIE_NAME = "arkheia_enterprise_session"
+CSRF_COOKIE_NAME = "arkheia_oauth_state"
 
 _default_whitelist = "david@arkheia.ai"
 EMAIL_WHITELIST: set[str] = {
@@ -81,13 +89,13 @@ def create_jwt(email: str) -> str:
         "iat": int(time.time()),
         "exp": int(time.time()) + JWT_EXPIRY_SECONDS,
     }
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
 
 def verify_jwt(token: str) -> str | None:
     """Verify a JWT and return the email (sub) or None if invalid/expired."""
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        payload = jwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM])
         return payload.get("sub")
     except jwt.ExpiredSignatureError:
         logger.debug("JWT expired")
@@ -171,6 +179,12 @@ def is_email_whitelisted(email: str) -> bool:
 # Cookie helpers
 # ---------------------------------------------------------------------------
 
+def _is_cookie_secure() -> bool:
+    """Cookie secure flag — defaults to True (safe default for production).
+    Set COOKIE_SECURE=false explicitly for local development only."""
+    return os.getenv("COOKIE_SECURE", "true").lower() != "false"
+
+
 def set_auth_cookie(response: Response, token: str) -> None:
     """Set the JWT session cookie on a response."""
     response.set_cookie(
@@ -178,7 +192,7 @@ def set_auth_cookie(response: Response, token: str) -> None:
         value=token,
         httponly=True,
         samesite="lax",
-        secure=os.getenv("COOKIE_SECURE", "false").lower() == "true",
+        secure=_is_cookie_secure(),
         max_age=JWT_EXPIRY_SECONDS,
         path="/",
     )
@@ -187,6 +201,33 @@ def set_auth_cookie(response: Response, token: str) -> None:
 def clear_auth_cookie(response: Response) -> None:
     """Delete the JWT session cookie."""
     response.delete_cookie(key=COOKIE_NAME, path="/")
+
+
+# ---------------------------------------------------------------------------
+# OAuth CSRF state helpers
+# ---------------------------------------------------------------------------
+
+def generate_oauth_state() -> str:
+    """Generate a cryptographic random state token for OAuth CSRF protection."""
+    return secrets.token_urlsafe(32)
+
+
+def set_oauth_state_cookie(response: Response, state: str) -> None:
+    """Set a short-lived cookie containing the OAuth state parameter."""
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=state,
+        httponly=True,
+        samesite="lax",
+        secure=_is_cookie_secure(),
+        max_age=600,  # 10 minutes — enough for the OAuth flow
+        path="/auth",
+    )
+
+
+def clear_oauth_state_cookie(response: Response) -> None:
+    """Clear the OAuth state cookie after validation."""
+    response.delete_cookie(key=CSRF_COOKIE_NAME, path="/auth")
 
 
 # ---------------------------------------------------------------------------

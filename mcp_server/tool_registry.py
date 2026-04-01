@@ -81,6 +81,25 @@ REGISTRY: dict[str, ToolPolicy] = {
         network_egress=False,
         description="Call local Ollama model and screen response through Arkheia",
     ),
+    # ── Memory (local SQLite knowledge graph, no egress) ─────────────────────
+    "memory_store": ToolPolicy(
+        name="memory_store",
+        permissions=[Permission.READ, Permission.WRITE],
+        network_egress=False,
+        description="Store an entity and observations in the persistent knowledge graph",
+    ),
+    "memory_retrieve": ToolPolicy(
+        name="memory_retrieve",
+        permissions=[Permission.READ],
+        network_egress=False,
+        description="Retrieve entities and their observations from the knowledge graph",
+    ),
+    "memory_relate": ToolPolicy(
+        name="memory_relate",
+        permissions=[Permission.READ, Permission.WRITE],
+        network_egress=False,
+        description="Store a named relationship between two entities in the knowledge graph",
+    ),
 }
 
 
