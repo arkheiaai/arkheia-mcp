@@ -1,7 +1,8 @@
 """
-Multi-profile router with atomic reload and license enforcement.
+Multi-profile router with atomic reload, license enforcement, and encrypted profile support.
 
-Loads all YAML profiles at startup. Supports exact, prefix, and family matching.
+Loads YAML profiles at startup. Supports both plaintext (.yaml) and encrypted (.yaml.enc) files.
+Encrypted profiles require a decryption key fetched dynamically from the hosted endpoint.
 Reload is copy-and-swap -- zero dropped requests during update.
 
 License verification:
@@ -101,6 +102,9 @@ class ProfileRouter:
     """
     Thread-safe (asyncio-safe) profile dispatch table.
 
+    Supports both plaintext (.yaml) and encrypted (.yaml.enc) profiles.
+    Encrypted profiles require a decryption key (set via set_decryption_key).
+
     Lookup priority:
       1. Exact model_id match
       2. Prefix match (e.g. "claude-sonnet" matches "claude-sonnet-4-6")
@@ -108,15 +112,21 @@ class ProfileRouter:
       4. No match -> None (caller returns UNKNOWN)
     """
 
-    def __init__(self, profile_dir: str):
+    def __init__(self, profile_dir: str, decryption_key: Optional[bytes] = None):
         self._profiles: dict[str, dict] = {}
         self._lock = asyncio.Lock()
         self.profile_dir = profile_dir
         self._loaded_count = 0
+        self._decryption_key = decryption_key
+        self.load_all()
+
+    def set_decryption_key(self, key: bytes) -> None:
+        """Set the decryption key and reload encrypted profiles."""
+        self._decryption_key = key
         self.load_all()
 
     def load_all(self) -> None:
-        """Load all YAML profiles from profile_dir. Called at startup."""
+        """Load all YAML profiles from profile_dir. Supports .yaml and .yaml.enc."""
         profiles: dict[str, dict] = {}
         path = Path(self.profile_dir).resolve()
         if not path.exists():
@@ -125,33 +135,47 @@ class ProfileRouter:
             self._loaded_count = 0
             return
 
+        # Load plaintext .yaml profiles
         for f in path.glob("*.yaml"):
-            # Guard: only load files within the profile directory (no symlink escape)
             if not f.resolve().parent == path:  # aikido-ignore
                 logger.warning("Skipping file outside profile dir: %s", f)
                 continue
             if f.name == "schema.yaml":
                 continue
-            try:
-                with open(f, encoding="utf-8") as fh:
-                    data = yaml.safe_load(fh)
-                if not data:
+            data = self._load_plaintext(f)
+            if data:
+                model_id = self._extract_model_id(data, f.name)
+                if model_id:
+                    profiles[model_id] = data
+
+        # Load encrypted .yaml.enc profiles (if decryption key available)
+        enc_files = list(path.glob("*.yaml.enc"))
+        if enc_files and not self._decryption_key:
+            logger.warning(
+                "Found %d encrypted profiles but no decryption key — skipping. "
+                "Detection will return UNKNOWN for these models.",
+                len(enc_files),
+            )
+        elif enc_files:
+            from proxy.crypto.profile_crypto import decrypt_profile
+            for f in enc_files:
+                if not f.resolve().parent == path:  # aikido-ignore
                     continue
-                if not _verify_profile_license(data, f.name):
-                    continue
-                # Support both real profile format (top-level "model" key)
-                # and spec schema format (metadata.model_id)
-                model_id = (
-                    data.get("model")
-                    or data.get("metadata", {}).get("model_id")
-                )
-                if not model_id:
-                    logger.warning("Profile %s has no model_id, skipping", f.name)
-                    continue
-                profiles[model_id] = data
-                logger.debug("Loaded profile: %s -> %s", f.name, model_id)
-            except Exception as e:
-                logger.error("Failed to load profile %s: %s", f.name, e)
+                profile_name = f.name.replace(".yaml.enc", "")
+                try:
+                    encrypted = f.read_bytes()
+                    plaintext = decrypt_profile(encrypted, self._decryption_key, profile_name)
+                    data = yaml.safe_load(plaintext)
+                    if not data:
+                        continue
+                    if not _verify_profile_license(data, f.name):
+                        continue
+                    model_id = self._extract_model_id(data, f.name)
+                    if model_id:
+                        profiles[model_id] = data
+                        logger.debug("Loaded encrypted profile: %s -> %s", f.name, model_id)
+                except Exception as e:
+                    logger.error("Failed to decrypt profile %s: %s", f.name, e)
 
         self._profiles = profiles
         self._loaded_count = len(profiles)
@@ -160,6 +184,32 @@ class ProfileRouter:
             len(profiles),
             self.profile_dir,
         )
+
+    def _load_plaintext(self, f: Path) -> Optional[dict]:
+        """Load and validate a plaintext YAML profile."""
+        try:
+            with open(f, encoding="utf-8") as fh:
+                data = yaml.safe_load(fh)
+            if not data:
+                return None
+            if not _verify_profile_license(data, f.name):
+                return None
+            return data
+        except Exception as e:
+            logger.error("Failed to load profile %s: %s", f.name, e)
+            return None
+
+    @staticmethod
+    def _extract_model_id(data: dict, filename: str) -> Optional[str]:
+        """Extract model_id from profile data."""
+        model_id = (
+            data.get("model")
+            or data.get("metadata", {}).get("model_id")
+        )
+        if not model_id:
+            logger.warning("Profile %s has no model_id, skipping", filename)
+            return None
+        return model_id
 
     def get(self, model_id: str) -> Optional[dict]:
         """Return profile for model_id, or None if no match."""
@@ -216,39 +266,15 @@ class ProfileRouter:
         """
         Atomic reload -- build new profiles dict then swap.
         Requests in flight complete against old profiles.
+        Handles both .yaml and .yaml.enc files.
         """
         target = profile_dir or self.profile_dir
-        new_profiles: dict[str, dict] = {}
-        path = Path(target).resolve()
-        for f in path.glob("*.yaml"):
-            # Guard: only load files within the profile directory (no symlink escape)
-            if not f.resolve().parent == path:  # aikido-ignore
-                logger.warning("Skipping file outside profile dir: %s", f)
-                continue
-            if f.name == "schema.yaml":
-                continue
-            try:
-                with open(f, encoding="utf-8") as fh:
-                    data = yaml.safe_load(fh)
-                if not data:
-                    continue
-                if not _verify_profile_license(data, f.name):
-                    continue
-                model_id = (
-                    data.get("model")
-                    or data.get("metadata", {}).get("model_id")
-                )
-                if not model_id:
-                    continue
-                new_profiles[model_id] = data
-            except Exception as e:
-                logger.error("Reload: failed to parse %s: %s", f.name, e)
+        old_dir = self.profile_dir
+        self.profile_dir = target
+        self.load_all()
+        self.profile_dir = old_dir if profile_dir else target
 
-        async with self._lock:
-            self._profiles = new_profiles
-            self._loaded_count = len(new_profiles)
-
-        logger.info("ProfileRouter reloaded: %d valid profiles", len(new_profiles))
+        logger.info("ProfileRouter reloaded: %d valid profiles", self._loaded_count)
 
     @property
     def loaded_count(self) -> int:
