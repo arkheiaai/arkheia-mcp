@@ -1,11 +1,19 @@
 # Arkheia MCP Server — Fabrication Detection for LLMs
 
 Detect fabrication (hallucination) in any LLM output.
-One command to install. Free tier included (1,500 detections/month).
+Free tier included (1,500 detections/month).
 
 ## Quick Start
 
-### 1. Get an API key (free)
+### 1. Clone and install
+
+```bash
+git clone https://github.com/arkheiaai/arkheia-mcp.git ~/.arkheia-mcp
+cd ~/.arkheia-mcp
+pip install -r requirements.txt
+```
+
+### 2. Get an API key (free)
 
 ```bash
 curl -X POST https://arkheia-proxy-production.up.railway.app/v1/provision \
@@ -13,7 +21,7 @@ curl -X POST https://arkheia-proxy-production.up.railway.app/v1/provision \
   -d '{"email": "you@example.com"}'
 ```
 
-### 2. Add to Claude Desktop
+### 3. Add to Claude Desktop
 
 Edit your config file:
 - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
@@ -23,9 +31,11 @@ Edit your config file:
 {
   "mcpServers": {
     "arkheia": {
-      "command": "npx",
-      "args": ["-y", "@arkheia/mcp-server"],
+      "command": "python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "~/.arkheia-mcp",
       "env": {
+        "PYTHONPATH": "~/.arkheia-mcp",
         "ARKHEIA_API_KEY": "ak_live_YOUR_KEY_HERE"
       }
     }
@@ -33,7 +43,9 @@ Edit your config file:
 }
 ```
 
-### 3. Restart Claude
+On Windows, replace `~/.arkheia-mcp` with the full path (e.g. `C:/Users/YourName/.arkheia-mcp`).
+
+### 4. Restart Claude
 
 The `arkheia_verify` and `arkheia_audit_log` tools will appear automatically.
 
@@ -58,8 +70,8 @@ The `arkheia_verify` and `arkheia_audit_log` tools will appear automatically.
 
 ## Requirements
 
-- Node.js 18+
-- Python 3.10+ (auto-detected)
+- Python 3.10+
+- Git
 
 ## Full Setup Guide
 

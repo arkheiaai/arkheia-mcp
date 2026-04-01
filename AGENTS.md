@@ -5,8 +5,8 @@ If you are an AI agent helping a user install Arkheia, follow these steps exactl
 
 ## Prerequisites
 
-- **Node.js 18+** — check: `node --version`
 - **Python 3.10+** — check: `python3 --version` (or `python --version` on Windows)
+- **Git** — check: `git --version`
 
 ## Step 1: Get an API Key
 
@@ -31,21 +31,34 @@ Edit your Claude Desktop config file:
 | Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
 | Linux | `~/.config/Claude/claude_desktop_config.json` |
 
-Add this to the file (create it if it doesn't exist):
+First, clone the repo (one time only):
+```bash
+git clone https://github.com/arkheiaai/arkheia-mcp.git ~/.arkheia-mcp
+cd ~/.arkheia-mcp
+pip install -r requirements.txt
+```
+
+On Windows, use `%USERPROFILE%\.arkheia-mcp` instead of `~/.arkheia-mcp`.
+
+Then add this to the config file (create it if it doesn't exist):
 
 ```json
 {
   "mcpServers": {
     "arkheia": {
-      "command": "npx",
-      "args": ["-y", "@arkheia/mcp-server"],
+      "command": "python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "~/.arkheia-mcp",
       "env": {
+        "PYTHONPATH": "~/.arkheia-mcp",
         "ARKHEIA_API_KEY": "ak_live_YOUR_KEY_HERE"
       }
     }
   }
 }
 ```
+
+On Windows, replace `~/.arkheia-mcp` with the full path, e.g. `C:/Users/YourName/.arkheia-mcp`.
 
 Replace `ak_live_YOUR_KEY_HERE` with your actual API key from Step 1.
 
@@ -57,9 +70,11 @@ Add to `~/.claude/settings.json`:
 {
   "mcpServers": {
     "arkheia": {
-      "command": "npx",
-      "args": ["-y", "@arkheia/mcp-server"],
+      "command": "python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "~/.arkheia-mcp",
       "env": {
+        "PYTHONPATH": "~/.arkheia-mcp",
         "ARKHEIA_API_KEY": "ak_live_YOUR_KEY_HERE"
       }
     }
