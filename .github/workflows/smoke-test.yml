@@ -1,0 +1,39 @@
+name: Smoke Test — MCP Server E2E
+
+on:
+  push:
+    branches: [main, staging]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '23 7 * * 1'  # Monday 07:23 UTC (off-minute)
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: MCP server end-to-end smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      # Pin: actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Set up Python
+        # Pin: actions/setup-python v5.3.0
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r mcp_server/requirements.txt
+          pip install pytest pytest-asyncio pytest-timeout
+
+      - name: Run smoke tests
+        env:
+          JWT_SECRET: "ci-test-secret-not-for-production-use-minimum-32chars!!"
+          ARKHEIA_API_KEY: ${{ secrets.ARKHEIA_API_KEY }}
+        run: |
+          pytest tests/test_smoke_e2e.py -v --timeout=60

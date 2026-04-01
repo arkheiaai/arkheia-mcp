@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Arkheia MCP Server — Fabrication detection for LLM outputs. Detect hallucination in any model's output with a single tool call.",
   "bin": {
-    "arkheia-mcp": "./bin/arkheia-mcp.js"
+    "mcp-server": "bin/arkheia-mcp.js"
   },
   "scripts": {
     "start": "node bin/arkheia-mcp.js",
@@ -29,7 +29,7 @@
   "homepage": "https://arkheia.ai/mcp",
   "repository": {
     "type": "git",
-    "url": "https://github.com/arkheiaai/arkheia-mcp"
+    "url": "git+https://github.com/arkheiaai/arkheia-mcp.git"
   },
   "engines": {
     "node": ">=18.0.0"
