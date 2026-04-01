@@ -82,6 +82,42 @@ async def lifespan(app: FastAPI):
             settings.detection.profile_dir,
         )
 
+    # 1b. Dynamic key loading for encrypted profiles
+    enc_files = list(profiles_dir.glob("*.yaml.enc"))
+    if enc_files and not profile_router._decryption_key:
+        api_key = os.getenv("ARKHEIA_API_KEY", "")
+        if api_key:
+            try:
+                from proxy.crypto.profile_crypto import DynamicKeyLoader
+                loader = DynamicKeyLoader(
+                    hosted_url=os.getenv(
+                        "ARKHEIA_HOSTED_URL",
+                        "https://arkheia-proxy-production.up.railway.app",
+                    ),
+                    api_key=api_key,
+                )
+                key = await loader.fetch_key()
+                if key:
+                    profile_router.set_decryption_key(key)
+                    logger.info(
+                        "Decryption key loaded — %d encrypted profiles available",
+                        profile_router.loaded_count,
+                    )
+                else:
+                    logger.warning(
+                        "Could not fetch decryption key — encrypted profiles unavailable"
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "DynamicKeyLoader failed (continuing without encrypted profiles): %s",
+                    exc,
+                )
+        else:
+            logger.warning(
+                "Encrypted profiles found but no ARKHEIA_API_KEY — "
+                "set key or provide decryption_key"
+            )
+
     # 2. Detection engine
     engine = DetectionEngine(profile_router)
 

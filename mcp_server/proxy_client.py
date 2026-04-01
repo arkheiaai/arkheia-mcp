@@ -2,7 +2,7 @@
 HTTP client for communicating with the Arkheia detection service.
 
 Primary path: local Enterprise Proxy at /detect/verify
-Fallback path: hosted API at app.arkheia.ai/v1/detect
+Fallback path: hosted API at arkheia-proxy-production.up.railway.app/v1/detect
 
 All methods return dicts -- never raise exceptions to the caller.
 Failures surface as UNKNOWN risk with error field set.
@@ -17,7 +17,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Hosted API defaults
-HOSTED_API_URL = "https://app.arkheia.ai"
+HOSTED_API_URL = "https://arkheia-proxy-production.up.railway.app"
 
 
 class ProxyClient:
@@ -25,7 +25,7 @@ class ProxyClient:
     Thin async HTTP client wrapping Arkheia detection endpoints.
 
     Tries local proxy first (Enterprise Proxy at ARKHEIA_PROXY_URL).
-    Falls back to hosted API (app.arkheia.ai/v1/detect) if local is unavailable.
+    Falls back to hosted API (arkheia-proxy-production.up.railway.app/v1/detect) if local is unavailable.
     Hosted path requires an API key (ARKHEIA_API_KEY env var).
     """
 
@@ -122,7 +122,7 @@ class ProxyClient:
         response: str,
         model_id: str,
     ) -> dict:
-        """POST /v1/detect on hosted Arkheia API (app.arkheia.ai)."""
+        """POST /v1/detect on hosted Arkheia API (arkheia-proxy-production.up.railway.app)."""
         payload = {
             "model": model_id,
             "response": response,

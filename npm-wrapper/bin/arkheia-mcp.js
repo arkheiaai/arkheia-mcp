@@ -88,6 +88,36 @@ function main() {
     process.exit(1);
   }
 
+  // ── Load config from ~/.arkheia/config.json ──────────────────
+  const configPath = path.join(
+    process.env.HOME || process.env.USERPROFILE || "/tmp",
+    ".arkheia",
+    "config.json"
+  );
+  let arkheiaConfig = {};
+  try {
+    if (fs.existsSync(configPath)) {
+      arkheiaConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      process.stderr.write(`[arkheia] Loaded config from ${configPath}\n`);
+    }
+  } catch (err) {
+    process.stderr.write(
+      `[arkheia] Warning: Could not read ${configPath}: ${err.message}\n`
+    );
+  }
+
+  // Inject API key from config if not already in env
+  if (!process.env.ARKHEIA_API_KEY && arkheiaConfig.api_key) {
+    process.env.ARKHEIA_API_KEY = arkheiaConfig.api_key;
+    process.stderr.write("[arkheia] API key loaded from config.json\n");
+  }
+
+  // Inject hosted URL from config if not already in env
+  if (!process.env.ARKHEIA_HOSTED_URL && arkheiaConfig.proxy_url) {
+    process.env.ARKHEIA_HOSTED_URL = arkheiaConfig.proxy_url;
+    process.stderr.write(`[arkheia] Hosted URL: ${arkheiaConfig.proxy_url}\n`);
+  }
+
   // Check for API key
   if (!process.env.ARKHEIA_API_KEY) {
     process.stderr.write(
