@@ -17,7 +17,14 @@ if str(REPO_ROOT) not in sys.path:
 
 from proxy.crypto.profile_crypto import encrypt_profile
 from proxy.license.integrity import generate_manifest
-from setup_cython import COMPILED_MODULES
+try:
+    from setup_cython import COMPILED_MODULES
+except ImportError:
+    COMPILED_MODULES = [
+        "proxy/detection/features.py",
+        "proxy/detection/engine.py",
+        "proxy/router/profile_router.py",
+    ]
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
