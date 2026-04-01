@@ -71,7 +71,7 @@ def _server_params(env_overrides: dict | None = None) -> StdioServerParameters:
         # Ensure clean state -- no leftover env vars
         "ARKHEIA_PROXY_URL": "http://localhost:19999",  # nothing listening
         "ARKHEIA_API_KEY": "",
-        "ARKHEIA_HOSTED_URL": "https://app.arkheia.ai",
+        "ARKHEIA_HOSTED_URL": "https://arkheia-proxy-production.up.railway.app",
         # Use a temp memory DB so tests don't pollute real data
         "MEMORY_DB_PATH": str(_ROOT / "tests" / "_test_memory.db"),
     }

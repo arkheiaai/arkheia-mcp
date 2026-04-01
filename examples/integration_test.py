@@ -9,7 +9,7 @@ import httpx
 def verify_response() -> None:
     api_key = os.environ["ARKHEIA_API_KEY"]
     response = httpx.post(
-        "https://app.arkheia.ai/v1/detect",
+        "https://arkheia-proxy-production.up.railway.app/v1/detect",
         headers={"X-Arkheia-Key": api_key},
         json={
             "model": "gpt-4o",

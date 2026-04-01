@@ -14,7 +14,7 @@ def client_with_key():
     """ProxyClient with hosted API key configured."""
     return ProxyClient(
         base_url="http://localhost:8098",
-        hosted_url="https://app.arkheia.ai",
+        hosted_url="https://arkheia-proxy-production.up.railway.app",
         api_key="ak_live_testkey",
     )
 
@@ -154,7 +154,7 @@ class TestLocalProxy:
         """Hosted API returns 500 → generic error, not auth or quota."""
         client_with_key._local_available = False
 
-        response_500 = httpx.Response(500, request=httpx.Request("POST", "https://app.arkheia.ai/v1/detect"))
+        response_500 = httpx.Response(500, request=httpx.Request("POST", "https://arkheia-proxy-production.up.railway.app/v1/detect"))
 
         async def mock_post(url, **kwargs):
             raise httpx.HTTPStatusError("Server error", request=response_500.request, response=response_500)
@@ -202,7 +202,7 @@ class TestHostedFallback:
         """Hosted API returns 401 → auth error."""
         client_with_key._local_available = False
 
-        response_401 = httpx.Response(401, request=httpx.Request("POST", "https://app.arkheia.ai/v1/detect"))
+        response_401 = httpx.Response(401, request=httpx.Request("POST", "https://arkheia-proxy-production.up.railway.app/v1/detect"))
 
         async def mock_post(url, **kwargs):
             raise httpx.HTTPStatusError("Unauthorized", request=response_401.request, response=response_401)
@@ -217,7 +217,7 @@ class TestHostedFallback:
         """Hosted API returns 429 → quota error."""
         client_with_key._local_available = False
 
-        response_429 = httpx.Response(429, request=httpx.Request("POST", "https://app.arkheia.ai/v1/detect"))
+        response_429 = httpx.Response(429, request=httpx.Request("POST", "https://arkheia-proxy-production.up.railway.app/v1/detect"))
 
         async def mock_post(url, **kwargs):
             raise httpx.HTTPStatusError("Rate limited", request=response_429.request, response=response_429)

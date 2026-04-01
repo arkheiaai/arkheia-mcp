@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-HOSTED_URL="${ARKHEIA_HOSTED_URL:-https://app.arkheia.ai}"
+HOSTED_URL="${ARKHEIA_HOSTED_URL:-https://arkheia-proxy-production.up.railway.app}"
 API_KEY="${ARKHEIA_API_KEY:-}"
 EMAIL=""
 

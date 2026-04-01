@@ -15,7 +15,7 @@
  * Environment variables:
  *   ARKHEIA_API_KEY     — API key for hosted detection (required)
  *   ARKHEIA_PROXY_URL   — Local proxy URL (optional, for enterprise)
- *   ARKHEIA_HOSTED_URL  — Hosted API URL (default: https://app.arkheia.ai)
+ *   ARKHEIA_HOSTED_URL  — Hosted API URL (default: https://arkheia-proxy-production.up.railway.app)
  */
 
 const { spawn, execSync } = require("child_process");
