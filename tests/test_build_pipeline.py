@@ -9,7 +9,13 @@ from pathlib import Path
 
 import pytest
 
-import setup_cython
+HAS_SETUPTOOLS = importlib.util.find_spec("setuptools") is not None
+
+if HAS_SETUPTOOLS:
+    import setup_cython
+else:
+    setup_cython = None
+
 from scripts import build_release
 
 HAS_CYTHON = importlib.util.find_spec("Cython") is not None
@@ -23,6 +29,7 @@ def make_case_dir(case_name: str) -> Path:
     return case_dir
 
 
+@pytest.mark.skipif(not HAS_SETUPTOOLS, reason="setuptools not installed")
 def test_setup_cython_has_modules():
     assert setup_cython.COMPILED_MODULES == [
         "proxy/detection/features.py",
@@ -69,6 +76,6 @@ def test_build_release_manifest_step():
         shutil.rmtree(case_dir, ignore_errors=True)
 
 
-@pytest.mark.skipif(not HAS_CYTHON, reason="Cython is not installed")
+@pytest.mark.skipif(not HAS_SETUPTOOLS or not HAS_CYTHON, reason="setuptools or Cython not installed")
 def test_setup_cython_exposes_build_hook():
     assert callable(setup_cython.build_extensions)
