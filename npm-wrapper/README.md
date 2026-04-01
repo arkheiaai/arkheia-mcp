@@ -1,61 +1,72 @@
 # Arkheia MCP Server — Fabrication Detection for LLMs
 
 Detect fabrication (hallucination) in any LLM output.
-One command to install. Free tier included.
+One command to install. Free tier included (1,500 detections/month).
 
-## Install
+## Quick Start
+
+### 1. Get an API key (free)
 
 ```bash
-npx @arkheia/mcp-server
+curl -X POST https://arkheia-proxy-production.up.railway.app/v1/provision \
+  -H "Content-Type: application/json" \
+  -d '{"email": "you@example.com"}'
 ```
 
-## Configure for Claude Desktop
+### 2. Add to Claude Desktop
 
-Add to your Claude Desktop MCP config (`~/.claude/settings.json`):
+Edit your config file:
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
   "mcpServers": {
     "arkheia": {
       "command": "npx",
-      "args": ["@arkheia/mcp-server"],
+      "args": ["-y", "@arkheia/mcp-server"],
       "env": {
-        "ARKHEIA_API_KEY": "ak_live_..."
+        "ARKHEIA_API_KEY": "ak_live_YOUR_KEY_HERE"
       }
     }
   }
 }
 ```
 
-## What It Does
+### 3. Restart Claude
 
-Screens model outputs for fabrication using behavioural signal analysis.
-Returns a risk assessment (LOW/MEDIUM/HIGH) with confidence score and
-detection features for audit trail.
+The `arkheia_verify` and `arkheia_audit_log` tools will appear automatically.
 
 ## Tools
 
-### arkheia_verify
-Check any model output for fabrication risk.
-
-### arkheia_audit_log
-Review detection history for your session.
+| Tool | Description |
+|------|-------------|
+| `arkheia_verify` | Score any model output for fabrication risk (LOW/MEDIUM/HIGH) |
+| `arkheia_audit_log` | Review detection history |
+| `run_grok` | Call xAI Grok + screen for fabrication |
+| `run_gemini` | Call Google Gemini + screen for fabrication |
+| `run_together` | Call Together AI (Kimi, DeepSeek) + screen |
+| `run_ollama` | Call local Ollama model + screen |
+| `memory_store` / `memory_retrieve` / `memory_relate` | Persistent knowledge graph |
 
 ## Pricing
 
-- Free: 1,500 detections/month
-- Single Contributor: $99/month (unlimited)
-- Professional: $499/month (20 concurrent)
-- Team: $1,999/month (50 concurrent)
+- **Free:** 1,500 detections/month (no credit card)
+- **Single Contributor:** $99/month (unlimited)
+- **Professional:** $499/month (20 concurrent)
+- **Team:** $1,999/month (50 concurrent)
 
 ## Requirements
 
 - Node.js 18+
 - Python 3.10+ (auto-detected)
 
+## Full Setup Guide
+
+See [AGENTS.md](https://github.com/arkheiaai/arkheia-mcp/blob/master/AGENTS.md) for detailed instructions, troubleshooting, and environment variables.
+
 ## Links
 
 - Website: https://arkheia.ai
-- Dashboard: https://hermes.arkheia.ai
-- API Docs: https://arkheia.ai/docs
+- GitHub: https://github.com/arkheiaai/arkheia-mcp
 - Support: support@arkheia.ai
