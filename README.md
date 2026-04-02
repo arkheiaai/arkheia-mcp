@@ -10,6 +10,8 @@ Free tier included (1,500 detections/month).
 ```bash
 git clone https://github.com/arkheiaai/arkheia-mcp.git ~/.arkheia-mcp
 cd ~/.arkheia-mcp
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
@@ -31,7 +33,7 @@ Edit your config file:
 {
   "mcpServers": {
     "arkheia": {
-      "command": "python",
+      "command": "~/.arkheia-mcp/.venv/bin/python",
       "args": ["-m", "mcp_server.server"],
       "cwd": "~/.arkheia-mcp",
       "env": {
@@ -43,11 +45,15 @@ Edit your config file:
 }
 ```
 
-On Windows, replace `~/.arkheia-mcp` with the full path (e.g. `C:/Users/YourName/.arkheia-mcp`).
+On Windows, replace `~/.arkheia-mcp` with the full path using forward slashes (e.g. `C:/Users/YourName/.arkheia-mcp`) and use `.venv/Scripts/python` instead of `.venv/bin/python`.
 
-### 4. Restart Claude
+### 4. Restart Claude and verify
 
-The `arkheia_verify` and `arkheia_audit_log` tools will appear automatically.
+Restart Claude Desktop (quit and reopen, not just close window). The Arkheia tools will appear automatically.
+
+To verify, ask Claude: *"Use arkheia_verify to check this response for fabrication: 'The Eiffel Tower is located in Berlin, Germany.'"*
+
+You should see a detection result with a risk level and confidence score.
 
 ## Tools
 
