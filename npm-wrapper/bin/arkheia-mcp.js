@@ -22,13 +22,47 @@ const { spawn, execSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 
-const PYTHON_DIR = path.join(__dirname, "..", "python");
-const REQUIREMENTS = path.join(PYTHON_DIR, "requirements.txt");
-const VENV_DIR = path.join(
+const ARKHEIA_HOME = path.join(
   process.env.HOME || process.env.USERPROFILE || "/tmp",
-  ".arkheia",
-  "venv"
+  ".arkheia"
 );
+const REPO_DIR = path.join(ARKHEIA_HOME, "mcp");
+const BUNDLED_PYTHON_DIR = path.join(__dirname, "..", "python");
+const VENV_DIR = path.join(ARKHEIA_HOME, "venv");
+
+// Determine the real Python source: cloned repo > bundled package
+function getServerDir() {
+  // If repo already cloned, use it
+  if (fs.existsSync(path.join(REPO_DIR, "mcp_server", "server.py"))) {
+    return REPO_DIR;
+  }
+  // If bundled package has the server code, use it
+  if (fs.existsSync(path.join(BUNDLED_PYTHON_DIR, "mcp_server", "server.py"))) {
+    return BUNDLED_PYTHON_DIR;
+  }
+  // Neither exists — clone the repo
+  process.stderr.write("[arkheia] Server code not found. Cloning from GitHub...\n");
+  try {
+    if (!fs.existsSync(ARKHEIA_HOME)) fs.mkdirSync(ARKHEIA_HOME, { recursive: true });
+    execSync(`git clone --depth 1 https://github.com/arkheiaai/arkheia-mcp.git "${REPO_DIR}"`, {
+      stdio: "inherit",
+      timeout: 60000,
+    });
+    process.stderr.write("[arkheia] Repository cloned successfully.\n");
+    return REPO_DIR;
+  } catch (err) {
+    process.stderr.write(
+      `[arkheia] Error: Could not clone repository: ${err.message}\n` +
+      "Manual install: git clone https://github.com/arkheiaai/arkheia-mcp.git ~/.arkheia/mcp\n"
+    );
+    process.exit(1);
+  }
+}
+
+const PYTHON_DIR = getServerDir();
+const REQUIREMENTS = fs.existsSync(path.join(PYTHON_DIR, "mcp_server", "requirements.txt"))
+  ? path.join(PYTHON_DIR, "mcp_server", "requirements.txt")
+  : path.join(PYTHON_DIR, "requirements.txt");
 
 function findPython() {
   const candidates = ["python3", "python"];
@@ -139,16 +173,15 @@ function main() {
   }
 
   // Spawn the MCP server with stdio transport
-  const serverDir = PYTHON_DIR;
   const child = spawn(
     venvPython,
     ["-m", "mcp_server.server"],
     {
-      cwd: serverDir,
+      cwd: PYTHON_DIR,
       stdio: ["pipe", "pipe", "inherit"], // stdin/stdout piped, stderr inherited
       env: {
         ...process.env,
-        PYTHONPATH: serverDir,
+        PYTHONPATH: PYTHON_DIR,
       },
     }
   );
