@@ -1,0 +1,28 @@
+name: CodeQL Security Scan
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'specs/**'
+  pull_request:
+    branches: [master]
+  schedule:
+    - cron: '0 6 * * 1'  # Monday 6am UTC
+
+jobs:
+  analyze:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+    strategy:
+      matrix:
+        language: [python, javascript]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+      - uses: github/codeql-action/analyze@v3
