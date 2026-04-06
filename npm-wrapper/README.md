@@ -1,21 +1,18 @@
-# Arkheia MCP Server — Fabrication Detection for LLMs
+# Arkheia MCP Server — Fabrication Detection for AI Agents
 
-Detect fabrication (hallucination) in any LLM output.
-Free tier included (1,500 detections/month).
+Know when your AI is making things up.
+
+Arkheia screens model responses for fabrication using behavioural fingerprinting. Works with Claude, GPT, Gemini, Grok, Llama, Mistral, and 30+ other models. One tool call. Real-time risk scoring.
+
+Free tier: 1,500 detections/month. No credit card.
 
 ## Quick Start
 
-### 1. Clone and install
-
 ```bash
-git clone https://github.com/arkheiaai/arkheia-mcp.git ~/.arkheia-mcp
-cd ~/.arkheia-mcp
-python -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+npx @arkheia/mcp-server
 ```
 
-### 2. Get an API key (free)
+Get a free API key:
 
 ```bash
 curl -X POST https://arkheia-proxy-production.up.railway.app/v1/provision \
@@ -23,68 +20,70 @@ curl -X POST https://arkheia-proxy-production.up.railway.app/v1/provision \
   -d '{"email": "you@example.com"}'
 ```
 
-### 3. Add to Claude Desktop
-
-Edit your config file:
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+Add to your agent config (Claude Code, Claude Desktop, Cursor, or any MCP-compatible tool):
 
 ```json
 {
   "mcpServers": {
     "arkheia": {
-      "command": "~/.arkheia-mcp/.venv/bin/python",
+      "command": "python",
       "args": ["-m", "mcp_server.server"],
-      "cwd": "~/.arkheia-mcp",
+      "cwd": "~/.arkheia/mcp",
       "env": {
-        "PYTHONPATH": "~/.arkheia-mcp",
-        "ARKHEIA_API_KEY": "ak_live_YOUR_KEY_HERE"
+        "PYTHONPATH": "~/.arkheia/mcp",
+        "ARKHEIA_API_KEY": "ak_live_your_key_here"
       }
     }
   }
 }
 ```
 
-On Windows, replace `~/.arkheia-mcp` with the full path using forward slashes (e.g. `C:/Users/YourName/.arkheia-mcp`) and use `.venv/Scripts/python` instead of `.venv/bin/python`.
+Restart your agent. Then ask it:
 
-### 4. Restart Claude and verify
+> "Use arkheia_verify to check this response: The Kafka 4.1 ConsumerLease API introduces a lease-based partition ownership model."
 
-Restart Claude Desktop (quit and reopen, not just close window). The Arkheia tools will appear automatically.
+It should flag this as **HIGH** risk — because the Kafka 4.1 ConsumerLease API doesn't exist.
 
-To verify, ask Claude: *"Use arkheia_verify to check this response for fabrication: 'The Eiffel Tower is located in Berlin, Germany.'"*
-
-You should see a detection result with a risk level and confidence score.
-
-## Tools
+## What You Get
 
 | Tool | Description |
 |------|-------------|
-| `arkheia_verify` | Score any model output for fabrication risk (LOW/MEDIUM/HIGH) |
-| `arkheia_audit_log` | Review detection history |
-| `run_grok` | Call xAI Grok + screen for fabrication |
-| `run_gemini` | Call Google Gemini + screen for fabrication |
-| `run_together` | Call Together AI (Kimi, DeepSeek) + screen |
+| `arkheia_verify` | Score any model response for fabrication risk (LOW/MEDIUM/HIGH) |
+| `arkheia_audit_log` | Review your detection history |
+| `run_grok` | Call Grok + screen for fabrication |
+| `run_gemini` | Call Gemini + screen for fabrication |
 | `run_ollama` | Call local Ollama model + screen |
-| `memory_store` / `memory_retrieve` / `memory_relate` | Persistent knowledge graph |
+| `run_together` | Call Together AI (Kimi, DeepSeek) + screen |
+
+## 35+ Model Profiles
+
+GPT-4o, GPT-5.4, Claude Opus/Sonnet/Haiku, Gemini 2.5/3.0, Grok 4, Llama, Mixtral, CodeLlama, Falcon, Phi4, Kimi K2.5, and more. If your model isn't listed, [let us know](mailto:dmurfet@arkheia.ai).
 
 ## Pricing
 
-- **Free:** 1,500 detections/month (no credit card)
-- **Single Contributor:** $99/month (unlimited)
-- **Professional:** $499/month (20 concurrent)
-- **Team:** $1,999/month (50 concurrent)
+| Plan | Price | Detections |
+|------|-------|------------|
+| Free | $0 | 1,500/month |
+| Single Contributor | $99/month | Unlimited |
+| Professional | $499/month | Unlimited |
+| Team | $1,999/month | Unlimited |
 
-## Requirements
+## Full Documentation
 
-- Python 3.10+
-- Git
+See the [GitHub repo](https://github.com/arkheiaai/arkheia-mcp) for:
+- Complete setup guide for all agents
+- CLAUDE.md template for automatic detection across projects
+- Multi-agent quorum pattern
+- Test prompts and examples
 
-## Full Setup Guide
+## Feedback
 
-See [AGENTS.md](https://github.com/arkheiaai/arkheia-mcp/blob/master/AGENTS.md) for detailed instructions, troubleshooting, and environment variables.
+- **GitHub Issues:** https://github.com/arkheiaai/arkheia-mcp/issues
+- **Email:** dmurfet@arkheia.ai
+
+Every message is read by the founder.
 
 ## Links
 
 - Website: https://arkheia.ai
 - GitHub: https://github.com/arkheiaai/arkheia-mcp
-- Support: support@arkheia.ai
