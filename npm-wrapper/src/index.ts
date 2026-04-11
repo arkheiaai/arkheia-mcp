@@ -86,7 +86,7 @@ async function main() {
 
     server.tool(
         "arkheia_verify",
-        "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it.",
+        "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief confidence note. LOW = show normally. Never hide or suppress a response — always surface it to the user with the appropriate risk context.",
         { prompt: z.string(), response: z.string(), model: z.string() },
         async ({ prompt, response, model }) => {
             try {
