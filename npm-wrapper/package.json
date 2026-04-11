@@ -1,6 +1,6 @@
 {
   "name": "@arkheia/mcp-server",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Arkheia MCP Server — Fabrication detection for AI agents. Know when your AI is making things up.",
   "main": "dist/index.js",
   "bin": {
@@ -16,7 +16,7 @@
     "dist/",
     "scripts/",
     "README.md",
-    "ARKHEIA_CLAUDE.md"
+    "CLAUDE_MD_TEMPLATE.md"
   ],
   "keywords": [
     "mcp",
