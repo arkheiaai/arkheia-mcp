@@ -54,16 +54,27 @@ function saveConfig(apiKey) {
 }
 
 function checkPython() {
-  const candidates = ["python3", "python"];
+  // Try versioned interpreters first — on Homebrew, keg-only formulae like
+  // python@3.12 only expose python3.12, not python3.
+  const candidates = ["python3.13", "python3.12", "python3.11", "python3", "python"];
   for (const cmd of candidates) {
     try {
-      const version = execSync(`${cmd} --version 2>&1`, {
-        encoding: "utf-8",
-        timeout: 5000,
-      }).trim();
-      const match = version.match(/Python (\d+)\.(\d+)/);
-      if (match && parseInt(match[1]) >= 3 && parseInt(match[2]) >= 10) {
-        return { cmd, version };
+      // Verify version AND that pyexpat + ensurepip work.
+      // Python 3.14 on macOS has broken pyexpat (missing libexpat symbol).
+      const output = execSync(
+        `${cmd} -c "import sys,pyexpat,ensurepip; print(f'{sys.version_info.major}.{sys.version_info.minor}')"`,
+        { encoding: "utf-8", timeout: 10000, stdio: ["pipe", "pipe", "pipe"] }
+      ).trim();
+      const match = output.match(/^(\d+)\.(\d+)$/);
+      if (match) {
+        const major = parseInt(match[1]);
+        const minor = parseInt(match[2]);
+        if (major === 3 && minor >= 10 && minor <= 13) {
+          const version = execSync(`${cmd} --version 2>&1`, {
+            encoding: "utf-8", timeout: 5000,
+          }).trim();
+          return { cmd, version };
+        }
       }
     } catch {
       // Try next
@@ -75,19 +86,30 @@ function checkPython() {
 const python = checkPython();
 
 if (!python) {
-  console.log(`
+  console.error(`
   ============================================================
-  Arkheia MCP Server requires Python 3.10+
+  ERROR: Arkheia MCP Server requires Python 3.10–3.13
+         with working pyexpat and ensurepip.
 
-  Install Python from: https://python.org
-  Then run: npx @arkheia/mcp-server
+  macOS (Homebrew):
+    brew install python@3.12
+
+  NOTE: Homebrew's current default 'brew install python'
+  installs 3.14, which has a broken pyexpat link on macOS
+  as of April 2026. Use python@3.12 until Homebrew ships a fix.
+
+  After installing, verify with:
+    python3.12 -c "import pyexpat, ensurepip"
+
+  Other platforms: https://python.org
   ============================================================
   `);
+  process.exit(1);
 } else {
   console.log(`
   ============================================================
   Arkheia MCP Server installed successfully.
-  Python: ${python.version}
+  Python: ${python.version} (${python.cmd})
   ============================================================
   `);
 }

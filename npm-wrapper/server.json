@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.arkheiaai/mcp-server",
-  "description": "Fabrication (hallucination) detection for LLM outputs. Detect hallucination in any model's output with a single tool call.",
+  "description": "Detect fabrication and hallucination in any LLM output. 30+ models supported.",
   "repository": {
     "url": "https://github.com/arkheiaai/arkheia-mcp",
     "source": "github"
   },
-  "version": "0.1.1",
+  "version": "0.1.4",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@arkheia/mcp-server",
-      "version": "0.1.1",
+      "version": "0.1.4",
       "transport": {
         "type": "stdio"
       },

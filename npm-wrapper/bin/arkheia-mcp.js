@@ -31,16 +31,26 @@ const VENV_DIR = path.join(
 );
 
 function findPython() {
-  const candidates = ["python3", "python"];
+  // Try versioned interpreters first — on Homebrew, keg-only formulae like
+  // python@3.12 only expose the versioned binary (python3.12), not python3.
+  // Exclude 3.14: Homebrew's build has broken pyexpat on macOS as of Apr 2026.
+  const candidates = ["python3.13", "python3.12", "python3.11", "python3", "python"];
   for (const cmd of candidates) {
     try {
-      const version = execSync(`${cmd} --version 2>&1`, {
-        encoding: "utf-8",
-        timeout: 5000,
-      }).trim();
-      const match = version.match(/Python (\d+)\.(\d+)/);
-      if (match && parseInt(match[1]) >= 3 && parseInt(match[2]) >= 10) {
-        return cmd;
+      // Check version AND that pyexpat + ensurepip actually work.
+      // Python 3.14 on macOS crashes on `import pyexpat` due to a missing
+      // libexpat symbol — this import check catches it at discovery time.
+      const output = execSync(
+        `${cmd} -c "import sys,pyexpat,ensurepip; print(f'{sys.version_info.major}.{sys.version_info.minor}')"`,
+        { encoding: "utf-8", timeout: 10000, stdio: ["pipe", "pipe", "pipe"] }
+      ).trim();
+      const match = output.match(/^(\d+)\.(\d+)$/);
+      if (match) {
+        const major = parseInt(match[1]);
+        const minor = parseInt(match[2]);
+        if (major === 3 && minor >= 10 && minor <= 13) {
+          return cmd;
+        }
       }
     } catch {
       // Try next candidate
@@ -49,15 +59,34 @@ function findPython() {
   return null;
 }
 
+function venvIsHealthy(venvPython) {
+  if (!fs.existsSync(venvPython)) return false;
+  try {
+    execSync(`"${venvPython}" -m pip --version`, {
+      encoding: "utf-8", timeout: 10000, stdio: ["pipe", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function ensureVenv(python) {
   const venvPython =
     process.platform === "win32"
       ? path.join(VENV_DIR, "Scripts", "python.exe")
       : path.join(VENV_DIR, "bin", "python");
 
-  if (!fs.existsSync(venvPython)) {
+  if (!venvIsHealthy(venvPython)) {
+    if (fs.existsSync(VENV_DIR)) {
+      process.stderr.write("[arkheia] Existing venv is unhealthy (pip broken or missing). Recreating...\n");
+      fs.rmSync(VENV_DIR, { recursive: true, force: true });
+    }
     process.stderr.write("[arkheia] Creating virtual environment...\n");
     execSync(`${python} -m venv "${VENV_DIR}"`, { stdio: "inherit" });
+    // Force-reinstall deps after venv recreation
+    const marker = path.join(VENV_DIR, ".arkheia-deps-installed");
+    if (fs.existsSync(marker)) fs.unlinkSync(marker);
   }
 
   return venvPython;
@@ -69,21 +98,58 @@ function installDeps(venvPython) {
     return; // Already installed
   }
 
-  process.stderr.write("[arkheia] Installing dependencies...\n");
-  execSync(`"${venvPython}" -m pip install --quiet -r "${REQUIREMENTS}"`, {
-    stdio: "inherit",
-    timeout: 120000,
-  });
-
-  fs.writeFileSync(marker, new Date().toISOString());
+  const logFile = path.join(ARKHEIA_HOME, "install.log");
+  process.stderr.write("[arkheia] Installing Python dependencies (first run)...\n");
+  const start = Date.now();
+  try {
+    const output = execSync(`"${venvPython}" -m pip install -r "${REQUIREMENTS}" 2>&1`, {
+      encoding: "utf-8",
+      timeout: 300000, // 5 min — slow networks exist
+    });
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+    // Count installed packages from pip output
+    const installed = (output.match(/Successfully installed/g) || []).length;
+    process.stderr.write(`[arkheia] Dependencies installed in ${elapsed}s\n`);
+    fs.writeFileSync(marker, new Date().toISOString());
+  } catch (err) {
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+    // Save full pip output for debugging
+    const pipOutput = err.stdout || err.stderr || err.message || "unknown error";
+    fs.writeFileSync(logFile, pipOutput);
+    process.stderr.write(
+      `[arkheia] Dependency install failed after ${elapsed}s.\n` +
+      `[arkheia] Full output saved to: ${logFile}\n` +
+      `[arkheia] Try: "${venvPython}" -m pip install -r "${REQUIREMENTS}"\n`
+    );
+    throw err;
+  }
 }
 
 function main() {
+  // ── CRLF warning — env files with Windows line endings silently break API keys
+  for (const k of ["ARKHEIA_API_KEY", "ARKHEIA_PROXY_URL", "ARKHEIA_HOSTED_URL"]) {
+    const v = process.env[k];
+    if (v && /[\r\n]/.test(v)) {
+      process.stderr.write(
+        `[arkheia] WARNING: ${k} contains whitespace/newline characters.\n` +
+        `[arkheia] Your env file may have Windows (CRLF) line endings. Run 'dos2unix' on it.\n`
+      );
+      process.env[k] = v.trim(); // auto-fix for this run
+    }
+  }
+
   const python = findPython();
   if (!python) {
     process.stderr.write(
-      "[arkheia] Error: Python 3.10+ is required but not found.\n" +
-        "Install Python from https://python.org and try again.\n"
+      "[arkheia] Error: Python 3.10–3.13 is required but not found.\n\n" +
+      "  macOS (Homebrew):\n" +
+      "    brew install python@3.12\n\n" +
+      "  NOTE: Homebrew's current default 'brew install python' installs 3.14,\n" +
+      "  which has a broken pyexpat link on macOS as of April 2026.\n" +
+      "  Use python@3.12 until Homebrew ships a fix.\n\n" +
+      "  After installing, verify with:\n" +
+      "    python3.12 -c \"import pyexpat, ensurepip\"\n\n" +
+      "  Other platforms: https://python.org\n"
     );
     process.exit(1);
   }
