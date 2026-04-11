@@ -98,6 +98,14 @@ async function checkForUpdate(): Promise<void> {
 }
 
 async function main() {
+    // --setup flag: install protocol + register MCP with all detected CLIs, then exit
+    if (process.argv.includes('--setup')) {
+        const { execSync } = await import('child_process');
+        const setupScript = path.join(__dirname, '..', 'scripts', 'setup-claude.js');
+        execSync(`node "${setupScript}"`, { stdio: 'inherit', env: process.env });
+        process.exit(0);
+    }
+
     loadConfig();
     checkCRLF();
     checkForUpdate(); // fire-and-forget, don't await — never blocks startup
