@@ -1,57 +1,36 @@
 {
   "name": "@arkheia/mcp-server",
-  "version": "0.1.4",
-  "mcpName": "io.github.arkheiaai/mcp-server",
-  "description": "Arkheia MCP Server — Fabrication detection for LLM outputs. Detect hallucination in any model's output with a single tool call.",
+  "version": "0.1.6",
+  "description": "Arkheia MCP Server — Fabrication detection for AI agents. Know when your AI is making things up.",
+  "main": "dist/index.js",
   "bin": {
-    "mcp-server": "bin/arkheia-mcp.js"
+    "mcp-server": "dist/index.js"
   },
   "scripts": {
-    "start": "node bin/arkheia-mcp.js",
-    "postinstall": "node scripts/setup.js",
-    "release": "npm version patch --no-git-tag-version && npm publish --access public && node -e \"const{execSync}=require('child_process');const p=require('./package.json');const s=JSON.parse(require('fs').readFileSync('server.json','utf8'));s.version=p.version;s.packages[0].version=p.version;require('fs').writeFileSync('server.json',JSON.stringify(s,null,2));execSync('mcp-publisher publish',{stdio:'inherit'})\" && echo 'Published to npm + MCP registry'"
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "prepublishOnly": "npm run build",
+    "postinstall": "node scripts/setup.js"
   },
-  "keywords": [
-    "mcp",
-    "mcp-server",
-    "model-context-protocol",
-    "ai-safety",
-    "ai-governance",
-    "fabrication-detection",
-    "hallucination-detection",
-    "llm-verification",
-    "llm-grounding",
-    "ai-agent",
-    "agent-governance",
-    "ai-trust",
-    "ai-audit",
-    "ai-compliance",
-    "fact-checking",
-    "claude",
-    "gpt",
-    "gemini",
-    "llama",
-    "anthropic",
-    "openai",
-    "cursor",
-    "windsurf",
-    "cline",
-    "copilot"
+  "files": [
+    "dist/",
+    "scripts/",
+    "README.md"
   ],
-  "author": "Arkheia AI <support@arkheia.ai>",
+  "keywords": ["mcp", "ai", "fabrication", "detection", "hallucination", "governance"],
+  "author": "Arkheia AI <dmurfet@arkheia.ai>",
   "license": "MIT",
-  "homepage": "https://arkheia.ai/mcp",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/arkheiaai/arkheia-mcp.git"
-  },
   "engines": {
     "node": ">=18.0.0"
   },
-  "files": [
-    "bin/",
-    "scripts/",
-    "python/",
-    "README.md"
-  ]
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "sql.js": "^1.11.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/sql.js": "^1.4.9",
+    "@types/node": "^20.14.10",
+    "typescript": "^5.5.3"
+  }
 }
