@@ -91,9 +91,43 @@ function handleError(toolName, e) {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+const CURRENT_VERSION = "0.1.7";
+async function checkForUpdate() {
+    // Check once per day — skip if checked recently
+    const markerPath = path.join(os.homedir(), '.arkheia', '.update-check');
+    try {
+        if (fs.existsSync(markerPath)) {
+            const age = Date.now() - fs.statSync(markerPath).mtimeMs;
+            if (age < 24 * 60 * 60 * 1000)
+                return; // checked within 24h
+        }
+    }
+    catch { }
+    try {
+        const resp = await fetch('https://registry.npmjs.org/@arkheia/mcp-server/latest', {
+            signal: AbortSignal.timeout(5000),
+        });
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data.version && data.version !== CURRENT_VERSION) {
+                process.stderr.write(`[arkheia] Update available: ${CURRENT_VERSION} → ${data.version}\n` +
+                    `[arkheia] Run: npm update -g @arkheia/mcp-server\n`);
+            }
+        }
+        // Touch marker regardless of result
+        const dir = path.dirname(markerPath);
+        if (!fs.existsSync(dir))
+            fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(markerPath, new Date().toISOString());
+    }
+    catch {
+        // Network failure — silently skip, don't block startup
+    }
+}
 async function main() {
     loadConfig();
     checkCRLF();
+    checkForUpdate(); // fire-and-forget, don't await — never blocks startup
     const ARKHEIA_PROXY_URL = process.env.ARKHEIA_PROXY_URL || "http://localhost:8098";
     const ARKHEIA_HOSTED_URL = process.env.ARKHEIA_HOSTED_URL || "https://arkheia-proxy-production.up.railway.app";
     const ARKHEIA_API_KEY = process.env.ARKHEIA_API_KEY;
