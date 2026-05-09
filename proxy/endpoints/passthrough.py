@@ -1,15 +1,17 @@
 """
 Arkheia Enterprise Proxy -- Passthrough endpoints for CLI routing.
 
-These endpoints allow the Grok and Gemini CLIs to route their traffic
-through Arkheia detection without any code changes to the CLIs -- only
-a config change to point their base URL at localhost:8098.
+These endpoints allow the Grok, Gemini, Together, and Anthropic CLIs to route
+their traffic through Arkheia detection without any code changes to the CLIs --
+only a config change to point their base URL at localhost:8098.
 
 Routes:
   POST /proxy/grok/v1/{path}  -- forward to https://api.x.ai/v1/{path}
+  POST /proxy/together/v1/{path} -- forward to https://api.together.xyz/v1/{path}
   ANY  /v1beta/{path}         -- forward to https://generativelanguage.googleapis.com/v1beta/{path}
+  POST /v1/{path}             -- forward to https://api.anthropic.com/v1/{path}
 
-Both endpoints:
+All endpoints:
   1. Forward the request to the upstream provider (safe headers only)
   2. Extract response text for detection
   3. Run Arkheia detection
@@ -41,9 +43,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-GROK_UPSTREAM    = "https://api.x.ai/v1"
-GEMINI_UPSTREAM  = "https://generativelanguage.googleapis.com/v1beta"
-TOGETHER_UPSTREAM = "https://api.together.xyz/v1"
+GROK_UPSTREAM       = "https://api.x.ai/v1"
+GEMINI_UPSTREAM     = "https://generativelanguage.googleapis.com/v1beta"
+TOGETHER_UPSTREAM   = "https://api.together.xyz/v1"
+ANTHROPIC_UPSTREAM  = "https://api.anthropic.com"
 
 # ---------------------------------------------------------------------------
 # Security: header allowlist for upstream forwarding
@@ -62,6 +65,9 @@ _FORWARDED_HEADERS = {
     "x-stainless-package-version",
     "x-stainless-runtime",
     "x-stainless-runtime-version",
+    "x-api-key",           # Anthropic auth header
+    "anthropic-version",   # required by Anthropic API
+    "anthropic-beta",      # optional Anthropic feature flags
 }
 
 # ---------------------------------------------------------------------------
@@ -74,6 +80,9 @@ _OPENAI_PATH_RE = re.compile(
 )
 _GEMINI_PATH_RE = re.compile(
     r"^models(/[a-zA-Z0-9._-]+(:[a-zA-Z]+)?)?$"
+)
+_ANTHROPIC_PATH_RE = re.compile(
+    r"^v1/(messages|models)$"
 )
 
 # ---------------------------------------------------------------------------
@@ -136,6 +145,25 @@ def _extract_gemini_prompt(body: bytes) -> str:
 
 
 def _extract_grok_model(body: bytes) -> str:
+    try:
+        return json.loads(body).get("model", "unknown")
+    except Exception:
+        return "unknown"
+
+
+def _extract_anthropic_text(body: bytes) -> Optional[str]:
+    """Extract assistant text from an Anthropic messages response."""
+    try:
+        data = json.loads(body)
+        for block in data.get("content", []):
+            if block.get("type") == "text":
+                return block["text"]
+        return None
+    except Exception:
+        return None
+
+
+def _extract_anthropic_model(body: bytes) -> str:
     try:
         return json.loads(body).get("model", "unknown")
     except Exception:
@@ -404,6 +432,60 @@ async def gemini_passthrough(path: str, request: Request):
             model_id = _extract_gemini_model(path)
             risk_level = await _detect_and_audit(request, prompt, response_text, model_id)
             logger.info("gemini_passthrough: model=%s risk=%s", model_id, risk_level)
+
+    response_headers["X-Arkheia-Risk"] = risk_level
+    return Response(
+        content=response_body,
+        status_code=status_code,
+        headers=response_headers,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Anthropic passthrough  --  /v1/messages, /v1/models
+# ---------------------------------------------------------------------------
+
+@router.api_route(
+    "/v1/{path:path}",
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+)
+async def anthropic_passthrough(path: str, request: Request):
+    """
+    Forward Anthropic SDK requests to api.anthropic.com with Arkheia detection.
+
+    Configure Anthropic SDK / Claude Code CLI:
+        ANTHROPIC_BASE_URL=http://localhost:8098
+    """
+    if not _ANTHROPIC_PATH_RE.match(f"v1/{path}"):
+        return Response(
+            content=json.dumps({"error": "invalid_path"}).encode(),
+            status_code=400,
+            media_type="application/json",
+        )
+
+    upstream_url = f"{ANTHROPIC_UPSTREAM}/v1/{path}"
+    logger.debug("anthropic_passthrough: %s %s", request.method, upstream_url)
+
+    try:
+        request_body = await request.body()
+        response_body, status_code, response_headers = await _forward(request, upstream_url)
+    except Exception as e:
+        logger.error("anthropic_passthrough: upstream error: %s", e)
+        return Response(
+            content=json.dumps({"error": "upstream_unavailable"}).encode(),
+            status_code=502,
+            media_type="application/json",
+            headers={"X-Arkheia-Risk": "ERROR"},
+        )
+
+    risk_level = "SKIP"
+    if status_code == 200:
+        response_text = _extract_anthropic_text(response_body)
+        if response_text:
+            prompt = _extract_openai_prompt(request_body)  # Anthropic uses same messages[] format
+            model_id = _extract_anthropic_model(response_body)
+            risk_level = await _detect_and_audit(request, prompt, response_text, model_id)
+            logger.info("anthropic_passthrough: model=%s risk=%s", model_id, risk_level)
 
     response_headers["X-Arkheia-Risk"] = risk_level
     return Response(
