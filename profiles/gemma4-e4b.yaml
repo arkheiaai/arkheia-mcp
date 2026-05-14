@@ -1,0 +1,263 @@
+model: "gemma4:e4b"
+version: "1.0"
+type: local
+generated: "2026-04-13T16:59:19Z"
+
+characterization:
+  date: "2026-04-13"
+  prompts: 400
+  features: 17
+  token_limit: 250
+  domains_tested: [prose, code]
+  status: cross_domain_validated
+  notes: >
+    Primary: validation_200_matched (200 prompts, 250 tok).
+    Cross: validation_code_200_matched (200 prompts, 250 tok).
+
+api:
+  provider: ollama
+  endpoint: "http://localhost:11434"
+  logprobs_available: true
+
+detection:
+  strategy: multi_feature
+  polarity: normal
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  cross_domain_validated: true
+  features:
+    inflection_magnitude_mean:
+      weight: 1.2011
+      polarity: negative
+      threshold_low: 0.066259
+      threshold_medium: 0.091948
+      cohens_d: 1.2011
+      cohens_d_cross: 0.0474
+      effect_size: very_large
+      truth_mean: 0.071831
+      fab_mean: 0.094741
+      enabled: true
+      cross_domain_stable: false
+    acceleration_variance:
+      weight: 1.1843
+      polarity: negative
+      threshold_low: 0.00225
+      threshold_medium: 0.003344
+      cohens_d: 1.1843
+      cohens_d_cross: 0.0062
+      effect_size: large
+      truth_mean: 0.002534
+      fab_mean: 0.003547
+      enabled: true
+      cross_domain_stable: false
+    cpu_std_percent:
+      weight: 1.0223
+      polarity: positive
+      threshold_low: 36.578566
+      threshold_medium: 37.138098
+      cohens_d: -1.0223
+      cohens_d_cross: 0.0821
+      effect_size: large
+      truth_mean: 41.634607
+      fab_mean: 37.225291
+      enabled: true
+      cross_domain_stable: false
+    cpu_mean_percent:
+      weight: 0.9201
+      polarity: negative
+      threshold_low: 62.622161
+      threshold_medium: 67.165936
+      cohens_d: 0.9201
+      cohens_d_cross: -0.1061
+      effect_size: large
+      truth_mean: 64.119713
+      fab_mean: 68.523518
+      enabled: true
+      cross_domain_stable: false
+    cpu_valley_count:
+      weight: 0.9177
+      polarity: positive
+      threshold_low: 75.25
+      threshold_medium: 83.5
+      cohens_d: -0.9177
+      cohens_d_cross: 0.0762
+      effect_size: large
+      truth_mean: 90.33
+      fab_mean: 78.79
+      enabled: true
+      cross_domain_stable: false
+    unique_word_ratio:
+      weight: 0.9176
+      polarity: negative
+      threshold_low: 0.600097
+      threshold_medium: 0.632732
+      cohens_d: 0.9176
+      cohens_d_cross: -0.0231
+      effect_size: large
+      truth_mean: 0.608031
+      fab_mean: 0.658061
+      enabled: true
+      cross_domain_stable: false
+    entropy_std:
+      weight: 0.7724
+      polarity: negative
+      threshold_low: 0.436882
+      threshold_medium: 0.463848
+      cohens_d: 0.7724
+      cohens_d_cross: 1.064
+      effect_size: medium
+      truth_mean: 0.445323
+      fab_mean: 0.473861
+      enabled: true
+      cross_domain_stable: true
+    cpu_min_percent:
+      weight: 0.7657
+      polarity: negative
+      threshold_low: 5.9
+      threshold_medium: 12.275
+      cohens_d: 0.7657
+      cohens_d_cross: -0.0665
+      effect_size: medium
+      truth_mean: 7.819
+      fab_mean: 11.723
+      enabled: true
+      cross_domain_stable: false
+    avg_word_length:
+      weight: 0.75
+      polarity: negative
+      threshold_low: 5.11172
+      threshold_medium: 5.392436
+      cohens_d: 0.75
+      cohens_d_cross: 0.4891
+      effect_size: medium
+      truth_mean: 5.231069
+      fab_mean: 5.500097
+      enabled: true
+      cross_domain_stable: false
+    std_logprob:
+      weight: 0.7002
+      polarity: negative
+      threshold_low: 0.471203
+      threshold_medium: 0.533881
+      cohens_d: 0.7002
+      cohens_d_cross: 0.8093
+      effect_size: medium
+      truth_mean: 0.50445
+      fab_mean: 0.565714
+      enabled: true
+      cross_domain_stable: true
+    top1_confidence_std:
+      weight: 0.6626
+      polarity: negative
+      threshold_low: 0.244467
+      threshold_medium: 0.261666
+      cohens_d: 0.6626
+      cohens_d_cross: 0.902
+      effect_size: medium
+      truth_mean: 0.251515
+      fab_mean: 0.267544
+      enabled: true
+      cross_domain_stable: true
+    latency_ms:
+      weight: 0.6374
+      polarity: negative
+      threshold_low: 244.369133
+      threshold_medium: 255.413711
+      cohens_d: 0.6374
+      cohens_d_cross: -0.0275
+      effect_size: medium
+      truth_mean: 245.604272
+      fab_mean: 253.238567
+      enabled: true
+      cross_domain_stable: false
+    perplexity_std:
+      weight: 0.58
+      polarity: negative
+      threshold_low: 1.557922
+      threshold_medium: 2.072154
+      cohens_d: 0.58
+      cohens_d_cross: 0.4448
+      effect_size: medium
+      truth_mean: 1.95775
+      fab_mean: 2.682432
+      enabled: true
+      cross_domain_stable: false
+    word_count:
+      weight: 0.5465
+      polarity: positive
+      threshold_low: 140.5
+      threshold_medium: 152.0
+      cohens_d: -0.5465
+      cohens_d_cross: 0.4923
+      effect_size: medium
+      truth_mean: 156.72
+      fab_mean: 147.89
+      enabled: true
+      cross_domain_stable: false
+    min_logprob:
+      weight: 0.5438
+      polarity: positive
+      threshold_low: -3.364369
+      threshold_medium: -3.023045
+      cohens_d: -0.5438
+      cohens_d_cross: -0.2957
+      effect_size: medium
+      truth_mean: -2.891178
+      fab_mean: -3.174843
+      enabled: true
+      cross_domain_stable: false
+    range_logprob:
+      weight: 0.5438
+      polarity: negative
+      threshold_low: 2.653367
+      threshold_medium: 3.023045
+      cohens_d: 0.5438
+      cohens_d_cross: 0.2957
+      effect_size: medium
+      truth_mean: 2.891178
+      fab_mean: 3.174843
+      enabled: true
+      cross_domain_stable: false
+    bandwidth_mb_s:
+      weight: 0.5217
+      polarity: positive
+      threshold_low: 20.316461
+      threshold_medium: 22.433218
+      cohens_d: -0.5217
+      cohens_d_cross: 0.0452
+      effect_size: medium
+      truth_mean: 23.663049
+      fab_mean: 21.946536
+      enabled: true
+      cross_domain_stable: false
+
+performance:
+  primary_corpus:
+    truth_n: 100
+    fab_n: 100
+    notes: "validation_200_matched, 250 tok."
+  cross_corpus:
+    truth_n: 100
+    fab_n: 100
+    notes: "validation_code_200_matched, 250 tok."
+  cross_domain:
+    stable_features: 3
+
+deployment:
+  recommended_for_production: true
+  min_ram_gb: 6
+  requires_api_key: false
+
+signals:
+  enabled: [logprobs]
+  required: [logprobs]
+
+metadata:
+  generator: arkheia-model-lab
+  generator_version: "1.0.0"
+  validation_date: "2026-04-13"
+  status: validated
+  dataset_size: 400
+  max_cohen_d: 1.2011
+  corpus_primary: validation_200_matched
+  corpus_cross: validation_code_200_matched

@@ -1,0 +1,70 @@
+model: deepseek-ai/DeepSeek-V3.1
+version: '2.0'
+type: api
+generated: '2026-05-12T11:56:37Z'
+characterization:
+  date: '2026-05-12'
+  prompts: 200
+  features: 3
+  token_limit: 250
+  notes: 'Prose-domain 200-prompt characterization. Model lab run 1092. Top feature:
+    unique_word_ratio d=0.941.'
+api:
+  provider: together
+  logprobs_available: false
+detection:
+  strategy: ensemble
+  evidence_depth_limited: false
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  features:
+    unique_word_ratio:
+      weight: 0.9411
+      polarity: positive
+      threshold_low: 0.619272
+      threshold_medium: 0.663941
+      cohens_d: 0.9411
+      effect_size: large
+      truth_mean: 0.574604
+      truth_std: 0.044668
+      fab_mean: 0.616641
+      fab_std: 0.044668
+      enabled: true
+    unique_token_ratio:
+      weight: 0.8018
+      polarity: positive
+      threshold_low: 0.734951
+      threshold_medium: 0.775725
+      cohens_d: 0.8018
+      effect_size: large
+      truth_mean: 0.694177
+      truth_std: 0.040774
+      fab_mean: 0.72687
+      fab_std: 0.040774
+      enabled: true
+    chars_per_token:
+      weight: 0.7769
+      polarity: positive
+      threshold_low: 6.830211
+      threshold_medium: 7.205369
+      cohens_d: 0.7769
+      effect_size: medium
+      truth_mean: 6.455052
+      truth_std: 0.375158
+      fab_mean: 6.746505
+      fab_std: 0.375158
+      enabled: true
+performance:
+  prose_domain:
+    features_significant: 3
+    top_feature: unique_word_ratio
+    top_d: 0.941
+    n_prompts: 200
+deployment:
+  recommended_for_production: true
+  detection_capability: strong
+  scope: prose_domain
+metadata:
+  generator: arkheia-model-lab
+  generator_version: 2.0.0
+  model_lab_run_id: 1092

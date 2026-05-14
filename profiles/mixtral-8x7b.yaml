@@ -1,0 +1,111 @@
+model: mixtral-8x7b
+version: '1.0'
+type: detection_profile
+generated: '2026-04-04'
+characterization:
+  job_id: 37
+  source_model: Mixtral 8x7B (prose, 250tok)
+  corpus: matched_200
+detection:
+  strategy: weighted_sum
+  polarity: mixed
+  alpha: 0.05
+  bias: 0.0
+  min_required_features: 2
+  min_contribution_threshold: 0.1
+  evidence_depth_limited: false
+  features:
+    entropy_std:
+      weight: 1.0498
+      polarity: positive
+      cohens_d: 1.0498
+      effect_size: large
+      truth_mean: 0.4094
+      truth_std: 0.0662
+      threshold_medium: 0.444172
+      enabled: true
+      threshold_low: 0.426806
+    entropy_mean:
+      weight: 0.9588
+      polarity: positive
+      cohens_d: 0.9588
+      effect_size: large
+      truth_mean: 0.3118
+      truth_std: 0.0947
+      threshold_medium: 0.357233
+      enabled: true
+      threshold_low: 0.334524
+    logprob_iqr:
+      weight: 0.8936
+      polarity: positive
+      cohens_d: 0.8936
+      effect_size: large
+      truth_mean: 0.3234
+      truth_std: 0.2209
+      threshold_medium: 0.422107
+      enabled: true
+      threshold_low: 0.372765
+    logprob_q25:
+      weight: 0.8934
+      polarity: negative
+      cohens_d: -0.8934
+      effect_size: large
+      truth_mean: -0.3235
+      truth_std: 0.2209
+      threshold_medium: -0.422148
+      enabled: true
+      threshold_low: -0.372803
+    top1_confidence_mean:
+      weight: 0.8331
+      polarity: negative
+      cohens_d: -0.8331
+      effect_size: large
+      truth_mean: 0.8277
+      truth_std: 0.0523
+      threshold_medium: 0.8059
+      enabled: true
+      threshold_low: 0.816794
+    mean_logprob:
+      weight: 0.7364
+      polarity: negative
+      cohens_d: -0.7364
+      effect_size: medium
+      truth_mean: -0.318
+      truth_std: 0.1125
+      threshold_medium: -0.359413
+      enabled: false
+      threshold_low: -0.338703
+    perplexity_mean:
+      weight: 0.7361
+      polarity: positive
+      cohens_d: 0.7361
+      effect_size: medium
+      truth_mean: 1.3831
+      truth_std: 0.1599
+      threshold_medium: 1.441998
+      enabled: false
+      threshold_low: 1.412573
+    top1_confidence_std:
+      weight: 0.6808
+      polarity: positive
+      cohens_d: 0.6808
+      effect_size: medium
+      truth_mean: 0.2687
+      truth_std: 0.0382
+      threshold_medium: 0.281708
+      enabled: false
+      threshold_low: 0.275206
+    unique_token_ratio:
+      weight: 0.5724
+      polarity: positive
+      cohens_d: 0.5724
+      effect_size: medium
+      truth_mean: 0.5917
+      truth_std: 0.0904
+      threshold_medium: 0.617611
+      enabled: false
+      threshold_low: 0.604671
+deployment:
+  recommended: true
+  viable_features: 5
+  max_effect_size: 1.0498
