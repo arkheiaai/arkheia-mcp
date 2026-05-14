@@ -1,0 +1,238 @@
+model: claude-haiku-4-5-20251001
+version: '2.0'
+type: api
+generated: '2026-05-12T11:56:37Z'
+characterization:
+  date: '2026-05-12'
+  prompts: 200
+  features: 17
+  token_limit: 250
+  notes: 'Prose-domain 200-prompt characterization. Model lab run 1070. Top feature:
+    unique_token_ratio d=2.634.'
+api:
+  provider: anthropic
+  logprobs_available: false
+detection:
+  strategy: ensemble
+  evidence_depth_limited: false
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  features:
+    unique_token_ratio:
+      weight: 2.6341
+      polarity: positive
+      threshold_low: 0.703582
+      threshold_medium: 0.748785
+      cohens_d: 2.6341
+      effect_size: very large
+      truth_mean: 0.65838
+      truth_std: 0.045203
+      fab_mean: 0.777449
+      fab_std: 0.045203
+      enabled: true
+    total_time_s:
+      weight: 2.3114
+      polarity: negative
+      threshold_low: 4.39147
+      threshold_medium: 3.735596
+      cohens_d: -2.3114
+      effect_size: very large
+      truth_mean: 5.047343
+      truth_std: 0.655874
+      fab_mean: 3.531343
+      fab_std: 0.655874
+      enabled: true
+    unique_word_ratio:
+      weight: 2.0844
+      polarity: positive
+      threshold_low: 0.613178
+      threshold_medium: 0.679127
+      cohens_d: 2.0844
+      effect_size: very large
+      truth_mean: 0.547229
+      truth_std: 0.065949
+      fab_mean: 0.684696
+      fab_std: 0.065949
+      enabled: true
+    token_count:
+      weight: 2.0764
+      polarity: negative
+      threshold_low: 153.195602
+      threshold_medium: 131.321594
+      cohens_d: -2.0764
+      effect_size: very large
+      truth_mean: 175.06961
+      truth_std: 21.874008
+      fab_mean: 129.65
+      fab_std: 21.874008
+      enabled: true
+    cpu_valley_count:
+      weight: 2.0764
+      polarity: negative
+      threshold_low: 153.195602
+      threshold_medium: 131.321594
+      cohens_d: -2.0764
+      effect_size: very large
+      truth_mean: 175.06961
+      truth_std: 21.874008
+      fab_mean: 129.65
+      fab_std: 21.874008
+      enabled: true
+    inflection_magnitude_max:
+      weight: 2.0246
+      polarity: negative
+      threshold_low: 1.0e-06
+      threshold_medium: 0.0
+      cohens_d: -2.0246
+      effect_size: very large
+      truth_mean: 1.0e-06
+      truth_std: 0.0
+      fab_mean: 0.0
+      fab_std: 0.0
+      enabled: true
+    word_count:
+      weight: 1.8554
+      polarity: negative
+      threshold_low: 143.563383
+      threshold_medium: 124.493403
+      cohens_d: -1.8554
+      effect_size: very large
+      truth_mean: 162.633363
+      truth_std: 19.06998
+      fab_mean: 127.25
+      fab_std: 19.06998
+      enabled: true
+    tokens_per_second:
+      weight: 1.7505
+      polarity: positive
+      threshold_low: 32.617851
+      threshold_medium: 38.902126
+      cohens_d: 1.7505
+      effect_size: very large
+      truth_mean: 26.333577
+      truth_std: 6.284274
+      fab_mean: 37.334301
+      fab_std: 6.284274
+      enabled: true
+    acceleration_variance:
+      weight: 1.597
+      polarity: negative
+      threshold_low: 0.0
+      threshold_medium: 0.0
+      cohens_d: -1.597
+      effect_size: very large
+      truth_mean: 0.0
+      truth_std: 0.0
+      fab_mean: 0.0
+      fab_std: 0.0
+      enabled: true
+    inflection_timing_late_count:
+      weight: 1.4464
+      polarity: negative
+      threshold_low: 52.432699
+      threshold_medium: 31.416411
+      cohens_d: -1.4464
+      effect_size: very large
+      truth_mean: 73.448987
+      truth_std: 21.016288
+      fab_mean: 43.05
+      fab_std: 21.016288
+      enabled: true
+    inflection_magnitude_mean:
+      weight: 1.4334
+      polarity: negative
+      threshold_low: 0.0
+      threshold_medium: 0.0
+      cohens_d: -1.4334
+      effect_size: very large
+      truth_mean: 0.0
+      truth_std: 0.0
+      fab_mean: 0.0
+      fab_std: 0.0
+      enabled: true
+    inflection_count:
+      weight: 1.3917
+      polarity: negative
+      threshold_low: 103.849069
+      threshold_medium: 61.804173
+      cohens_d: -1.3917
+      effect_size: very large
+      truth_mean: 145.893966
+      truth_std: 42.044897
+      fab_mean: 87.38
+      fab_std: 42.044897
+      enabled: true
+    inflection_timing_early_count:
+      weight: 1.1081
+      polarity: negative
+      threshold_low: 46.605371
+      threshold_medium: 25.562819
+      cohens_d: -1.1081
+      effect_size: large
+      truth_mean: 67.647922
+      truth_std: 21.042552
+      fab_mean: 44.33
+      fab_std: 21.042552
+      enabled: true
+    latency_cv:
+      weight: 1.0909
+      polarity: negative
+      threshold_low: 0.0
+      threshold_medium: 0.0
+      cohens_d: -1.0909
+      effect_size: large
+      truth_mean: 0.0
+      truth_std: 0.0
+      fab_mean: 0.0
+      fab_std: 0.0
+      enabled: true
+    std_inter_token_latency_ms:
+      weight: 0.9711
+      polarity: negative
+      threshold_low: 0.0
+      threshold_medium: 0.0
+      cohens_d: -0.9711
+      effect_size: large
+      truth_mean: 0.0
+      truth_std: 0.0
+      fab_mean: 0.0
+      fab_std: 0.0
+      enabled: true
+    time_to_first_token_ms:
+      weight: 0.5969
+      polarity: positive
+      threshold_low: 30.997237
+      threshold_medium: 38.211298
+      cohens_d: 0.5969
+      effect_size: medium
+      truth_mean: 23.783176
+      truth_std: 7.214061
+      fab_mean: 28.08956
+      fab_std: 7.214061
+      enabled: true
+    p50_inter_token_latency_ms:
+      weight: 0.5512
+      polarity: positive
+      threshold_low: 31.327123
+      threshold_medium: 38.541184
+      cohens_d: 0.5512
+      effect_size: medium
+      truth_mean: 24.113062
+      truth_std: 7.214061
+      fab_mean: 28.08956
+      fab_std: 7.214061
+      enabled: true
+performance:
+  prose_domain:
+    features_significant: 17
+    top_feature: unique_token_ratio
+    top_d: 2.634
+    n_prompts: 200
+deployment:
+  recommended_for_production: true
+  detection_capability: strong
+  scope: prose_domain
+metadata:
+  generator: arkheia-model-lab
+  generator_version: 2.0.0
+  model_lab_run_id: 1070

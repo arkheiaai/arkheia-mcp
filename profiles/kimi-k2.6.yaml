@@ -1,0 +1,118 @@
+model: moonshotai/Kimi-K2.6
+version: '2.0'
+type: api
+generated: '2026-05-12T11:56:37Z'
+characterization:
+  date: '2026-05-12'
+  prompts: 200
+  features: 7
+  token_limit: 250
+  notes: 'Prose-domain 200-prompt characterization. Model lab run 1089. Top feature:
+    time_to_first_token_ms d=0.542.'
+api:
+  provider: together
+  logprobs_available: false
+detection:
+  strategy: ensemble
+  evidence_depth_limited: false
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  features:
+    time_to_first_token_ms:
+      weight: 0.5421
+      polarity: positive
+      threshold_low: 9769.102854
+      threshold_medium: 13148.332963
+      cohens_d: 0.5421
+      effect_size: medium
+      truth_mean: 6389.872745
+      truth_std: 3379.230109
+      fab_mean: 8221.87162
+      fab_std: 3379.230109
+      enabled: true
+    mean_inter_token_latency_ms:
+      weight: 0.5421
+      polarity: positive
+      threshold_low: 9769.102854
+      threshold_medium: 13148.332963
+      cohens_d: 0.5421
+      effect_size: medium
+      truth_mean: 6389.872745
+      truth_std: 3379.230109
+      fab_mean: 8221.87162
+      fab_std: 3379.230109
+      enabled: true
+    p50_inter_token_latency_ms:
+      weight: 0.5421
+      polarity: positive
+      threshold_low: 9769.102854
+      threshold_medium: 13148.332963
+      cohens_d: 0.5421
+      effect_size: medium
+      truth_mean: 6389.872745
+      truth_std: 3379.230109
+      fab_mean: 8221.87162
+      fab_std: 3379.230109
+      enabled: true
+    p95_inter_token_latency_ms:
+      weight: 0.5421
+      polarity: positive
+      threshold_low: 9769.102854
+      threshold_medium: 13148.332963
+      cohens_d: 0.5421
+      effect_size: medium
+      truth_mean: 6389.872745
+      truth_std: 3379.230109
+      fab_mean: 8221.87162
+      fab_std: 3379.230109
+      enabled: true
+    p99_inter_token_latency_ms:
+      weight: 0.5421
+      polarity: positive
+      threshold_low: 9769.102854
+      threshold_medium: 13148.332963
+      cohens_d: 0.5421
+      effect_size: medium
+      truth_mean: 6389.872745
+      truth_std: 3379.230109
+      fab_mean: 8221.87162
+      fab_std: 3379.230109
+      enabled: true
+    latency_max_ms:
+      weight: 0.5421
+      polarity: positive
+      threshold_low: 9769.102854
+      threshold_medium: 13148.332963
+      cohens_d: 0.5421
+      effect_size: medium
+      truth_mean: 6389.872745
+      truth_std: 3379.230109
+      fab_mean: 8221.87162
+      fab_std: 3379.230109
+      enabled: true
+    latency_ms:
+      weight: 0.5421
+      polarity: positive
+      threshold_low: 9769.102854
+      threshold_medium: 13148.332963
+      cohens_d: 0.5421
+      effect_size: medium
+      truth_mean: 6389.872745
+      truth_std: 3379.230109
+      fab_mean: 8221.87162
+      fab_std: 3379.230109
+      enabled: true
+performance:
+  prose_domain:
+    features_significant: 7
+    top_feature: time_to_first_token_ms
+    top_d: 0.542
+    n_prompts: 200
+deployment:
+  recommended_for_production: true
+  detection_capability: moderate
+  scope: prose_domain
+metadata:
+  generator: arkheia-model-lab
+  generator_version: 2.0.0
+  model_lab_run_id: 1089

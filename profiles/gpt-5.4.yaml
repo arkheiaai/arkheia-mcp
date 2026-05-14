@@ -1,0 +1,247 @@
+model: gpt-5.4
+version: '1.0'
+type: detection_profile
+generated: '2026-04-04'
+characterization:
+  job_id: 285
+  source_model: gpt-5.4
+  corpus: prose_v2_matched_200
+detection:
+  strategy: weighted_sum
+  polarity: mixed
+  alpha: 0.05
+  bias: 0.0
+  min_required_features: 2
+  min_contribution_threshold: 0.1
+  evidence_depth_limited: false
+  features:
+    entropy_std:
+      weight: 2.0402
+      polarity: positive
+      cohens_d: 2.0402
+      effect_size: large
+      truth_mean: 0.315456
+      truth_std: 0.043177
+      threshold_medium: 0.3595
+      enabled: true
+      threshold_low: 0.337478
+    entropy_mean:
+      weight: 1.9387
+      polarity: positive
+      cohens_d: 1.9387
+      effect_size: large
+      truth_mean: 0.181083
+      truth_std: 0.048146
+      threshold_medium: 0.227752
+      enabled: true
+      threshold_low: 0.204417
+    top1_confidence_std:
+      weight: 1.9372
+      polarity: positive
+      cohens_d: 1.9372
+      effect_size: large
+      truth_mean: 0.146541
+      truth_std: 0.019063
+      threshold_medium: 0.165006
+      enabled: true
+      threshold_low: 0.155774
+    std_logprob:
+      weight: 1.9025
+      polarity: positive
+      cohens_d: 1.9025
+      effect_size: large
+      truth_mean: 0.202489
+      truth_std: 0.031717
+      threshold_medium: 0.232659
+      enabled: true
+      threshold_low: 0.217574
+    top1_confidence_mean:
+      weight: 1.895
+      polarity: negative
+      cohens_d: -1.895
+      effect_size: large
+      truth_mean: 0.921991
+      truth_std: 0.020528
+      threshold_medium: 0.902541
+      enabled: true
+      threshold_low: 0.912266
+    mean_logprob:
+      weight: 1.8789
+      polarity: negative
+      cohens_d: -1.8789
+      effect_size: large
+      truth_mean: -0.099177
+      truth_std: 0.02776
+      threshold_medium: -0.125256
+      enabled: true
+      threshold_low: -0.112217
+    perplexity_mean:
+      weight: 1.8558
+      polarity: positive
+      cohens_d: 1.8558
+      effect_size: large
+      truth_mean: 1.104685
+      truth_std: 0.030964
+      threshold_medium: 1.133416
+      enabled: true
+      threshold_low: 1.119051
+    perplexity_std:
+      weight: 1.7737
+      polarity: positive
+      cohens_d: 1.7737
+      effect_size: large
+      truth_mean: 0.306593
+      truth_std: 0.063758
+      threshold_medium: 0.363135
+      enabled: true
+      threshold_low: 0.334864
+    logprob_q25:
+      weight: 1.5676
+      polarity: negative
+      cohens_d: -1.5676
+      effect_size: large
+      truth_mean: -0.084741
+      truth_std: 0.060678
+      threshold_medium: -0.132302
+      enabled: true
+      threshold_low: -0.108521
+    logprob_iqr:
+      weight: 1.5675
+      polarity: positive
+      cohens_d: 1.5675
+      effect_size: large
+      truth_mean: 0.084726
+      truth_std: 0.060666
+      threshold_medium: 0.132275
+      enabled: true
+      threshold_low: 0.108501
+    logprob_q75:
+      weight: 1.4639
+      polarity: negative
+      cohens_d: -1.4639
+      effect_size: large
+      truth_mean: -1.5e-05
+      truth_std: 1.5e-05
+      threshold_medium: -2.6e-05
+      enabled: true
+      threshold_low: -2.0e-05
+    min_logprob:
+      weight: 1.1086
+      polarity: negative
+      cohens_d: -1.1086
+      effect_size: large
+      truth_mean: -1.12011
+      truth_std: 0.186698
+      threshold_medium: -1.223595
+      enabled: true
+      threshold_low: -1.171853
+    range_logprob:
+      weight: 1.1086
+      polarity: positive
+      cohens_d: 1.1086
+      effect_size: large
+      truth_mean: 1.120208
+      truth_std: 0.186694
+      threshold_medium: 1.223688
+      enabled: true
+      threshold_low: 1.171948
+    unique_token_ratio:
+      weight: 0.9905
+      polarity: positive
+      cohens_d: 0.9905
+      effect_size: large
+      truth_mean: 0.605429
+      truth_std: 0.039729
+      threshold_medium: 0.625104
+      enabled: true
+      threshold_low: 0.615267
+    tokens_per_second:
+      weight: 0.8851
+      polarity: negative
+      cohens_d: -0.8851
+      effect_size: large
+      truth_mean: 55.599536
+      truth_std: 6.672521
+      threshold_medium: 52.646572
+      enabled: true
+      threshold_low: 54.123054
+    mean_inter_token_latency_ms:
+      weight: 0.8641
+      polarity: positive
+      cohens_d: 0.8641
+      effect_size: large
+      truth_mean: 18.324834
+      truth_std: 2.259781
+      threshold_medium: 19.3012
+      enabled: true
+      threshold_low: 18.813017
+    latency_ms:
+      weight: 0.8537
+      polarity: positive
+      cohens_d: 0.8537
+      effect_size: large
+      truth_mean: 18.349231
+      truth_std: 2.274504
+      threshold_medium: 19.320135
+      enabled: true
+      threshold_low: 18.834683
+    inflection_count:
+      weight: 0.804
+      polarity: negative
+      cohens_d: -0.804
+      effect_size: large
+      truth_mean: 186.84
+      truth_std: 14.768736
+      threshold_medium: 180.902931
+      enabled: true
+      threshold_low: 183.871465
+    latency_cv:
+      weight: 0.7945
+      polarity: negative
+      cohens_d: -0.7945
+      effect_size: medium
+      truth_mean: 1.4079
+      truth_std: 0.118
+      threshold_medium: 1.3611
+      enabled: false
+    inflection_timing_early_count:
+      weight: 0.7844
+      polarity: negative
+      cohens_d: -0.7844
+      effect_size: medium
+      truth_mean: 93.95
+      truth_std: 7.3173
+      threshold_medium: 91.08
+      enabled: false
+    unique_word_ratio:
+      weight: 0.7708
+      polarity: positive
+      cohens_d: 0.7708
+      effect_size: medium
+      truth_mean: 0.6518
+      truth_std: 0.0587
+      threshold_medium: 0.6744
+      enabled: false
+    median_logprob:
+      weight: 0.7322
+      polarity: negative
+      cohens_d: -0.7322
+      effect_size: medium
+      truth_mean: -0.0019
+      truth_std: 0.0034
+      threshold_medium: -0.0031
+      enabled: false
+    inflection_timing_late_count:
+      weight: 0.6223
+      polarity: negative
+      cohens_d: -0.6223
+      effect_size: medium
+      truth_mean: 92.89
+      truth_std: 9.1319
+      threshold_medium: 90.0484
+      enabled: false
+deployment:
+  recommended: true
+  viable_features: 18
+  max_effect_size: 2.0402
+  note: Prose-only profile. Code corpus showed no viable features (max d=0.58).

@@ -1,0 +1,171 @@
+model: gpt-oss-120b
+version: '1.0'
+type: detection_profile
+generated: '2026-04-04'
+characterization:
+  job_id: 27
+  source_model: GPT-OSS 120B (prose, 250-tok retest)
+  corpus: matched_200
+detection:
+  strategy: weighted_sum
+  polarity: mixed
+  alpha: 0.05
+  bias: 0.0
+  min_required_features: 2
+  min_contribution_threshold: 0.1
+  evidence_depth_limited: false
+  features:
+    logprob_iqr:
+      weight: 2.0755
+      polarity: negative
+      cohens_d: -2.0755
+      effect_size: large
+      truth_mean: 0.3783
+      truth_std: 0.1258
+      threshold_medium: 0.247746
+      enabled: true
+      threshold_low: 0.313011
+    logprob_q25:
+      weight: 2.0643
+      polarity: positive
+      cohens_d: 2.0643
+      effect_size: large
+      truth_mean: -0.3791
+      truth_std: 0.1274
+      threshold_medium: -0.247575
+      enabled: true
+      threshold_low: -0.313347
+    entropy_mean:
+      weight: 2.0181
+      polarity: negative
+      cohens_d: -2.0181
+      effect_size: large
+      truth_mean: 0.4023
+      truth_std: 0.0707
+      threshold_medium: 0.330921
+      enabled: true
+      threshold_low: 0.366601
+    top1_confidence_mean:
+      weight: 2.0087
+      polarity: positive
+      cohens_d: 2.0087
+      effect_size: large
+      truth_mean: 0.8351
+      truth_std: 0.0316
+      threshold_medium: 0.866822
+      enabled: true
+      threshold_low: 0.85094
+    mean_logprob:
+      weight: 1.9388
+      polarity: positive
+      cohens_d: 1.9388
+      effect_size: large
+      truth_mean: -0.2972
+      truth_std: 0.0686
+      threshold_medium: -0.230649
+      enabled: true
+      threshold_low: -0.263921
+    perplexity_mean:
+      weight: 1.9219
+      polarity: negative
+      cohens_d: -1.9219
+      effect_size: large
+      truth_mean: 1.3493
+      truth_std: 0.095
+      threshold_medium: 1.257985
+      enabled: true
+      threshold_low: 1.303628
+    entropy_std:
+      weight: 1.8369
+      polarity: negative
+      cohens_d: -1.8369
+      effect_size: large
+      truth_mean: 0.46
+      truth_std: 0.0328
+      threshold_medium: 0.429851
+      enabled: true
+      threshold_low: 0.444913
+    top1_confidence_std:
+      weight: 1.7688
+      polarity: negative
+      cohens_d: -1.7688
+      effect_size: large
+      truth_mean: 0.215
+      truth_std: 0.0187
+      threshold_medium: 0.198487
+      enabled: true
+      threshold_low: 0.206764
+    median_logprob:
+      weight: 1.7367
+      polarity: positive
+      cohens_d: 1.7367
+      effect_size: large
+      truth_mean: -0.0491
+      truth_std: 0.0442
+      threshold_medium: -0.010781
+      enabled: true
+      threshold_low: -0.029954
+    std_logprob:
+      weight: 1.6215
+      polarity: negative
+      cohens_d: -1.6215
+      effect_size: large
+      truth_mean: 0.4973
+      truth_std: 0.0723
+      threshold_medium: 0.438703
+      enabled: true
+      threshold_low: 0.468004
+    unique_token_ratio:
+      weight: 1.108
+      polarity: positive
+      cohens_d: 1.108
+      effect_size: large
+      truth_mean: 0.6388
+      truth_std: 0.0348
+      threshold_medium: 0.658123
+      enabled: true
+      threshold_low: 0.648479
+    min_logprob:
+      weight: 1.0349
+      polarity: positive
+      cohens_d: 1.0349
+      effect_size: large
+      truth_mean: -2.6856
+      truth_std: 0.4161
+      threshold_medium: -2.470251
+      enabled: true
+      threshold_low: -2.577919
+    range_logprob:
+      weight: 1.0349
+      polarity: negative
+      cohens_d: -1.0349
+      effect_size: large
+      truth_mean: 2.6856
+      truth_std: 0.4161
+      threshold_medium: 2.470251
+      enabled: true
+      threshold_low: 2.577919
+    avg_word_length:
+      weight: 0.7958
+      polarity: negative
+      cohens_d: -0.7958
+      effect_size: medium
+      truth_mean: 6.4372
+      truth_std: 0.3933
+      threshold_medium: 6.280713
+      enabled: false
+      threshold_low: 6.358958
+    logprob_q75:
+      weight: 0.6715
+      polarity: positive
+      cohens_d: 0.6715
+      effect_size: medium
+      truth_mean: -0.0008
+      truth_std: 0.0039
+      threshold_medium: 0.000474
+      enabled: false
+      threshold_low: -0.000184
+deployment:
+  recommended: true
+  viable_features: 13
+  max_effect_size: 2.0755

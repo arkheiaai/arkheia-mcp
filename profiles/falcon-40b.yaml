@@ -1,0 +1,151 @@
+model: falcon-40b
+version: '1.0'
+type: detection_profile
+generated: '2026-04-04'
+characterization:
+  job_id: 40
+  source_model: Falcon 40B (prose, 250tok)
+  corpus: matched_200
+detection:
+  strategy: weighted_sum
+  polarity: mixed
+  alpha: 0.05
+  bias: 0.0
+  min_required_features: 2
+  min_contribution_threshold: 0.1
+  evidence_depth_limited: false
+  features:
+    std_logprob:
+      weight: 1.1411
+      polarity: positive
+      cohens_d: 1.1411
+      effect_size: large
+      truth_mean: 1.0501
+      truth_std: 0.1013
+      threshold_medium: 1.107878
+      enabled: true
+      threshold_low: 1.07899
+    mean_logprob:
+      weight: 1.041
+      polarity: negative
+      cohens_d: -1.041
+      effect_size: large
+      truth_mean: -0.8928
+      truth_std: 0.1414
+      threshold_medium: -0.966364
+      enabled: true
+      threshold_low: -0.929572
+    logprob_iqr:
+      weight: 1.0387
+      polarity: positive
+      cohens_d: 1.0387
+      effect_size: large
+      truth_mean: 1.3511
+      truth_std: 0.2286
+      threshold_medium: 1.469783
+      enabled: true
+      threshold_low: 1.410417
+    logprob_q25:
+      weight: 0.9964
+      polarity: negative
+      cohens_d: -0.9964
+      effect_size: large
+      truth_mean: -1.4107
+      truth_std: 0.2592
+      threshold_medium: -1.539864
+      enabled: true
+      threshold_low: -1.475301
+    perplexity_mean:
+      weight: 0.995
+      polarity: positive
+      cohens_d: 0.995
+      effect_size: large
+      truth_mean: 2.4672
+      truth_std: 0.375
+      threshold_medium: 2.653782
+      enabled: true
+      threshold_low: 2.5605
+    entropy_std:
+      weight: 0.9875
+      polarity: positive
+      cohens_d: 0.9875
+      effect_size: large
+      truth_mean: 0.5224
+      truth_std: 0.0233
+      threshold_medium: 0.533939
+      enabled: true
+      threshold_low: 0.528191
+    top1_confidence_std:
+      weight: 0.975
+      polarity: positive
+      cohens_d: 0.975
+      effect_size: large
+      truth_mean: 0.3486
+      truth_std: 0.0122
+      threshold_medium: 0.354515
+      enabled: true
+      threshold_low: 0.35155
+    top1_confidence_mean:
+      weight: 0.8875
+      polarity: negative
+      cohens_d: -0.8875
+      effect_size: large
+      truth_mean: 0.5857
+      truth_std: 0.048
+      threshold_medium: 0.564381
+      enabled: true
+      threshold_low: 0.57504
+    perplexity_std:
+      weight: 0.8744
+      polarity: positive
+      cohens_d: 0.8744
+      effect_size: large
+      truth_mean: 13.9395
+      truth_std: 5.3751
+      threshold_medium: 16.289413
+      enabled: true
+      threshold_low: 15.114467
+    entropy_mean:
+      weight: 0.8287
+      polarity: positive
+      cohens_d: 0.8287
+      effect_size: large
+      truth_mean: 0.7374
+      truth_std: 0.0723
+      threshold_medium: 0.767387
+      enabled: true
+      threshold_low: 0.752401
+    median_logprob:
+      weight: 0.8062
+      polarity: negative
+      cohens_d: -0.8062
+      effect_size: large
+      truth_mean: -0.4782
+      truth_std: 0.1745
+      threshold_medium: -0.548522
+      enabled: true
+      threshold_low: -0.513347
+    min_logprob:
+      weight: 0.6664
+      polarity: negative
+      cohens_d: -0.6664
+      effect_size: medium
+      truth_mean: -4.6984
+      truth_std: 0.5364
+      threshold_medium: -4.877162
+      enabled: false
+      threshold_low: -4.787797
+    range_logprob:
+      weight: 0.6664
+      polarity: positive
+      cohens_d: 0.6664
+      effect_size: medium
+      truth_mean: 4.6984
+      truth_std: 0.5364
+      threshold_medium: 4.877151
+      enabled: false
+      threshold_low: 4.787786
+deployment:
+  recommended: true
+  viable_features: 11
+  max_effect_size: 1.1411

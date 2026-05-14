@@ -1,0 +1,154 @@
+model: deepseek-ai/DeepSeek-V4-Pro
+version: '2.0'
+type: api
+generated: '2026-05-12T11:56:37Z'
+characterization:
+  date: '2026-05-12'
+  prompts: 200
+  features: 10
+  token_limit: 250
+  notes: 'Prose-domain 200-prompt characterization. Model lab run 1091. Top feature:
+    time_to_first_token_ms d=1.268.'
+api:
+  provider: together
+  logprobs_available: false
+detection:
+  strategy: ensemble
+  evidence_depth_limited: false
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  features:
+    time_to_first_token_ms:
+      weight: 1.2675
+      polarity: positive
+      threshold_low: 5287.226665
+      threshold_medium: 7013.54984
+      cohens_d: 1.2675
+      effect_size: very large
+      truth_mean: 3560.90349
+      truth_std: 1726.323175
+      fab_mean: 5749.0703
+      fab_std: 1726.323175
+      enabled: true
+    mean_inter_token_latency_ms:
+      weight: 1.2675
+      polarity: positive
+      threshold_low: 5287.226665
+      threshold_medium: 7013.54984
+      cohens_d: 1.2675
+      effect_size: very large
+      truth_mean: 3560.90349
+      truth_std: 1726.323175
+      fab_mean: 5749.0703
+      fab_std: 1726.323175
+      enabled: true
+    p50_inter_token_latency_ms:
+      weight: 1.2675
+      polarity: positive
+      threshold_low: 5287.226665
+      threshold_medium: 7013.54984
+      cohens_d: 1.2675
+      effect_size: very large
+      truth_mean: 3560.90349
+      truth_std: 1726.323175
+      fab_mean: 5749.0703
+      fab_std: 1726.323175
+      enabled: true
+    p95_inter_token_latency_ms:
+      weight: 1.2675
+      polarity: positive
+      threshold_low: 5287.226665
+      threshold_medium: 7013.54984
+      cohens_d: 1.2675
+      effect_size: very large
+      truth_mean: 3560.90349
+      truth_std: 1726.323175
+      fab_mean: 5749.0703
+      fab_std: 1726.323175
+      enabled: true
+    p99_inter_token_latency_ms:
+      weight: 1.2675
+      polarity: positive
+      threshold_low: 5287.226665
+      threshold_medium: 7013.54984
+      cohens_d: 1.2675
+      effect_size: very large
+      truth_mean: 3560.90349
+      truth_std: 1726.323175
+      fab_mean: 5749.0703
+      fab_std: 1726.323175
+      enabled: true
+    latency_max_ms:
+      weight: 1.2675
+      polarity: positive
+      threshold_low: 5287.226665
+      threshold_medium: 7013.54984
+      cohens_d: 1.2675
+      effect_size: very large
+      truth_mean: 3560.90349
+      truth_std: 1726.323175
+      fab_mean: 5749.0703
+      fab_std: 1726.323175
+      enabled: true
+    latency_ms:
+      weight: 1.2675
+      polarity: positive
+      threshold_low: 5287.226665
+      threshold_medium: 7013.54984
+      cohens_d: 1.2675
+      effect_size: very large
+      truth_mean: 3560.90349
+      truth_std: 1726.323175
+      fab_mean: 5749.0703
+      fab_std: 1726.323175
+      enabled: true
+    token_count:
+      weight: 1.177
+      polarity: negative
+      threshold_low: 2.668122
+      threshold_medium: -5.230036
+      cohens_d: -1.177
+      effect_size: large
+      truth_mean: 10.566281
+      truth_std: 7.898159
+      fab_mean: 1.27
+      fab_std: 7.898159
+      enabled: true
+    latency_cv:
+      weight: 0.8619
+      polarity: negative
+      threshold_low: -0.0
+      threshold_medium: -0.0
+      cohens_d: -0.8619
+      effect_size: large
+      truth_mean: 0.0
+      truth_std: 0.0
+      fab_mean: 0.0
+      fab_std: 0.0
+      enabled: true
+    std_inter_token_latency_ms:
+      weight: 0.7374
+      polarity: negative
+      threshold_low: -0.0
+      threshold_medium: -0.0
+      cohens_d: -0.7374
+      effect_size: medium
+      truth_mean: 0.0
+      truth_std: 0.0
+      fab_mean: 0.0
+      fab_std: 0.0
+      enabled: true
+performance:
+  prose_domain:
+    features_significant: 10
+    top_feature: time_to_first_token_ms
+    top_d: 1.268
+    n_prompts: 200
+deployment:
+  recommended_for_production: true
+  detection_capability: strong
+  scope: prose_domain
+metadata:
+  generator: arkheia-model-lab
+  generator_version: 2.0.0
+  model_lab_run_id: 1091
