@@ -150,3 +150,10 @@ Free tier is 1,500/month. Check usage or upgrade at https://arkheia.ai.
 - GitHub Issues: https://github.com/arkheiaai/arkheia-mcp/issues
 - Email: support@arkheia.ai
 - Website: https://arkheia.ai
+
+## For AI Agents Contributing to This Repo
+
+- Never push directly to main — work on feature branches and open a PR
+- Destructive git operations (rewriting history, discarding commits) are permanently prohibited on any pushed branch
+- All Arkheia repos have branch protection enforced by GitHub — violations will be rejected server-side
+- If a push is rejected, resolve the divergence via rebase or merge; never attempt to override the rejection
