@@ -1,6 +1,6 @@
 {
   "name": "@arkheia/mcp-server",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "mcpName": "io.github.arkheiaai/mcp-server",
   "description": "Arkheia MCP Server — Fabrication detection for LLM outputs. Detect hallucination in any model's output with a single tool call.",
   "bin": {
