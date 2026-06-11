@@ -26,7 +26,13 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 def _db_path() -> str:
-    return os.environ.get("MEMORY_DB_PATH", "C:/arkheia-mcp/data/memory.db")
+    # OS-neutral per-user default. The old hardcoded "C:/arkheia-mcp/data/memory.db" wrote to a junk
+    # relative "./C:/…" dir on macOS/Linux (audit B#7). XDG_DATA_HOME honoured if set.
+    env = os.environ.get("MEMORY_DB_PATH")
+    if env:
+        return env
+    base = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".arkheia")
+    return os.path.join(base, "memory.db")
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -79,7 +85,10 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
         observations_added:  Number of new observations added this call
         total_observations:  Total observations stored for this entity
     """
-    conn = _get_conn()
+    try:
+        conn = _get_conn()
+    except Exception as e:  # RO filesystem / bad path — fail-open like the rest of the suite (B#7)
+        return {"error": "memory_unavailable", "detail": str(e)[:200]}
     try:
         _init_schema(conn)
         now = datetime.utcnow().isoformat()
@@ -133,8 +142,13 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
             "observations_added": added,
             "total_observations": total,
         }
+    except Exception as e:  # SQLite op failure must not 500 the agent — return a structured error
+        return {"error": "memory_write_failed", "detail": str(e)[:200]}
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 async def retrieve_entities(
@@ -215,7 +229,10 @@ async def store_relation(from_entity: str, relation_type: str, to_entity: str) -
         relation_type: Relation label
         to_entity:     Target entity name
     """
-    conn = _get_conn()
+    try:
+        conn = _get_conn()
+    except Exception as e:  # fail-open (B#7)
+        return {"error": "memory_unavailable", "detail": str(e)[:200]}
     try:
         _init_schema(conn)
         rel_id = str(uuid.uuid4())
@@ -231,5 +248,10 @@ async def store_relation(from_entity: str, relation_type: str, to_entity: str) -
             "relation_type": relation_type,
             "to_entity": to_entity,
         }
+    except Exception as e:
+        return {"error": "memory_write_failed", "detail": str(e)[:200]}
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:
+            pass

@@ -4,16 +4,26 @@ Arkheia MCP Server — trust verification tools for Claude orchestrators.
 Exposes two tools:
   arkheia_verify    — score a (prompt, response, model) tuple for fabrication risk
   arkheia_audit_log — retrieve structured audit evidence for a session
+
+Reliability contract: a detection-backend outage must NEVER become a tool error. Both tools delegate to
+mcp_server.proxy_client.ProxyClient, which tries the local proxy first, falls back to the hosted API
+(ARKHEIA_API_KEY), and fails OPEN — returning an honest UNKNOWN/empty result rather than raising. (The
+previous inline httpx + raise_for_status path bricked the tools when the local proxy was down.)
 """
 
 import os
-import httpx
+
 from mcp.server.fastmcp import FastMCP
-from pydantic import BaseModel
+from mcp_server.proxy_client import ProxyClient
 
 ARKHEIA_PROXY_URL = os.getenv("ARKHEIA_PROXY_URL", "http://localhost:8099")
 
 mcp = FastMCP("arkheia-trust")
+
+
+def _client() -> ProxyClient:
+    """Local-first client with hosted fallback + fail-open (see mcp_server/proxy_client.py)."""
+    return ProxyClient(base_url=ARKHEIA_PROXY_URL)
 
 
 @mcp.tool()
@@ -27,19 +37,11 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
         model:    The model identifier (e.g. 'gpt-4o', 'llama-3-70b')
 
     Returns:
-        risk_level:   LOW / MEDIUM / HIGH
-        confidence:   0.0 – 1.0
-        features:     Which signals triggered
-        evidence:     Specific spans of concern (if any)
+        risk_level / confidence / features on success. If neither the local proxy nor the hosted API is
+        reachable it fails OPEN with risk_level "UNKNOWN" and an `error` field — i.e. "NOT assessed",
+        which a caller must treat as unverified rather than a clean bill (never a 500).
     """
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            f"{ARKHEIA_PROXY_URL}/detect/verify",
-            json={"prompt": prompt, "response": response, "model": model},
-            timeout=10.0,
-        )
-        r.raise_for_status()
-        return r.json()
+    return await _client().verify(prompt, response, model)
 
 
 @mcp.tool()
@@ -52,20 +54,10 @@ async def arkheia_audit_log(session_id: str | None = None, limit: int = 50) -> d
         limit:      Max number of events to return (default 50)
 
     Returns:
-        events: List of detection events with timestamps, risk levels, evidence
-        summary: Aggregate counts by risk level
+        events / summary on success; on a backend outage it fails OPEN with an empty log and an `error`
+        field rather than raising. (Audit log is local-proxy only — no hosted fallback.)
     """
-    async with httpx.AsyncClient() as client:
-        params = {"limit": limit}
-        if session_id:
-            params["session_id"] = session_id
-        r = await client.get(
-            f"{ARKHEIA_PROXY_URL}/audit/log",
-            params=params,
-            timeout=10.0,
-        )
-        r.raise_for_status()
-        return r.json()
+    return await _client().get_audit_log(session_id=session_id, limit=limit)
 
 
 if __name__ == "__main__":
