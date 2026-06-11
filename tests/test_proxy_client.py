@@ -40,6 +40,9 @@ class TestLocalProxy:
             "confidence": 0.85,
             "features_triggered": ["word_count"],
             "detection_id": "det_abc123",
+            # a REAL local verdict carries evidence_depth_limited=False; without it the client now
+            # (correctly) escalates to hosted rather than trusting an evidence-limited local LOW.
+            "evidence_depth_limited": False,
         }
         mock_response.raise_for_status = MagicMock()
 
@@ -48,6 +51,38 @@ class TestLocalProxy:
 
         assert result["risk_level"] == "LOW"
         assert result["confidence"] == 0.85
+
+    @pytest.mark.asyncio
+    async def test_evidence_limited_local_escalates_to_hosted(self, client_with_key):
+        """THE INVERSION FIX (enterprise-readiness audit 2026-06-11): when the local structural
+        detector returns an evidence-limited verdict (its normal text-only result — LOW/0.0 for
+        fabrication AND benign), the client MUST escalate to the hosted telemetry detector rather
+        than trusting the local non-verdict. Local UP + evidence-limited → hosted is consulted and
+        its real verdict wins."""
+        local_resp = MagicMock()
+        local_resp.json.return_value = {
+            "risk_level": "LOW", "confidence": 0.0, "features_triggered": [],
+            "detection_id": "det_local_inert", "evidence_depth_limited": True,
+        }
+        local_resp.raise_for_status = MagicMock()
+        hosted_resp = MagicMock()
+        hosted_resp.json.return_value = {
+            "risk": "HIGH", "confidence": 0.93, "detection_id": "det_hosted_real",
+            "features_triggered": ["entropy_anomaly"], "evidence_depth_limited": False,
+        }
+        hosted_resp.raise_for_status = MagicMock()
+
+        calls = {"n": 0}
+        async def mock_post(url, **kwargs):
+            calls["n"] += 1
+            return local_resp if "/detect/verify" in url else hosted_resp
+
+        with patch("httpx.AsyncClient.post", side_effect=mock_post):
+            result = await client_with_key.verify("prompt", "fabricated claim", "claude-opus-4-7")
+
+        assert result["risk_level"] == "HIGH", "evidence-limited local must escalate; hosted verdict wins"
+        assert result.get("source") == "hosted"
+        assert calls["n"] == 2  # local (evidence-limited) THEN hosted
 
     @pytest.mark.asyncio
     async def test_local_connect_error_falls_back_to_hosted(self, client_with_key):

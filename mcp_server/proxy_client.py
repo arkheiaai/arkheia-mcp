@@ -52,31 +52,52 @@ class ProxyClient:
         """
         Detect fabrication in a model response.
 
-        Tries local proxy first. If unavailable, falls back to hosted API.
+        Escalation order: local structural detector first; if it is UNAVAILABLE *or returns an
+        evidence-limited result* (the local fast-path is text-only — no server-side telemetry — so it
+        returns LOW/UNKNOWN with evidence_depth_limited=True and cannot actually discriminate),
+        escalate to the hosted telemetry detector, which is the one that genuinely scores.
+
+        Fixes a verify INVERSION (enterprise-readiness audit 2026-06-11): the prior code escalated to
+        hosted ONLY when local was *down*, so in the normal case (proxy up) the headline verify tool
+        returned a non-discriminating LOW for blatant fabrication — false comfort exactly when
+        everything looked healthy. Fallback must key on EVIDENCE QUALITY, not just availability.
+
         Never raises -- returns UNKNOWN on any error.
         """
+        local_result: Optional[dict] = None
         # Try local proxy first (if last attempt didn't fail with ConnectError)
         if self._local_available:
-            result = await self._verify_local(prompt, response, model_id, session_id)
-            if result.get("error") not in ("proxy_unavailable", "proxy_timeout"):
-                return result
-            # Local proxy down -- fall through to hosted
-            self._local_available = False
-            logger.info("Local proxy unavailable, falling back to hosted API at %s", self.hosted_url)
+            local_result = await self._verify_local(prompt, response, model_id, session_id)
+            if local_result.get("error") in ("proxy_unavailable", "proxy_timeout"):
+                self._local_available = False
+                logger.info("Local proxy unavailable, falling back to hosted API at %s", self.hosted_url)
+                local_result = None
+            elif not local_result.get("evidence_depth_limited", True):
+                # local gave a real, evidence-backed verdict — trust it, skip the hosted round-trip
+                return local_result
+            # else: local returned an evidence-limited verdict — keep it, but try hosted for a real one
 
-        # Fallback: hosted API
+        # Escalate to hosted telemetry detector (evidence-limited local OR local down)
         if self.api_key:
-            result = await self._verify_hosted(prompt, response, model_id)
-            if result.get("error") not in ("hosted_unavailable",):
-                return result
-            # Hosted also failed -- try local once more in case it came back
-            self._local_available = True
+            hosted = await self._verify_hosted(prompt, response, model_id)
+            err = hosted.get("error")
+            if err in ("hosted_unavailable", "hosted_timeout"):
+                # transient — recover local for next call; prefer an evidence-limited local over nothing
+                self._local_available = True
+                if local_result is not None:
+                    return local_result
+            else:
+                # a real verdict OR a SPECIFIC reason (auth_failed / quota_exceeded). Return it: an
+                # explicit "couldn't verify — key invalid / quota exhausted" is the honest answer and
+                # must NOT be masked by an evidence-limited local LOW that reads as "safe".
+                return hosted
 
-        # No hosted API key and local is down
+        # No hosted key, or hosted transient-failed and no local result
+        if local_result is not None:
+            return local_result
         if not self.api_key:
             logger.warning("Local proxy unavailable and no ARKHEIA_API_KEY set for hosted fallback")
             return _unavailable("no_detection_available")
-
         return _unavailable("all_detection_paths_failed")
 
     async def _verify_local(
