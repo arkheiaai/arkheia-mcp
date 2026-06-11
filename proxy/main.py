@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
 from proxy.config import settings
 from proxy.router.profile_router import ProfileRouter
@@ -199,6 +199,16 @@ def create_app() -> FastAPI:
             "AI interception middleware enabled (upstream: %s)",
             settings.detection.upstream_url,
         )
+
+    @app.get("/healthz")
+    async def healthz(request: Request):
+        """UNAUTHENTICATED liveness probe — for container healthchecks, orchestrators and customer
+        monitoring. Returns only non-sensitive liveness (loaded profile count), never the rich
+        authed view. Added because the Docker stack's healthcheck hit the AUTHENTICATED /admin/health
+        → 401 → container 'unhealthy' → the MCP server's depends_on never started (the DOA stack,
+        enterprise-readiness audit B#1)."""
+        profile_router = getattr(request.app.state, "profile_router", None)
+        return {"status": "ok", "profiles_loaded": (profile_router.loaded_count if profile_router else 0)}
 
     @app.get("/")
     async def root():

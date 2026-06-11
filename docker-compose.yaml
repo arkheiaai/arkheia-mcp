@@ -32,8 +32,10 @@ services:
       - audit_logs:/var/log/arkheia
     restart: unless-stopped
     healthcheck:
+      # Use the UNAUTHENTICATED /healthz — /admin/health requires JWT and returned 401, leaving the
+      # container permanently 'unhealthy' so mcp_server's depends_on never started (audit B#1).
       test: ["CMD", "python", "-c",
-             "import httpx; httpx.get('http://localhost:8098/admin/health').raise_for_status()"]
+             "import httpx; httpx.get('http://localhost:8098/healthz').raise_for_status()"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -66,7 +68,9 @@ services:
       proxy:
         condition: service_healthy
     environment:
-      - ARKHEIA_PROXY_URL=http://proxy:8099
+      # the proxy listens on 8098 (ARKHEIA_PROXY_PORT) — 8099 pointed at nothing, so every detection
+      # silently degraded to UNKNOWN/hosted (audit B#2).
+      - ARKHEIA_PROXY_URL=http://proxy:8098
     # MCP server communicates via stdio by default.
     # For HTTP/SSE transport, uncomment:
     # ports:
