@@ -24,9 +24,9 @@ detection:
   features:
     output_tokens:
       weight: 0.9917
-      polarity: positive
-      threshold_low: 235.63
-      threshold_medium: 250.0
+      polarity: negative
+      threshold_low: 243.75
+      threshold_medium: 237.5
       cohens_d: 0.9917
       effect_size: large
       truth_mean: 250.0
@@ -36,9 +36,9 @@ detection:
       enabled: true
     total_time_s:
       weight: 0.8659
-      polarity: negative
-      threshold_low: 7.4776
-      threshold_medium: 7.37875
+      polarity: positive
+      threshold_low: 7.37875
+      threshold_medium: 7.838
       cohens_d: -0.8659
       effect_size: large
       truth_mean: 6.9195
@@ -48,9 +48,9 @@ detection:
       enabled: true
     tokens_per_second:
       weight: 2.2423
-      polarity: positive
-      threshold_low: 32.2318
-      threshold_medium: 34.34735
+      polarity: negative
+      threshold_low: 34.34735
+      threshold_medium: 31.9534
       cohens_d: 2.2423
       effect_size: very large
       truth_mean: 36.7413
@@ -60,9 +60,9 @@ detection:
       enabled: true
     unique_word_ratio:
       weight: 0.7322
-      polarity: negative
-      threshold_low: 0.70935
-      threshold_medium: 0.72255
+      polarity: positive
+      threshold_low: 0.72255
+      threshold_medium: 0.7555
       cohens_d: -0.7322
       effect_size: medium
       truth_mean: 0.6896

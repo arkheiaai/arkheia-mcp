@@ -21,16 +21,16 @@ api:
 
 detection:
   strategy: multi_feature
-  polarity: normal
+  polarity: inverted
   min_required_features: 2
   min_contribution_threshold: 1.0
   cross_domain_validated: true
   features:
     entropy_mean:
       weight: 1.1444
-      polarity: negative
-      threshold_low: 0.116735
-      threshold_medium: 0.138133
+      polarity: positive
+      threshold_low: 0.127678
+      threshold_medium: 0.136931
       cohens_d: 1.1444
       cohens_d_cross: 0.62
       effect_size: large
@@ -40,9 +40,9 @@ detection:
       cross_domain_stable: true
     top1_confidence_mean:
       weight: 1.0049
-      polarity: positive
-      threshold_low: 0.910902
-      threshold_medium: 0.923591
+      polarity: negative
+      threshold_low: 0.928063
+      threshold_medium: 0.923021
       cohens_d: -1.0049
       cohens_d_cross: -0.5738
       effect_size: large
@@ -52,9 +52,9 @@ detection:
       cross_domain_stable: true
     entropy_std:
       weight: 1.0042
-      polarity: negative
-      threshold_low: 0.247129
-      threshold_medium: 0.269183
+      polarity: positive
+      threshold_low: 0.258978
+      threshold_medium: 0.267477
       cohens_d: 1.0042
       cohens_d_cross: 0.6308
       effect_size: large
@@ -64,9 +64,9 @@ detection:
       cross_domain_stable: true
     mean_logprob:
       weight: 0.8855
-      polarity: positive
-      threshold_low: -0.166629
-      threshold_medium: -0.136131
+      polarity: negative
+      threshold_low: -0.129151
+      threshold_medium: -0.138716
       cohens_d: -0.8855
       cohens_d_cross: -0.4999
       effect_size: large
@@ -76,9 +76,9 @@ detection:
       cross_domain_stable: false
     perplexity_mean:
       weight: 0.8734
-      polarity: negative
-      threshold_low: 1.112854
-      threshold_medium: 1.146018
+      polarity: positive
+      threshold_low: 1.139092
+      threshold_medium: 1.150079
       cohens_d: 0.8734
       cohens_d_cross: 0.4926
       effect_size: large
@@ -88,9 +88,9 @@ detection:
       cross_domain_stable: false
     logprob_q25:
       weight: 0.8707
-      polarity: positive
-      threshold_low: -0.040143
-      threshold_medium: -0.022562
+      polarity: negative
+      threshold_low: -0.024455
+      threshold_medium: -0.030159
       cohens_d: -0.8707
       cohens_d_cross: -0.47
       effect_size: large
@@ -100,9 +100,9 @@ detection:
       cross_domain_stable: false
     logprob_iqr:
       weight: 0.8707
-      polarity: negative
-      threshold_low: 0.013185
-      threshold_medium: 0.022562
+      polarity: positive
+      threshold_low: 0.024454
+      threshold_medium: 0.030158
       cohens_d: 0.8707
       cohens_d_cross: 0.47
       effect_size: large
@@ -112,9 +112,9 @@ detection:
       cross_domain_stable: false
     top1_confidence_std:
       weight: 0.8459
-      polarity: negative
-      threshold_low: 0.168143
-      threshold_medium: 0.191749
+      polarity: positive
+      threshold_low: 0.183082
+      threshold_medium: 0.189058
       cohens_d: 0.8459
       cohens_d_cross: 0.5142
       effect_size: large
@@ -124,9 +124,9 @@ detection:
       cross_domain_stable: true
     word_count:
       weight: 0.6428
-      polarity: negative
-      threshold_low: 193.875
-      threshold_medium: 203.5
+      polarity: positive
+      threshold_low: 195.834167
+      threshold_medium: 200.079444
       cohens_d: 0.6428
       cohens_d_cross: 0.769
       effect_size: medium
@@ -136,9 +136,9 @@ detection:
       cross_domain_stable: true
     std_logprob:
       weight: 0.6426
-      polarity: negative
-      threshold_low: 0.369094
-      threshold_medium: 0.454598
+      polarity: positive
+      threshold_low: 0.442713
+      threshold_medium: 0.461678
       cohens_d: 0.6426
       cohens_d_cross: 0.3477
       effect_size: medium
@@ -148,9 +148,9 @@ detection:
       cross_domain_stable: false
     unique_word_ratio:
       weight: 0.6211
-      polarity: positive
-      threshold_low: 0.506621
-      threshold_medium: 0.543888
+      polarity: negative
+      threshold_low: 0.557271
+      threshold_medium: 0.546212
       cohens_d: -0.6211
       cohens_d_cross: -1.5039
       effect_size: medium
@@ -160,9 +160,9 @@ detection:
       cross_domain_stable: true
     median_logprob:
       weight: 0.5232
-      polarity: positive
-      threshold_low: -0.000191
-      threshold_medium: -5.8e-05
+      polarity: negative
+      threshold_low: -0.000133
+      threshold_medium: -0.000205
       cohens_d: -0.5232
       cohens_d_cross: -0.341
       effect_size: medium
