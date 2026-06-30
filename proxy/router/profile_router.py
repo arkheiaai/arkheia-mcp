@@ -211,6 +211,39 @@ class ProfileRouter:
             return None
         return model_id
 
+    def _by_model_id(self, target: str) -> Optional[dict]:
+        """Case-insensitive direct lookup of a profile by its model id (no fuzzy)."""
+        t = target.lower()
+        if t in self._profiles:
+            return self._profiles[t]
+        for key, profile in self._profiles.items():
+            stored = (profile.get("model") or profile.get("metadata", {}).get("model_id", "")).lower()
+            if key.lower() == t or stored == t:
+                return profile
+        return None
+
+    def _resolve_recent_gpt(self, model_lower: str) -> Optional[dict]:
+        """Explicit, logged resolution for recent GPT-5.x IDs (surface-strategy 2026-06-30).
+        Returns None to fall through when not a recent-GPT id."""
+        if not model_lower.startswith("gpt-5"):
+            return None
+        if "codex" in model_lower:
+            if "5.2-codex" in model_lower or "5.3-codex" in model_lower:
+                return self._by_model_id("gpt-5.2-codex")
+            if "5.1-codex-mini" in model_lower:
+                return self._by_model_id("gpt-5.1-codex-mini")
+            prof = self._by_model_id("gpt-5-codex")
+            if prof is not None:
+                logger.warning("Model %s: no dedicated Codex profile -- gpt-5-codex FALLBACK "
+                               "pending subscription characterisation", model_lower)
+            return prof
+        # public-API GPT-5.x (incl. -pro/-mini/-nano): nearest characterised API surface
+        prof = self._by_model_id("gpt-5.4")
+        if prof is not None and "5.4" not in model_lower:
+            logger.warning("Model %s: no dedicated API profile -- gpt-5.4 (nearest API "
+                           "surface) pending per-version drift validation", model_lower)
+        return prof
+
     def get(self, model_id: str) -> Optional[dict]:
         """Return profile for model_id, or None if no match."""
         if not model_id:
@@ -230,6 +263,16 @@ class ProfileRouter:
             ).lower()
             if stored_id == model_lower:
                 return profile
+
+        # 1b. Recent GPT-5.x explicit resolution (parity with the API Proxy loader,
+        # 2026-06-30). Without this, recent IDs hit the crude family match below and could
+        # borrow a wrong-surface profile (e.g. a Codex profile for an API model, or vice
+        # versa). Route explicitly: Codex/subscription IDs -> gpt-5-codex; public-API
+        # versions -> nearest characterised API surface (gpt-5.4) pending drift. A real
+        # gpt-5.5.yaml dropped in supersedes this via the exact match above.
+        gpt5 = self._resolve_recent_gpt(model_lower)
+        if gpt5 is not None:
+            return gpt5
 
         # 2. Prefix match (either direction)
         for key in self._profiles:

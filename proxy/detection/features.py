@@ -261,6 +261,32 @@ def check_mode_gate(profile: dict, signals: dict) -> Optional[Dict[str, Any]]:
 # Profile-based classification
 # ---------------------------------------------------------------------------
 
+# Gate-action containment (2026-06-28, parity with arkheia-proxy). A profile may only
+# HARD-BLOCK when it has earned it with real measured performance; everything else is
+# advisory. Consumers must only block when result["gate_action"] == "block".
+_GATE_FP_CEILING = 0.05
+
+
+def resolve_gate_action(profile: dict) -> str:
+    """Returns "block" ONLY when the profile declares gate_action: block AND carries
+    non-null precision + f1 (and false_positive_rate within ceiling, if present).
+    Otherwise "advise". Default advise — no unvalidated profile can hard-block."""
+    detection_cfg = profile.get("detection", {}) or {}
+    declared = str(profile.get("gate_action") or detection_cfg.get("gate_action") or "advise").lower()
+    if declared != "block":
+        return "advise"
+    perf = profile.get("performance") or {}
+    if perf.get("precision") is None or perf.get("f1") is None:
+        return "advise"
+    fp = perf.get("false_positive_rate")
+    try:
+        if fp is not None and float(fp) > _GATE_FP_CEILING:
+            return "advise"
+    except (TypeError, ValueError):
+        return "advise"
+    return "block"
+
+
 def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, Any]]:
     """
     Classify fabrication risk using a YAML model profile.
@@ -356,6 +382,7 @@ def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, An
     return {
         "risk": risk,
         "confidence": confidence,
+        "gate_action": resolve_gate_action(profile),
         "evidence_depth_limited": evidence_limited,
         "model_detected": profile.get("model", "unknown"),
         "detection_method": "profile_" + detection_cfg.get("strategy", "ensemble"),

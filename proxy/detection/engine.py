@@ -30,6 +30,9 @@ class DetectionResult:
     detection_id: str        # UUID
     error: Optional[str] = None
     evidence_depth_limited: bool = True
+    # Gate eligibility (2026-06-28 containment). Consumers MUST only hard-block when this
+    # is "block"; default "advise" so an unvalidated/UNKNOWN profile can never block.
+    gate_action: str = "advise"
     metrics: dict = field(default_factory=dict)
 
 
@@ -115,5 +118,6 @@ class DetectionEngine:
             timestamp=timestamp,
             detection_id=detection_id,
             evidence_depth_limited=result.get("evidence_depth_limited", True),
+            gate_action=result.get("gate_action", "advise"),
             metrics=result.get("metrics", {}),
         )
