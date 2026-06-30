@@ -237,7 +237,14 @@ class ProfileRouter:
                 logger.warning("Model %s: no dedicated Codex profile -- gpt-5-codex FALLBACK "
                                "pending subscription characterisation", model_lower)
             return prof
-        # public-API GPT-5.x (incl. -pro/-mini/-nano): nearest characterised API surface
+        # public-API GPT-5.x: prefer a version-specific profile if characterised
+        # (gpt-5.5 covers gpt-5.5*, etc.), else nearest characterised API surface gpt-5.4.
+        import re as _re
+        _vm = _re.match(r"(gpt-5(?:\.\d+)?)", model_lower)
+        if _vm:
+            vprof = self._by_model_id(_vm.group(1))
+            if vprof is not None:
+                return vprof
         prof = self._by_model_id("gpt-5.4")
         if prof is not None and "5.4" not in model_lower:
             logger.warning("Model %s: no dedicated API profile -- gpt-5.4 (nearest API "

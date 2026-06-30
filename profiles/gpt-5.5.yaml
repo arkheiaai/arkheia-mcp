@@ -1,0 +1,48 @@
+model: gpt-5.5
+version: '1.0'
+type: detection_profile
+generated: '2026-06-30'
+characterization:
+  source_model: gpt-5.5
+  corpus: v2_matched_200 (code+prose)
+  prompts: 400
+  surface: responses_api_reasoning
+  notes: Reasoning-model surface (no logprobs). Fabrication signature = reasoning
+    burn (high reasoning_ratio, low visible_tokens).
+api:
+  provider: openai
+  endpoint: https://api.openai.com/v1/responses
+  logprobs_available: false
+  reasoning_model: true
+detection:
+  strategy: ensemble
+  polarity: mixed
+  alpha: 0.05
+  bias: 0.0
+  min_required_features: 1
+  min_contribution_threshold: 1.0
+  evidence_depth_limited: false
+  features:
+    reasoning_ratio:
+      weight: 2.2624
+      polarity: positive
+      threshold_low: 0.796
+      threshold_medium: 0.796
+      cohens_d: 2.2624
+      truth_mean: 0.240769
+      truth_std: 0.193456
+      fab_mean: 0.794933
+      fab_std: 0.287356
+      train_single_f1: 0.7899
+      enabled: true
+performance:
+  truth_accuracy: 0.9333
+  precision: 0.9333
+  recall: 0.9333
+  f1: 0.9333
+  false_positive_rate: 0.0667
+  accuracy: 0.9333
+  validated_on: held-out 120 (60 fab / 60 truth)
+gate_action: advise
+recommended_for_production: true
+detection_capability: strong
