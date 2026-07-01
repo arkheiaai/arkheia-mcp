@@ -9,11 +9,33 @@ detection engine. Extend only.
 """
 
 import math
+import re
 import statistics
 import logging
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Grounding-review signal (2026-07-01, parity with arkheia-proxy). Reasoning models flag
+# their own uncertainty in the response ("not in the sources", "I'm inferring this", "can't
+# confirm"). Validated ~100% precision on the InTouch grounding corpus. Elevated to a
+# first-class runtime signal so a caveat buried in prose becomes an actionable route-to-review.
+_GROUNDING_CAVEAT_RE = re.compile(
+    r"(not (?:in|contained in|provided in|available in|stated in|supported by) the sources?|"
+    r"sources? (?:do|does)(?:n'?t| not) (?:contain|provide|include|support|specify|say)|"
+    r"no (?:article|kb|information|record|matching|source|grounding)(?:\b|\s)|"
+    r"can'?t (?:determine|confirm|find|verify)|cannot (?:determine|confirm|find|verify|be (?:confirmed|determined))|"
+    r"i'?m inferring|i am inferring|inferring (?:this|that|it)|"
+    r"would need (?:to|more|the|access)|not enough (?:information|detail|context)|insufficient (?:information|detail|context|grounding)|"
+    r"unable to (?:confirm|determine|verify)|isn'?t (?:in|grounded|supported)|not grounded|"
+    r"i don'?t have (?:grounding|the source|access|information)|no source confirms|"
+    r"flag(?:ged)? (?:for|to) (?:review|follow-?up|product|kb|eng)|"
+    r"you may (?:want to|need to) (?:confirm|verify|check))", re.I)
+
+
+def grounding_uncertainty(text: str) -> float:
+    """Count of grounding-uncertainty markers (0,1,2,...); >=1 => route to review."""
+    return float(len(_GROUNDING_CAVEAT_RE.findall(text or "")))
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +61,7 @@ def extract_structural_features(text: str, token_count: int = 0) -> dict:
         "unique_word_ratio": len(set(w.lower() for w in words)) / len(words),
         "avg_word_length": sum(len(w) for w in words) / len(words),
         "sentence_count": len(sentences),
+        "grounding_uncertainty": grounding_uncertainty(text),
     }
     if token_count > 0:
         features["words_per_token"] = len(words) / token_count
@@ -203,6 +226,18 @@ def compute_feature(feature_name: str, signals: dict) -> Optional[float]:
 
     if feature_name == "chars_per_token":
         return signals.get("chars_per_token")
+
+    # Grounding-review signals (2026-07-01, parity with arkheia-proxy).
+    if feature_name == "grounding_uncertainty":
+        return signals.get("grounding_uncertainty")
+
+    if feature_name == "reasoning_flatline":
+        rt = signals.get("reasoning_tokens")
+        tt = signals.get("thinking_token_count")
+        val = rt if rt is not None else tt
+        if val is None:
+            return None
+        return 1.0 if val == 0 else 0.0
 
     return None
 

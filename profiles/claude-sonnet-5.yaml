@@ -1,0 +1,63 @@
+model: claude-sonnet-5
+version: '1.0'
+type: detection_profile
+generated: '2026-07-01'
+characterization:
+  source_model: claude-sonnet-5
+  corpus: intouch_grounding (n=56 grounded/ungrounded/empty)
+  surface: messages_api_reasoning
+  notes: >-
+    GROUNDING-REVIEW profile, not a fabrication classifier. Sonnet-5 flags its own grounding
+    gaps inside its answers ("not in the sources", "I'm inferring this", "I cannot confirm",
+    "would need to check") — validated ~100% precision on the InTouch grounding corpus (every
+    match was a genuine, appropriate uncertainty statement). In a real workflow that caveat is
+    a sentence a human skims past and an autonomous pipeline never reads, so Arkheia elevates
+    it to a first-class runtime signal. reasoning_flatline fires when a reasoning model emitted
+    ZERO thinking tokens — in a known-reasoning deployment (e.g. InTouch support synthesis)
+    that means it had nothing to ground on. ADVISORY ONLY: routes to human review, never blocks.
+api:
+  provider: anthropic
+  endpoint: https://api.anthropic.com/v1/messages
+  logprobs_available: false
+  reasoning_model: true
+detection:
+  strategy: grounding_review
+  gate_action: advise
+  polarity: positive
+  alpha: 0.05
+  bias: 0.0
+  min_required_features: 1
+  min_contribution_threshold: 1.0
+  evidence_depth_limited: false
+  features:
+    grounding_uncertainty:
+      weight: 1.0
+      polarity: positive
+      threshold_low: 0.5
+      threshold_medium: 1.0
+      truth_mean: 0.0
+      fab_mean: 2.0
+      enabled: true
+    reasoning_flatline:
+      weight: 0.8
+      polarity: positive
+      threshold_low: 0.5
+      threshold_medium: 1.0
+      truth_mean: 0.0
+      fab_mean: 1.0
+      enabled: true
+performance:
+  precision: 1.0
+  recall: 1.0
+  f1: 1.0
+  false_positive_rate: 0.0
+  accuracy: 1.0
+  validated_on: 'InTouch grounding corpus n=56 (constructed, small); grounded caveats manually verified genuine'
+  note: >-
+    Metrics are for the GROUNDING-GAP-SURFACING target (does the response flag or imply an
+    ungrounded element / did it fail to reason where reasoning was required) — NOT
+    truth-vs-fabrication. Small constructed corpus; treat as advisory pending a larger
+    production-labelled benchmark.
+gate_action: advise
+recommended_for_production: true
+detection_capability: strong
