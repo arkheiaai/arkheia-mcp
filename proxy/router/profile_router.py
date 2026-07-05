@@ -251,6 +251,20 @@ class ProfileRouter:
                            "surface) pending per-version drift validation", model_lower)
         return prof
 
+    def _resolve_glm(self, model_lower: str) -> Optional[dict]:
+        """Explicit version routing for GLM (Together) ids so a bare 'glm-5.2' or a canonical
+        'zai-org/glm-5.2' resolves to the RIGHT together-glm-<ver> surface and never borrows a
+        wrong-version GLM profile via the fuzzy prefix/family match below. Returns None to fall
+        through when not a GLM-5.x id (glm4-9b keeps its own path). Parity with the API Proxy
+        MODEL_PROFILE_MAP GLM entries (2026-07-05)."""
+        if "glm" not in model_lower:
+            return None
+        import re as _re
+        m = _re.search(r"glm-?(5(?:\.\d+)?)", model_lower)
+        if not m:
+            return None
+        return self._by_model_id(f"zai-org/glm-{m.group(1)}")
+
     def get(self, model_id: str) -> Optional[dict]:
         """Return profile for model_id, or None if no match."""
         if not model_id:
@@ -280,6 +294,12 @@ class ProfileRouter:
         gpt5 = self._resolve_recent_gpt(model_lower)
         if gpt5 is not None:
             return gpt5
+
+        # 1c. GLM (Together) explicit version routing — before the fuzzy match, so a GLM id
+        # resolves to its exact together-glm-<ver> surface and never borrows a wrong version.
+        glm = self._resolve_glm(model_lower)
+        if glm is not None:
+            return glm
 
         # 2. Prefix match (either direction)
         for key in self._profiles:
