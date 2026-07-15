@@ -2,3 +2,5 @@ mcp>=1.27.2
 httpx>=0.27.1
 pydantic>=2.10.0
 pyyaml>=6.0
+
+anyio>=4.14.2  # GHSA-82r6-8w77-94w6 (anyio IDNA-2008 TLS cert-validation) — transitive pin
