@@ -33,3 +33,5 @@ pytest-asyncio>=0.23
 
 # Load testing (optional, Phase 2)
 # locust>=2.20.0
+
+anyio>=4.14.2  # GHSA-82r6-8w77-94w6 (anyio IDNA-2008 TLS cert-validation) — transitive pin
