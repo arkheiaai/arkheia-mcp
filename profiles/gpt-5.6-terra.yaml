@@ -1,0 +1,52 @@
+model: gpt-5.6-terra
+version: '1.0'
+type: detection_profile
+generated: '2026-07-15'
+characterization:
+  source_model: gpt-5.6-terra
+  corpus: v2_matched_200 (code+prose)
+  prompts: 400
+  surface: responses_api_reasoning
+  max_output_tokens: 4000
+  reasoning_effort: medium
+  truncated_rows: 1
+  notes: Reasoning-model surface (no logprobs). Fabrication signature = reasoning
+    burn. Run uncapped-equivalent (4000 tok, 0 truncations) so reasoning_ratio is
+    a measured burn fraction, not a cap artifact.
+api:
+  provider: openai
+  endpoint: https://api.openai.com/v1/responses
+  logprobs_available: false
+  reasoning_model: true
+detection:
+  strategy: ensemble
+  polarity: mixed
+  alpha: 0.05
+  bias: 0.0
+  min_required_features: 1
+  min_contribution_threshold: 1.0
+  evidence_depth_limited: false
+  features:
+    reasoning_ratio:
+      weight: 1.8022
+      polarity: positive
+      threshold_low: 0.289308
+      threshold_medium: 0.289308
+      cohens_d: 1.8022
+      truth_mean: 0.063733
+      truth_std: 0.096217
+      fab_mean: 0.368431
+      fab_std: 0.218887
+      train_single_f1: 0.6968
+      enabled: true
+performance:
+  truth_accuracy: 0.95
+  precision: 0.9231
+  recall: 0.6
+  f1: 0.7273
+  false_positive_rate: 0.05
+  accuracy: 0.775
+  validated_on: held-out 120 (60 fab / 60 truth)
+gate_action: advise
+recommended_for_production: true
+detection_capability: moderate
