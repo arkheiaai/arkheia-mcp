@@ -1,7 +1,7 @@
 # Arkheia MCP Trust Server + Enterprise Proxy -- top-level requirements
 
 # MCP SDK (pinned to installed version)
-mcp==1.27.2
+mcp==1.28.1  # CVE-2026-59950 (high) - fixed in 1.28.1
 
 # HTTP
 httpx>=0.27.1
