@@ -246,6 +246,49 @@ def compute_feature(feature_name: str, signals: dict) -> Optional[float]:
 # Mode gate: suppress generative scoring for tool/short responses
 # ---------------------------------------------------------------------------
 
+def check_empty_output_gate(profile: dict, signals: dict) -> Optional[Dict[str, Any]]:
+    """
+    Empty-output gate: a response that emitted zero output tokens has no generative
+    surface to score, so it cannot be a fabrication — return LOW and stop.
+
+    This is the dominant false-positive source (confirmed with Codex): output_tokens == 0
+    (a truncated, empty, refused, or pure tool-call response) leaves reasoning_ratio / burn
+    features dividing by ~zero and saturating HIGH, flagging a response that said nothing.
+
+    output_tokens is server-side API usage metadata (a count), NOT the response text —
+    gating on it preserves the "we do not inspect inputs/outputs" guarantee.
+
+    Fires ONLY when output_tokens is explicitly present and < 1. If the provider gave no
+    usage metadata (None), we cannot confirm zero, so we carry on detecting.
+    """
+    ot = signals.get("output_tokens")
+    if ot is None:
+        return None
+    try:
+        ot = float(ot)
+    except (TypeError, ValueError):
+        return None
+    if ot >= 1:
+        return None
+
+    features_config = profile.get("detection", {}).get("features", {})
+    logger.debug("empty_output_gate fired: output_tokens=%s < 1", ot)
+    return {
+        "risk": "LOW",
+        "confidence": 0.0,
+        "evidence_depth_limited": True,
+        "model_detected": profile.get("model", "unknown"),
+        "detection_method": "empty_output_suppressed",
+        "profile_version": profile.get("version", "unknown"),
+        "metrics": {
+            "features_used": 0,
+            "features_total": len(features_config),
+            "computed_features": {},
+            "gate_reason": "output_tokens_below_1",
+        },
+    }
+
+
 def check_mode_gate(profile: dict, signals: dict) -> Optional[Dict[str, Any]]:
     """
     Mode gate: suppress generative scoring for tool-call or very short responses.
@@ -328,6 +371,11 @@ def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, An
 
     Returns None if no features could be computed (caller should treat as UNKNOWN).
     """
+    # Empty-output gate: zero output tokens == no generative surface -> LOW (top false positive).
+    empty_result = check_empty_output_gate(profile, signals)
+    if empty_result is not None:
+        return empty_result
+
     # Mode gate check first
     gate_result = check_mode_gate(profile, signals)
     if gate_result is not None:
