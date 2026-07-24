@@ -55,10 +55,15 @@ class VerifyResponse(BaseModel):
     detection_id: str
     error: Optional[str] = None
     # Governance decision surfaced to the CALLER so a configured block is not silently
-    # decorative. `action` = the customer policy applied (from settings.detection.high_risk_action,
-    # e.g. "block"/"warn"/"pass") -- mirrors action_taken in the audit record. `gate_action` =
-    # the profile-earned gate ("block" only when the profile validated it; else "advise").
-    # Per proxy/detection/features.py, a consumer must only hard-block when gate_action == "block".
+    # decorative. These two fields are NOT interchangeable:
+    #   action      = POLICY INTENT (NOT authorization). The customer policy applied, from
+    #                 settings.detection.high_risk_action ("block"/"warn"/"pass") -- mirrors
+    #                 action_taken in the audit record. Records what policy WANTS.
+    #   gate_action = AUTHORIZED action (AUTHORITATIVE). The profile-EARNED gate: "block" ONLY
+    #                 when the profile validated it (features.py::resolve_gate_action); else
+    #                 "advise". Per proxy/detection/features.py a consumer must hard-block ONLY
+    #                 when gate_action == "block" -- keying off `action` over-blocks unearned
+    #                 profiles.
     action: Optional[str] = None
     gate_action: Optional[str] = None
 
@@ -94,10 +99,13 @@ def _signal(
     configured `block` is the defect: the audit + governance trail record action_taken="block"
     while the caller receives an identical byte stream for block vs allow and cannot enforce.
 
-    So we emit a machine-actionable signal the caller can act on: the policy `action` and the
-    profile-earned `gate_action` in the response body, mirrored in headers for transport-layer
-    consumers. Per proxy/detection/features.py, a consumer must only hard-block when
-    gate_action == "block".
+    So we emit a machine-actionable signal the caller can act on, as TWO non-interchangeable
+    fields (mirrored in headers for transport-layer consumers):
+      - `gate_action` (X-Arkheia-Gate-Action) = the AUTHORIZED action (AUTHORITATIVE) -- the
+        profile-earned gate. Per proxy/detection/features.py a consumer must hard-block ONLY
+        when gate_action == "block".
+      - `action` (X-Arkheia-Action) = the POLICY intent (NOT authorization) -- mirrors the
+        audit action_taken. Enforcing on this over-blocks unearned / evidence-limited profiles.
 
     Header/structured-field signalling ONLY -- we never prepend to the body (that pattern in
     interception.py corrupts responses and 400-loops sessions).
@@ -111,7 +119,10 @@ def _signal(
     verify.gate_action = gate_action
     try:
         http_response.headers["X-Arkheia-Risk"] = str(verify.risk_level)
+        # X-Arkheia-Action = POLICY INTENT (not authorization); mirrors audit action_taken.
         http_response.headers["X-Arkheia-Action"] = action
+        # X-Arkheia-Gate-Action = AUTHORITATIVE authorized action. Consumers hard-block ONLY
+        # on this == "block" (features.py). Enforcing on X-Arkheia-Action over-blocks.
         http_response.headers["X-Arkheia-Gate-Action"] = gate_action
     except Exception as e:  # pragma: no cover - defensive; headers are best-effort
         logger.error("Failed to set Arkheia signal headers (body fields still set): %s", e)
@@ -125,6 +136,19 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
 
     Always returns HTTP 200. Detection failures surface as UNKNOWN risk.
     Audit log is written async -- does not block the response.
+
+    TWO decision signals are surfaced to the caller, and they are NOT interchangeable:
+
+      - gate_action / X-Arkheia-Gate-Action = the AUTHORIZED action (AUTHORITATIVE). This is
+        the profile-EARNED gate: "block" ONLY when the model profile has validated a hard-block
+        (see proxy/detection/features.py::resolve_gate_action); otherwise "advise". A consumer
+        MUST hard-block ONLY when gate_action == "block". This is the signal to enforce on.
+
+      - action / X-Arkheia-Action = the POLICY intent (NOT an authorization). It mirrors
+        action_taken in the audit record (from settings.detection.high_risk_action, e.g.
+        "block"/"warn"/"pass"). It records what the customer's policy WANTS, which on an
+        unearned / evidence-limited profile can be "block" while gate_action is still "advise".
+        Keying enforcement off `action` OVER-BLOCKS on profiles that never earned it -- do not.
     """
     engine = getattr(request.app.state, "engine", None)
     audit = getattr(request.app.state, "audit_writer", None)
