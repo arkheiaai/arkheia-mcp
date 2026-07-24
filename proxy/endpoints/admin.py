@@ -9,9 +9,10 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from proxy.auth import require_auth, COOKIE_NAME, verify_jwt
+from proxy.pathsafe import safe_profile_write_path
 
 logger = logging.getLogger(__name__)
 
@@ -721,11 +722,24 @@ async def rollback_profile(model_id: str, request: Request, _: str = Depends(req
         return {"status": "error", "detail": "server not fully initialized"}
 
     profile_dir = settings.detection.profile_dir
-    path = Path(profile_dir) / f"{model_id}.yaml"
+    # Path-traversal hardening (F23, WRITE side): validate model_id against the
+    # shared allow-list + realpath containment BEFORE building any write path, so
+    # a crafted id ("../pwned", an absolute path) cannot write/target a file
+    # outside the profiles root (nor act as a file-existence oracle / reload
+    # trigger). Fail-closed 400: no write, no reload.
+    path = safe_profile_write_path(profile_dir, model_id)
+    if path is None:
+        return JSONResponse(
+            status_code=400,
+            content={"status": "error", "detail": "invalid model_id"},
+        )
     bak = Path(str(path) + ".bak")
 
     if not bak.exists():
-        return {"status": "error", "detail": f"no backup available for {model_id}"}
+        return JSONResponse(
+            status_code=404,
+            content={"status": "error", "detail": f"no backup available for {model_id}"},
+        )
 
     try:
         path.write_bytes(bak.read_bytes())

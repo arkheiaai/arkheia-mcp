@@ -412,6 +412,16 @@ def client_ext_secret(monkeypatch, tmp_path):
         yield c
 
 
+# NOTE (honesty): the HTTP download route below is NOT a genuine test of the
+# storage traversal fix. Starlette matches `{model_id}` with `[^/]+`, so a
+# slash-bearing (or %2f-decoded) traversal 404s at the route matcher BEFORE it
+# reaches storage, and the remaining `%xx`-literal vectors reach storage only as
+# a literal filename that never escapes the root — so this test passes
+# IDENTICALLY against the vulnerable base storage (verified). It therefore
+# guards the HTTP *surface* (a regression guard: e.g. if the route were ever
+# changed to a `:path` converter, this would catch the resulting exposure) —
+# NOT the storage fix. The storage fix is exercised, genuinely RED on base, by
+# `test_storage_*` above and `test_storage_download_never_leaks_secret` below.
 @pytest.mark.parametrize(
     "vector",
     [
@@ -423,9 +433,11 @@ def client_ext_secret(monkeypatch, tmp_path):
         "/etc/passwd",
     ],
 )
-def test_download_traversal_never_leaks(client_ext_secret, vector):
-    """HTTP defense-in-depth: traversal vectors on the download route never
-    return 200 and never leak the planted secret's content."""
+def test_download_route_rejects_url_traversal(client_ext_secret, vector):
+    """HTTP SURFACE guard (route matcher, not the storage fix): the download
+    route never returns 200 for URL-shaped traversal vectors and never echoes
+    the planted secret. See the note above for why this does not, by itself,
+    exercise the storage containment."""
     resp = client_ext_secret.get(
         f"/profiles/{vector}/download",
         headers={"Authorization": f"Bearer {VALID_KEY}"},
@@ -435,3 +447,27 @@ def test_download_traversal_never_leaks(client_ext_secret, vector):
     # never in a vector string, so this catches an actual leak precisely.
     assert "SUPER_SECRET" not in resp.text
     assert "root:" not in resp.text  # /etc/passwd marker
+
+
+@pytest.mark.parametrize(
+    "vector",
+    [
+        "../SECRET_outside",      # relative parent -> sibling of the root
+        "../../SECRET_outside",
+        "..\\SECRET_outside",     # backslash separator variant
+    ],
+)
+def test_storage_download_never_leaks_secret(storage_with_secret, vector):
+    """STORAGE containment (genuinely RED on base): the actual fix locus.
+
+    Drives `get_profile_bytes` directly — the method the download route calls —
+    with vectors that DO escape the profiles root on the unpatched storage
+    (base reads the planted `SUPER_SECRET`). Post-fix each returns None and the
+    out-of-root secret's *content* is never surfaced. Unlike the HTTP test above
+    this bypasses Starlette's `[^/]+` matcher, so it fails on pre-fix storage."""
+    storage, _root, _vault = storage_with_secret
+    out = storage.get_profile_bytes(vector)
+    assert out is None
+    # Belt-and-braces: even if a future regression returned bytes, they must
+    # never be the planted secret's content.
+    assert out is None or b"SUPER_SECRET" not in out

@@ -19,6 +19,7 @@ from typing import Optional
 import httpx
 from pydantic import SecretStr
 
+from proxy.pathsafe import safe_profile_write_path
 from proxy.registry.validator import ProfileValidator
 
 logger = logging.getLogger(__name__)
@@ -136,7 +137,15 @@ class RegistryClient:
         profile_data = self.validator.validate(content)
 
         # 3. Write to profile dir (keep .bak for rollback)
-        path = Path(self.profile_dir) / f"{model_id}.yaml"
+        # Path-traversal hardening (F23, WRITE side): the registry-supplied
+        # model_id must pass the shared allow-list + realpath containment before
+        # it builds a write path, so a malicious/compromised registry cannot
+        # write a profile outside the profiles root. Fail-closed: raise so the
+        # caller retains the current profile (same contract as other validation
+        # failures above).
+        path = safe_profile_write_path(self.profile_dir, model_id)
+        if path is None:
+            raise ValueError(f"Unsafe model_id rejected (path traversal): {model_id!r}")
         if path.exists():
             bak_path = Path(str(path) + ".bak")
             bak_path.write_bytes(path.read_bytes())
