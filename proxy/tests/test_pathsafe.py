@@ -6,14 +6,17 @@ public `model_id` is a REGISTRY identifier that MAY contain `:` or `/` (ollama
 `qwen3:8b`, HF `deepseek-ai/DeepSeek-V3.1`, `zoecohn4/Ouro:latest`), so BOTH
 properties must hold together:
 
-  CONTRACT  — every emitted id is CACHEABLE (yields a within-root write path), and
+  CONTRACT  — every emitted id is CACHEABLE as a TOP-LEVEL SINGLE-COMPONENT file:
+              `safe_profile_write_path` ENCODES the id (`/`→`%2F`, `:`→`%3A`) so a
+              slash id is one top-level file the router's top-level glob loads —
+              never a subdir (written-but-never-loaded), and
   SECURITY  — no id (traversal / absolute / encoded / symlink / NUL) ever yields a
               write path OUTSIDE the profiles root.
 
-The CONTRACT regressed when an over-strict charset rejected the 21 `:`/`/` ids on
-write; the CONTRACT tests here are RED on that head and GREEN after the
-realpath-containment redesign. The client-side sibling
-(`RegistryClient._download_and_apply`) is covered too.
+The CONTRACT regressed twice: first an over-strict charset rejected the 21 `:`/`/`
+ids on write; then the containment-only redesign accepted them but let a `/` id
+land in a within-root SUBDIR the loader skips. The single-component encode closes
+both. The client-side sibling (`RegistryClient._download_and_apply`) is covered too.
 """
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -22,7 +25,7 @@ import pytest
 import yaml
 from pydantic import SecretStr
 
-from proxy.pathsafe import is_safe_model_id, safe_profile_write_path
+from proxy.pathsafe import encode_model_id, is_safe_model_id, safe_profile_write_path
 from proxy.registry.client import RegistryClient
 
 # Same batteries the registry-server READ tests use — kept in sync deliberately.
@@ -119,10 +122,15 @@ def test_write_path_accepts_all_emitted_ids(tmp_path):
     "mid", ["claude-opus-4-8", "qwen3:8b", "deepseek-ai/DeepSeek-V3.1"]
 )
 def test_write_path_legit_is_contained(tmp_path, mid):
+    """A legit id resolves to a TOP-LEVEL single-component file under the ENCODED
+    stem — never a subdir (so a `/` id is loadable by the top-level glob)."""
+    root = tmp_path.resolve()
     out = safe_profile_write_path(str(tmp_path), mid)
     assert out is not None
-    assert out == (tmp_path / f"{mid}.yaml").resolve()
-    out.relative_to(tmp_path.resolve())  # stays within root
+    assert out == (tmp_path / f"{encode_model_id(mid)}.yaml").resolve()
+    assert out.parent == root          # direct child of root (no subdir)
+    assert "/" not in out.name         # single component
+    out.relative_to(root)              # stays within root
 
 
 # --- write-path SECURITY (containment) --------------------------------------
@@ -241,18 +249,21 @@ async def test_client_download_rejects_traversal_model_id(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_client_download_caches_colon_id(tmp_path):
-    """CONTRACT (client round-trip, RED on the over-strict-charset head): a
-    registry `:`-id (`qwen3:8b`) downloads, caches WITHIN the profiles root at
-    `<root>/qwen3:8b.yaml`, and reloads the router — no raise, no escape."""
+@pytest.mark.parametrize("mid", ["qwen3:8b", "deepseek-ai/DeepSeek-V3.1"])
+async def test_client_download_caches_separator_id_top_level(tmp_path, mid):
+    """CONTRACT (client round-trip): a registry id with a `:` OR `/` downloads and
+    caches as a TOP-LEVEL SINGLE-COMPONENT file under the ENCODED stem
+    (`qwen3%3A8b.yaml`, `deepseek-ai%2FDeepSeek-V3.1.yaml`) — NO subdir is created,
+    so the router's top-level glob loads it (Codex HIGH #2). Router reloads, no
+    raise, no escape."""
     root = tmp_path / "profiles"
     root.mkdir()
 
     client, router = _make_client(root)
     meta = {
-        "model_id": "qwen3:8b",
+        "model_id": mid,
         "checksum": "",  # skip checksum gate
-        "download_url": "https://registry.arkheia.ai/profiles/qwen3:8b/download",
+        "download_url": f"https://registry.arkheia.ai/profiles/{mid}/download",
         "version": "2.0",
     }
 
@@ -266,8 +277,10 @@ async def test_client_download_caches_colon_id(tmp_path):
 
         applied = await client._download_and_apply(meta)
 
-    cached = root / "qwen3:8b.yaml"
-    assert cached.exists(), "colon id was not cached within the profiles root"
+    cached = root / f"{encode_model_id(mid)}.yaml"
+    assert cached.exists(), f"{mid} was not cached as a top-level encoded file"
+    assert cached.parent == root.resolve()  # top-level, no subdir
+    assert [p for p in root.rglob("*") if p.is_dir()] == [], "a subdir was created"
     cached.resolve().relative_to(root.resolve())  # stays within root
     assert applied is True
     router.reload.assert_awaited()

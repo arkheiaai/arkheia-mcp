@@ -120,12 +120,23 @@ async def list_profiles(
     return {"profiles": profiles, "count": len(profiles)}
 
 
-@app.get("/profiles/{model_id}/download")
+@app.get("/profiles/{model_id:path}/download")
 async def download_profile(
     model_id: str,
     api_key: str = Depends(require_auth),
 ):
-    """Download raw YAML bytes for the given model_id."""
+    """Download raw YAML bytes for the given model_id.
+
+    Uses the ``:path`` converter so a registry id that legitimately contains a
+    ``/`` (HF ``deepseek-ai/DeepSeek-V3.1``) matches — the single-segment
+    ``{model_id}`` route 404'd the advertised download_url for those 6 ids. The
+    ``:path`` surface is safe ONLY because ``get_profile_bytes`` applies the
+    syntactic pre-filter + realpath containment: Starlette decodes ``%2f``/``%2e``
+    before this handler, so a traversal like ``..%2f..%2fx`` arrives as
+    ``../../x`` and is rejected there (contains ``..``) — 404, no read
+    out-of-root. Containment is the backstop; the route just stops mis-404ing
+    legitimate slash ids.
+    """
     storage: ProfileStorage = app.state.storage
     content = storage.get_profile_bytes(model_id)
     if content is None:

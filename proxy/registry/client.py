@@ -140,9 +140,13 @@ class RegistryClient:
         # Path-traversal hardening (F23, WRITE side): the registry-supplied
         # model_id must pass the shared allow-list + realpath containment before
         # it builds a write path, so a malicious/compromised registry cannot
-        # write a profile outside the profiles root. Fail-closed: raise so the
-        # caller retains the current profile (same contract as other validation
-        # failures above).
+        # write a profile outside the profiles root. safe_profile_write_path also
+        # ENCODES the id to a single top-level component, so a slash id
+        # (deepseek-ai/DeepSeek-V3.1) is cached as ONE top-level file
+        # (deepseek-ai%2FDeepSeek-V3.1.yaml) the router's top-level glob loads —
+        # never a subdir that would be written-but-never-loaded. Fail-closed:
+        # raise so the caller retains the current profile (same contract as other
+        # validation failures above).
         path = safe_profile_write_path(self.profile_dir, model_id)
         if path is None:
             raise ValueError(f"Unsafe model_id rejected (path traversal): {model_id!r}")
@@ -150,6 +154,8 @@ class RegistryClient:
             bak_path = Path(str(path) + ".bak")
             bak_path.write_bytes(path.read_bytes())
 
+        # path.parent is always the (encoded, single-component) profiles root now;
+        # ensure it exists on the first pull.
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
 

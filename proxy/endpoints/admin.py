@@ -707,13 +707,20 @@ async def manual_registry_pull(request: Request, _: str = Depends(require_auth))
         return {"status": "error", "detail": str(e)}
 
 
-@router.post("/profiles/{model_id}/rollback")
+@router.post("/profiles/{model_id:path}/rollback")
 async def rollback_profile(model_id: str, request: Request, _: str = Depends(require_auth)):
     """
     Roll back a profile to its previous version (.bak file).
 
     The registry client keeps a .bak of the previous version after each update.
     Rollback replaces the current YAML with the .bak and reloads the router.
+
+    Uses the ``:path`` converter so a slash-bearing registry id
+    (``deepseek-ai/DeepSeek-V3.1``) is reachable — the single-segment route could
+    never target one, and its cache/.bak live under the ENCODED single-component
+    name that ``safe_profile_write_path`` derives (below), keeping rollback
+    consistent with the registry-pull write path. Traversal is rejected by that
+    same guard (pre-filter + realpath containment), so ``:path`` adds no exposure.
     """
     settings = getattr(request.app.state, "settings", None)
     profile_router = getattr(request.app.state, "profile_router", None)

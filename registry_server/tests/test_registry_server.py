@@ -485,16 +485,18 @@ def client_ext_secret(monkeypatch, tmp_path):
         yield c
 
 
-# NOTE (honesty): the HTTP download route below is NOT a genuine test of the
-# storage traversal fix. Starlette matches `{model_id}` with `[^/]+`, so a
-# slash-bearing (or %2f-decoded) traversal 404s at the route matcher BEFORE it
-# reaches storage, and the remaining `%xx`-literal vectors reach storage only as
-# a literal filename that never escapes the root — so this test passes
-# IDENTICALLY against the vulnerable base storage (verified). It therefore
-# guards the HTTP *surface* (a regression guard: e.g. if the route were ever
-# changed to a `:path` converter, this would catch the resulting exposure) —
-# NOT the storage fix. The storage fix is exercised, genuinely RED on base, by
-# `test_storage_*` above and `test_storage_download_never_leaks_secret` below.
+# NOTE (honesty): the download route now uses the `{model_id:path}` converter
+# (so a legitimate `/` id — deepseek-ai/DeepSeek-V3.1 — whose advertised
+# download_url the single-segment `[^/]+` route used to 404 now resolves). That
+# makes THIS test load-bearing: with `:path`, Starlette decodes `%2f`/`%2e`
+# BEFORE the handler, so `..%2f..%2fX` reaches storage as `../../X` and a literal
+# `/etc/passwd` reaches it verbatim — i.e. the traversal vectors now DO hit
+# `get_profile_bytes`, and it is storage containment (the `..` pre-filter +
+# realpath) that must reject them. `:path` is safe ONLY because that containment
+# holds; this test is the surface guard that proves it (any regression that let a
+# vector through would 200 / leak here). The storage fix is ALSO exercised
+# directly, genuinely RED on base, by `test_storage_*` above and
+# `test_storage_download_never_leaks_secret` below.
 @pytest.mark.parametrize(
     "vector",
     [

@@ -20,6 +20,7 @@ Companion (unit tier, needs PyYAML): the READ round-trip through
 registry_server/tests/test_registry_server.py; the two guards mirror each other
 across their disjoint Docker images.
 """
+import os
 import re
 from pathlib import Path
 
@@ -124,3 +125,47 @@ def test_floor_no_vector_ever_escapes_root(tmp_path):
         except ValueError:
             outside.append(v)
     assert outside == [], f"vectors produced OUT-OF-ROOT write paths: {outside!r}"
+
+
+def test_floor_every_emitted_id_writes_top_level_single_component(tmp_path):
+    """CONTRACT (the property the within-root floor MISSED): every emitted id's
+    cache path is a TOP-LEVEL SINGLE-COMPONENT file — a direct child of the root
+    whose name carries no path separator.
+
+    within-root is NOT enough: a `/` id resolves to a within-root SUBDIR
+    (`deepseek-ai/DeepSeek-V3.1.yaml` under `deepseek-ai/`), which the router's
+    top-level `*.yaml` glob NEVER loads (written-but-never-loaded, Codex HIGH #2).
+    RED on the containment-only head (6 slash ids land in subdirs → parent !=
+    root); GREEN once the write path encodes to a single component.
+    """
+    ids = _emitted_ids()
+    if not ids:
+        pytest.skip("profiles/ directory not present in this checkout")
+    root = tmp_path.resolve()
+    not_top_level = []
+    for mid in ids:
+        out = safe_profile_write_path(str(tmp_path), mid)
+        if out is None or out.parent != root or os.sep in out.name or "/" in out.name:
+            not_top_level.append((mid, str(out)))
+    assert not_top_level == [], (
+        f"emitted ids NOT cached as a TOP-LEVEL single-component file "
+        f"(a subdir the top-level glob won't load): {not_top_level}"
+    )
+
+
+def test_floor_encode_decode_round_trips_every_emitted_id():
+    """CONTRACT: the public model_id ↔ on-disk stem map is reversible and
+    single-component for every emitted id, so the encoded filename decodes back
+    to the exact id the router serves. (Imported lazily: the encode/decode pair
+    does not exist on the pre-fix head — this test is RED there.)"""
+    from proxy.pathsafe import decode_model_id, encode_model_id
+
+    ids = _emitted_ids()
+    if not ids:
+        pytest.skip("profiles/ directory not present in this checkout")
+    broken = []
+    for mid in ids:
+        enc = encode_model_id(mid)
+        if decode_model_id(enc) != mid or "/" in enc or ":" in enc or os.sep in enc:
+            broken.append((mid, enc))
+    assert broken == [], f"ids that do not round-trip to a single component: {broken}"
