@@ -10,7 +10,6 @@ Both are handled transparently.
 
 import hashlib
 import logging
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -20,36 +19,45 @@ import yaml
 logger = logging.getLogger(__name__)
 
 # --- Path-traversal hardening (adversarial ledger F23) ---------------------
-# `model_id` arrives from untrusted callers and is used to build a filesystem
-# path (`<profiles>/<model_id>.yaml`). Without validation, a crafted value
-# ("../secret", "/etc/config", encoded separators, null byte, a symlink) escapes
-# the profiles root and reads arbitrary *.yaml files. Defence in depth:
-#   1. strict allow-list charset (rejects separators / traversal / encoded /
-#      null-byte / leading dot or dash), and
-#   2. realpath containment: the resolved path MUST stay within the profiles
-#      root before any read.
-# Fail-closed: anything suspicious -> None (surfaced by the HTTP layer as 404).
+# `model_id` arrives from untrusted callers. On the EXACT-filename branch it is
+# used to build a filesystem path (`<profiles>/<model_id>.yaml`); on the fallback
+# SCAN branch it is only compared (string equality) against a profile's own
+# `model:` value and never touches the filesystem.
+#
+# The public model_id is a REGISTRY identifier, not a filesystem stem: real ids
+# legitimately contain `:` and `/` (ollama `qwen3:8b`, HF `deepseek-ai/DeepSeek-
+# V3.1`, `zoecohn4/Ouro:latest`). So the security requirement is NOT "the id has
+# no separators" — it is "the RESOLVED path stays inside the profiles root".
+# Enforcement is realpath containment (`_safe_profile_path`), with a thin
+# syntactic pre-filter that rejects only tokens that can never name a legitimate
+# id and that `realpath` would otherwise normalise away:
+#   * a literal `..` parent-traversal token,
+#   * a NUL byte or a backslash (Windows separator), and
+#   * empty / oversized ids.
+# It deliberately does NOT reject `:` or `/`. Fail-closed: the containment check
+# turns any escaping path into None (surfaced by the HTTP layer as 404).
 _MAX_MODEL_ID_LEN = 128
-# First char alphanumeric; remainder [A-Za-z0-9._-]. All 60 shipped profile
-# ids (e.g. "claude-opus-4-8", "deepseek-v3.1", "gpt-5.2-codex") match this.
-_MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def _is_safe_model_id(model_id: str) -> bool:
-    """True iff `model_id` is a syntactically safe profile identifier.
+    """True iff `model_id` is free of syntactic tokens that can never name a
+    legitimate profile (a `..` traversal token, a NUL byte, a backslash) and is a
+    non-empty, bounded string.
 
-    Rejects empty/oversized ids, path separators, `..` traversal, null bytes,
-    and any character outside the allow-list. Encoded separators (e.g. ``%2f``,
-    ``%2e%2e``) are decoded to their literal form by the HTTP layer before
-    reaching here, so they fail the charset check too.
+    Pre-filter ONLY: it intentionally ACCEPTS `:` and `/` (present in real
+    registry ids). Containment against the profiles root — realpath, in
+    `_safe_profile_path` — is what actually prevents any read outside the root.
+    Encoded separators (`%2f`, `%2e%2e`) are literal here; `%2e%2e` (no real
+    `..`) resolves to a filename inside the root, so it is contained, not an
+    escape (and matches no profile on the scan branch -> not found).
     """
     if not isinstance(model_id, str) or not model_id:
         return False
     if len(model_id) > _MAX_MODEL_ID_LEN:
         return False
-    if ".." in model_id or "\x00" in model_id:
+    if ".." in model_id or "\x00" in model_id or "\\" in model_id:
         return False
-    return _MODEL_ID_RE.fullmatch(model_id) is not None
+    return True
 
 
 class ProfileStorage:
@@ -122,21 +130,27 @@ class ProfileStorage:
     def get_profile_bytes(self, model_id: str) -> Optional[bytes]:
         """Return raw YAML bytes for the given model_id, or None if not found.
 
-        `model_id` is validated against a strict allow-list and the resolved
-        path is asserted to stay within the profiles root before any read
-        (path-traversal hardening, adversarial ledger F23).
+        A `model_id` may be a REGISTRY id containing `:` or `/` (e.g. `qwen3:8b`,
+        `deepseek-ai/DeepSeek-V3.1`). Resolution is two-branch:
+          1. exact filename `<profiles>/<model_id>.yaml`, gated by realpath
+             containment so it can never read outside the profiles root; then
+          2. a fallback SCAN that matches the id against each contained profile's
+             own `model:` value (string compare only — no path is built from the
+             id here), which is how the `:`/`/` ids resolve.
+        The syntactic pre-filter drops only `..`/NUL/backslash/empty/oversized
+        ids up front (path-traversal hardening, adversarial ledger F23).
         """
-        # Reject traversal / absolute / encoded / null-byte ids up front:
-        # no filesystem read and no scan for anything that fails the allow-list.
+        # Drop ids that can never name a legitimate profile before any work.
         if not _is_safe_model_id(model_id):
             logger.warning("Rejected unsafe model_id: %r", model_id)
             return None
-        # Exact filename match, gated by realpath containment.
+        # 1. Exact filename match, gated by realpath containment.
         path = self._safe_profile_path(model_id)
         if path is not None:
             return path.read_bytes()
-        # Fall back to scanning profiles for a matching internal model_id.
-        # Bounded to contained files only; model_id already allow-listed.
+        # 2. Fallback: scan contained profiles for a matching internal model_id.
+        #    String compare only; `model_id` never builds a path on this branch,
+        #    so `:`/`/` registry ids resolve safely and no id escapes the root.
         for path in self._iter_profile_files():
             try:
                 data = yaml.safe_load(path.read_bytes())

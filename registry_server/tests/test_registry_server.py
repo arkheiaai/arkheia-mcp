@@ -282,34 +282,64 @@ def test_profiles_since_invalid_format_returns_422(client):
 
 
 # ---------------------------------------------------------------------------
-# Path-traversal hardening (adversarial ledger F23)
+# Path-traversal hardening + registry-id round-trip (adversarial ledger F23)
 #
-# `get_profile_bytes` builds a filesystem path from an untrusted `model_id`.
-# A crafted value must never read a file outside the profiles root. These
-# tests are RED on the pre-fix code (traversal reads outside files) and GREEN
-# after: strict allow-list + realpath containment, fail-closed.
+# `get_profile_bytes` resolves an untrusted `model_id` two ways: an exact
+# filename `<profiles>/<model_id>.yaml` (gated by realpath containment) and a
+# fallback SCAN that matches the id against each profile's own `model:` value.
+# The public id is a REGISTRY identifier that MAY contain `:` or `/` (ollama
+# `qwen3:8b`, HF `deepseek-ai/DeepSeek-V3.1`, `zoecohn4/Ouro:latest`) — so BOTH
+# properties must hold TOGETHER:
+#   CONTRACT  — every id `list_profiles()` emits is downloadable by that id, and
+#   SECURITY  — no id (traversal / absolute / encoded / symlink / NUL) ever reads
+#               a file outside the profiles root.
+# The CONTRACT regressed when an over-strict charset 404'd the 21 `:`/`/` ids
+# (38/59 downloadable); the CONTRACT tests below are RED on that head and GREEN
+# after the realpath-containment redesign. The SECURITY tests were RED on the
+# ORIGINAL vulnerable storage (traversal read out-of-root files) and stay GREEN.
 # ---------------------------------------------------------------------------
 
-# Absolute path, relative parent, bare "..", separators (fwd/back), null byte,
-# leading dot/dash, encoded-separator literals, and dir-escape via "..".
-TRAVERSAL_MODEL_IDS = [
+# ESCAPING ids: they carry a `..` token / NUL / backslash / are empty, or are an
+# absolute path — each either fails the syntactic pre-filter or is caught by
+# realpath containment. None may ever yield bytes.
+ESCAPING_MODEL_IDS = [
     "../SECRET_outside",
     "../../SECRET_outside",
     "../../../../../../etc/passwd",
     "/etc/passwd",
     "/tmp/anything",
     "..",
-    ".",
     "..\\SECRET_outside",
     "foo/../../SECRET_outside",
-    "sub/child",
+    "..%2fSECRET_outside",      # contains a literal ".." token
     "a\x00b",
-    "..%2fSECRET_outside",      # literal (already-decoded form) — has no sep but "%" is illegal
+    "",
+]
+
+# CONTAINED-but-nonexistent ids: no `..`, no escape — they resolve to a literal
+# filename INSIDE the root that names no real profile (encoded `%2e%2e`, a hidden
+# / dash name, an in-root subpath, a bare dot). NOT security escapes; they simply
+# are not found. Kept distinct so the redesign is honest: containment, not a
+# charset, is what makes these safe.
+CONTAINED_NONEXISTENT_MODEL_IDS = [
     "%2e%2e%2fSECRET_outside",
     ".hidden",
     "-rf",
-    "",
+    "sub/child",
+    ".",
 ]
+
+ALL_TRAVERSAL_VECTORS = ESCAPING_MODEL_IDS + CONTAINED_NONEXISTENT_MODEL_IDS
+
+
+def _shipped_storage_and_emitted_ids():
+    """(ProfileStorage over the REAL profiles/, list of emitted model ids), or
+    (None, []) if profiles/ is absent in this checkout."""
+    profiles_dir = Path(__file__).resolve().parents[2] / "profiles"
+    if not profiles_dir.is_dir():
+        return None, []
+    storage = ProfileStorage(profile_dir=str(profiles_dir), base_url="http://x")
+    return storage, [m["model_id"] for m in storage.list_profiles()]
 
 
 @pytest.fixture()
@@ -333,30 +363,73 @@ def storage_with_secret(tmp_path):
     return storage, tmp_path, vault
 
 
-def test_is_safe_model_id_accepts_all_shipped_profiles():
-    """FLOOR: every profile id shipped in profiles/ passes the allow-list.
-
-    Ties the charset to reality — a future profile whose id the allow-list
-    would reject fails here instead of silently 404ing in production.
-    """
-    profiles_dir = Path(__file__).resolve().parents[2] / "profiles"
-    if not profiles_dir.is_dir():
+def test_storage_all_emitted_ids_downloadable():
+    """CONTRACT round-trip (RED on the over-strict-charset head): every id the
+    registry EMITS is downloadable by that id via get_profile_bytes — all of
+    them, including the 21 that contain `:` or `/` (qwen3:8b,
+    deepseek-ai/DeepSeek-V3.1)."""
+    storage, ids = _shipped_storage_and_emitted_ids()
+    if storage is None:
         pytest.skip("profiles/ directory not present in this checkout")
-    stems = [p.stem for p in profiles_dir.glob("*.yaml") if p.name != "schema.yaml"]
-    assert stems, "expected at least one shipped profile"
-    bad = [s for s in stems if not _is_safe_model_id(s)]
-    assert bad == [], f"shipped profile ids rejected by allow-list: {bad}"
+    assert ids, "expected shipped profiles to emit ids"
+    undownloadable = [i for i in ids if storage.get_profile_bytes(i) is None]
+    assert undownloadable == [], (
+        f"emitted ids NOT downloadable by their own id: {undownloadable}"
+    )
 
 
-@pytest.mark.parametrize("mid", TRAVERSAL_MODEL_IDS)
-def test_is_safe_model_id_rejects_traversal(mid):
-    """Every traversal / malformed id is rejected by the allow-list."""
+@pytest.mark.parametrize(
+    "mid",
+    ["qwen3:8b", "gemma4:latest", "granite4.1:30b",
+     "deepseek-ai/DeepSeek-V3.1", "zoecohn4/Ouro:latest"],
+)
+def test_storage_colon_and_slash_ids_downloadable(mid):
+    """Explicit witnesses for the regression: `:`/`/` registry ids resolve via
+    the scan branch (RED on the over-strict-charset head, GREEN after)."""
+    storage, ids = _shipped_storage_and_emitted_ids()
+    if storage is None:
+        pytest.skip("profiles/ directory not present in this checkout")
+    if mid not in ids:
+        pytest.skip(f"{mid} not shipped in this checkout")
+    assert storage.get_profile_bytes(mid) is not None
+
+
+def test_is_safe_model_id_accepts_all_emitted_ids():
+    """CONTRACT: the syntactic pre-filter accepts every EMITTED registry id (the
+    `model:` values, not filename stems) so no legit id is dropped before
+    resolution. RED on the over-strict-charset head (it rejected `:`/`/`)."""
+    _storage, ids = _shipped_storage_and_emitted_ids()
+    if not ids:
+        pytest.skip("profiles/ directory not present in this checkout")
+    bad = [i for i in ids if not _is_safe_model_id(i)]
+    assert bad == [], f"emitted registry ids rejected by pre-filter: {bad}"
+
+
+@pytest.mark.parametrize(
+    "mid",
+    ["qwen3:8b", "deepseek-ai/DeepSeek-V3.1", "zoecohn4/Ouro:latest",
+     "claude-opus-4-8", "gpt-5.2-codex"],
+)
+def test_is_safe_model_id_accepts_registry_ids(mid):
+    """The pre-filter ACCEPTS real registry ids, including `:`/`/` forms —
+    containment, not a charset, is what confines them."""
+    assert _is_safe_model_id(mid) is True
+
+
+@pytest.mark.parametrize(
+    "mid", ["../x", "..", "a/../../b", "..%2fx", "x\x00y", "back\\slash", ""]
+)
+def test_is_safe_model_id_rejects_dangerous_tokens(mid):
+    """The pre-filter drops ids that can never name a legitimate profile: a `..`
+    traversal token, a NUL byte, a backslash, or empty."""
     assert _is_safe_model_id(mid) is False
 
 
-@pytest.mark.parametrize("mid", TRAVERSAL_MODEL_IDS)
+@pytest.mark.parametrize("mid", ALL_TRAVERSAL_VECTORS)
 def test_storage_traversal_returns_none(storage_with_secret, mid):
-    """CONTAINMENT: no traversal id ever yields bytes from get_profile_bytes."""
+    """SECURITY: no traversal / absolute / encoded / in-root-junk id ever yields
+    bytes — an escape (the planted out-of-root secret) is contained away, and an
+    in-root non-existent filename is simply not found. Either way: None."""
     storage, _root, _vault = storage_with_secret
     assert storage.get_profile_bytes(mid) is None
 
@@ -376,7 +449,7 @@ def test_storage_symlink_escape_returns_none(storage_with_secret):
     secret = tmp_path / "SECRET_outside.yaml"
     link = Path(storage.profile_dir) / "evillink.yaml"
     link.symlink_to(secret)
-    # id passes the charset gate, but the resolved path escapes the root:
+    # id passes the syntactic pre-filter, but the resolved path escapes the root:
     assert _is_safe_model_id("evillink") is True
     assert storage.get_profile_bytes("evillink") is None
     listed = {p["model_id"] for p in storage.list_profiles()}
