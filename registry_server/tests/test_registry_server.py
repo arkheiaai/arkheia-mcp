@@ -17,6 +17,7 @@ Passing criteria:
 import os
 import hashlib
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 import pytest
 import yaml
@@ -24,7 +25,7 @@ from fastapi.testclient import TestClient
 
 from registry_server.auth import generate_key
 from registry_server.main import app
-from registry_server.storage import ProfileStorage
+from registry_server.storage import ProfileStorage, _is_safe_model_id
 
 
 # ---------------------------------------------------------------------------
@@ -278,3 +279,159 @@ def test_profiles_since_invalid_format_returns_422(client):
         headers={"Authorization": f"Bearer {VALID_KEY}"},
     )
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Path-traversal hardening (adversarial ledger F23)
+#
+# `get_profile_bytes` builds a filesystem path from an untrusted `model_id`.
+# A crafted value must never read a file outside the profiles root. These
+# tests are RED on the pre-fix code (traversal reads outside files) and GREEN
+# after: strict allow-list + realpath containment, fail-closed.
+# ---------------------------------------------------------------------------
+
+# Absolute path, relative parent, bare "..", separators (fwd/back), null byte,
+# leading dot/dash, encoded-separator literals, and dir-escape via "..".
+TRAVERSAL_MODEL_IDS = [
+    "../SECRET_outside",
+    "../../SECRET_outside",
+    "../../../../../../etc/passwd",
+    "/etc/passwd",
+    "/tmp/anything",
+    "..",
+    ".",
+    "..\\SECRET_outside",
+    "foo/../../SECRET_outside",
+    "sub/child",
+    "a\x00b",
+    "..%2fSECRET_outside",      # literal (already-decoded form) — has no sep but "%" is illegal
+    "%2e%2e%2fSECRET_outside",
+    ".hidden",
+    "-rf",
+    "",
+]
+
+
+@pytest.fixture()
+def storage_with_secret(tmp_path):
+    """A ProfileStorage whose profiles root has one legit profile, with a
+    secret *.yaml planted OUTSIDE the root (sibling) and one at an absolute
+    path — the files a traversal would try to reach."""
+    root = tmp_path / "profiles"
+    root.mkdir()
+    (root / "claude-opus-4-8.yaml").write_text(
+        "model: claude-opus-4-8\nversion: '1.0'\n", encoding="utf-8"
+    )
+    # secret sibling of the profiles root (reached via ../)
+    (tmp_path / "SECRET_outside.yaml").write_text(
+        "api_key: SUPER_SECRET\n", encoding="utf-8"
+    )
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "creds.yaml").write_text("db_password: SUPER_SECRET\n", encoding="utf-8")
+    storage = ProfileStorage(profile_dir=str(root), base_url="http://x")
+    return storage, tmp_path, vault
+
+
+def test_is_safe_model_id_accepts_all_shipped_profiles():
+    """FLOOR: every profile id shipped in profiles/ passes the allow-list.
+
+    Ties the charset to reality — a future profile whose id the allow-list
+    would reject fails here instead of silently 404ing in production.
+    """
+    profiles_dir = Path(__file__).resolve().parents[2] / "profiles"
+    if not profiles_dir.is_dir():
+        pytest.skip("profiles/ directory not present in this checkout")
+    stems = [p.stem for p in profiles_dir.glob("*.yaml") if p.name != "schema.yaml"]
+    assert stems, "expected at least one shipped profile"
+    bad = [s for s in stems if not _is_safe_model_id(s)]
+    assert bad == [], f"shipped profile ids rejected by allow-list: {bad}"
+
+
+@pytest.mark.parametrize("mid", TRAVERSAL_MODEL_IDS)
+def test_is_safe_model_id_rejects_traversal(mid):
+    """Every traversal / malformed id is rejected by the allow-list."""
+    assert _is_safe_model_id(mid) is False
+
+
+@pytest.mark.parametrize("mid", TRAVERSAL_MODEL_IDS)
+def test_storage_traversal_returns_none(storage_with_secret, mid):
+    """CONTAINMENT: no traversal id ever yields bytes from get_profile_bytes."""
+    storage, _root, _vault = storage_with_secret
+    assert storage.get_profile_bytes(mid) is None
+
+
+def test_storage_absolute_path_returns_none(storage_with_secret):
+    """An absolute path to a real *.yaml secret must not be served."""
+    storage, _root, vault = storage_with_secret
+    abs_id = str(vault / "creds")  # -> <vault>/creds.yaml exists on disk
+    assert storage.get_profile_bytes(abs_id) is None
+
+
+def test_storage_symlink_escape_returns_none(storage_with_secret):
+    """CONTAINMENT BACKSTOP: a charset-valid id whose file is a symlink
+    pointing OUTSIDE the root must not be read (realpath containment), and it
+    must not surface in list_profiles either."""
+    storage, tmp_path, _vault = storage_with_secret
+    secret = tmp_path / "SECRET_outside.yaml"
+    link = Path(storage.profile_dir) / "evillink.yaml"
+    link.symlink_to(secret)
+    # id passes the charset gate, but the resolved path escapes the root:
+    assert _is_safe_model_id("evillink") is True
+    assert storage.get_profile_bytes("evillink") is None
+    listed = {p["model_id"] for p in storage.list_profiles()}
+    assert "api_key" not in listed  # secret content never parsed into listing
+    # only the legit profile is listed
+    assert listed == {"claude-opus-4-8"}
+
+
+def test_storage_legit_still_served(storage_with_secret):
+    """A legitimate model_id is still served after hardening."""
+    storage, _root, _vault = storage_with_secret
+    out = storage.get_profile_bytes("claude-opus-4-8")
+    assert out is not None
+    assert yaml.safe_load(out)["model"] == "claude-opus-4-8"
+
+
+@pytest.fixture()
+def client_ext_secret(monkeypatch, tmp_path):
+    """TestClient whose profiles root has a secret *.yaml planted OUTSIDE it
+    (sibling of the root) — so a working traversal WOULD leak `SUPER_SECRET`."""
+    root = tmp_path / "profiles"
+    root.mkdir()
+    (root / "claude-opus-4-8.yaml").write_text(
+        "model: claude-opus-4-8\nversion: '1.0'\n", encoding="utf-8"
+    )
+    (tmp_path / "SECRET_outside.yaml").write_text(
+        "api_key: SUPER_SECRET\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("ARKHEIA_REGISTRY_KEYS", VALID_KEY)
+    monkeypatch.setenv("ARKHEIA_REGISTRY_PROFILE_DIR", str(root))
+    monkeypatch.setenv("ARKHEIA_REGISTRY_BASE_URL", "http://testserver")
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.mark.parametrize(
+    "vector",
+    [
+        "..%2f..%2fSECRET_outside",
+        "..%2fSECRET_outside",
+        "../../SECRET_outside",
+        "%2e%2e%2fSECRET_outside",
+        "..\\SECRET_outside",
+        "/etc/passwd",
+    ],
+)
+def test_download_traversal_never_leaks(client_ext_secret, vector):
+    """HTTP defense-in-depth: traversal vectors on the download route never
+    return 200 and never leak the planted secret's content."""
+    resp = client_ext_secret.get(
+        f"/profiles/{vector}/download",
+        headers={"Authorization": f"Bearer {VALID_KEY}"},
+    )
+    assert resp.status_code != 200
+    # `SUPER_SECRET` only appears in the out-of-root secret file's *content*,
+    # never in a vector string, so this catches an actual leak precisely.
+    assert "SUPER_SECRET" not in resp.text
+    assert "root:" not in resp.text  # /etc/passwd marker
