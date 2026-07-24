@@ -26,6 +26,7 @@ aiofiles>=23.0
 
 # Build / compilation dependency for release pipeline
 Cython>=3.0
+setuptools>=78.1.1  # CVE-2025-47273 (PackageIndex path traversal) fix -- imported by setup_cython.py
 
 # Testing
 pytest>=8.0

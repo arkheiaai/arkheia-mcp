@@ -11,6 +11,15 @@ pydantic-settings>=2.0.0
 pyyaml>=6.0
 aiofiles>=23.0
 
+# Loads .env before proxy.* imports (proxy/main.py) -- imported unconditionally
+# at the entrypoint, but was ABSENT here (latent deploy crash on every startup).
+python-dotenv>=1.2.2  # CVE-2026-28684 (symlink attack in set_key/unset_key) fix
+
+# AES-256-GCM encrypt/decrypt for profiles (proxy/crypto/profile_crypto.py) --
+# imported unconditionally but was ABSENT here (latent deploy crash importing
+# encrypted profiles); CI previously installed it ad hoc so tests stayed green.
+cryptography>=46.0.7  # CVE-2026-39892 (buffer overflow) + CVE-2026-26007 (EC key validation) fixes
+
 # Testing
 pytest>=8.0
 pytest-asyncio>=0.23
