@@ -128,6 +128,27 @@ async def lifespan(app: FastAPI):
     )
     await audit_writer.start()
 
+    # Startup tamper-evidence self-check: walk the audit log's hash chain and
+    # surface any break. This wires AuditWriter.verify_chain() to a live call
+    # site so the tamper-evident chain is actually validated on boot rather than
+    # only ever computed on write. Fail-open — an integrity check must never
+    # block startup (consistent with the audit pipeline's non-blocking design).
+    try:
+        chain = audit_writer.verify_chain()
+        if not chain.get("ok", True):
+            logger.warning(
+                "Audit hash-chain integrity check FAILED on startup: "
+                "%d record(s) verified, %d break(s) detected — possible tampering",
+                chain.get("verified", 0), len(chain.get("breaks", [])),
+            )
+        else:
+            logger.info(
+                "Audit hash-chain integrity OK on startup (%d record(s) verified)",
+                chain.get("verified", 0),
+            )
+    except Exception as exc:  # fail-open: never block startup on the self-check
+        logger.warning("Audit hash-chain startup self-check skipped: %s", exc)
+
     # 4. Registry client (only if API key configured)
     registry_client = RegistryClient(
         base_url=settings.registry.url,

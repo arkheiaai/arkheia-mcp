@@ -178,9 +178,7 @@ class TestProfileRouterReload:
         new_dir.mkdir()
         (new_dir / "llama-3-70b.yaml").write_text(yaml.dump(new_profile))
 
-        asyncio.get_event_loop().run_until_complete(
-            router.reload(str(new_dir))
-        )
+        asyncio.run(router.reload(str(new_dir)))
 
         assert router.loaded_count == 1
         assert router.get("llama-3-70b") is not None
@@ -193,6 +191,6 @@ class TestProfileRouterReload:
             tasks = [router.reload() for _ in range(10)]
             await asyncio.gather(*tasks)
 
-        asyncio.get_event_loop().run_until_complete(do_reloads())
+        asyncio.run(do_reloads())
         # Router should still be in valid state
         assert router.loaded_count >= 0
