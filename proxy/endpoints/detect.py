@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
 
 from proxy.detection_adapter import schedule_push
@@ -54,6 +54,13 @@ class VerifyResponse(BaseModel):
     timestamp: str
     detection_id: str
     error: Optional[str] = None
+    # Governance decision surfaced to the CALLER so a configured block is not silently
+    # decorative. `action` = the customer policy applied (from settings.detection.high_risk_action,
+    # e.g. "block"/"warn"/"pass") -- mirrors action_taken in the audit record. `gate_action` =
+    # the profile-earned gate ("block" only when the profile validated it; else "advise").
+    # Per proxy/detection/features.py, a consumer must only hard-block when gate_action == "block".
+    action: Optional[str] = None
+    gate_action: Optional[str] = None
 
 
 def _unknown(
@@ -73,8 +80,46 @@ def _unknown(
     )
 
 
+def _signal(
+    http_response: Response,
+    verify: VerifyResponse,
+    action: str,
+    gate_action: str,
+) -> VerifyResponse:
+    """Surface the governance decision to the CALLER so a configured block is enforceable.
+
+    /detect/verify is advisory by contract (ALWAYS HTTP 200; it must never crash the pipeline
+    it monitors), so we do NOT block transport here -- transport-level blocking lives in
+    proxy/middleware/interception.py (the /v1/* enforcement path). But silently swallowing a
+    configured `block` is the defect: the audit + governance trail record action_taken="block"
+    while the caller receives an identical byte stream for block vs allow and cannot enforce.
+
+    So we emit a machine-actionable signal the caller can act on: the policy `action` and the
+    profile-earned `gate_action` in the response body, mirrored in headers for transport-layer
+    consumers. Per proxy/detection/features.py, a consumer must only hard-block when
+    gate_action == "block".
+
+    Header/structured-field signalling ONLY -- we never prepend to the body (that pattern in
+    interception.py corrupts responses and 400-loops sessions).
+
+    Coerces to str and never raises: this endpoint must never crash the pipeline it monitors,
+    so signalling is best-effort -- a malformed action must not 500 an advisory 200 response.
+    """
+    action = str(action)
+    gate_action = str(gate_action)
+    verify.action = action
+    verify.gate_action = gate_action
+    try:
+        http_response.headers["X-Arkheia-Risk"] = str(verify.risk_level)
+        http_response.headers["X-Arkheia-Action"] = action
+        http_response.headers["X-Arkheia-Gate-Action"] = gate_action
+    except Exception as e:  # pragma: no cover - defensive; headers are best-effort
+        logger.error("Failed to set Arkheia signal headers (body fields still set): %s", e)
+    return verify
+
+
 @router.post("/detect/verify", response_model=VerifyResponse)
-async def detect_verify(req: VerifyRequest, request: Request):
+async def detect_verify(req: VerifyRequest, request: Request, http_response: Response):
     """
     Verify whether an AI response shows signs of fabrication.
 
@@ -89,19 +134,19 @@ async def detect_verify(req: VerifyRequest, request: Request):
         r = _unknown(error="model_id_missing")
         if audit:
             await audit.write(_audit_record(r, req, "pass"))
-        return r
+        return _signal(http_response, r, "pass", "advise")
 
     if not req.response:
         r = _unknown(model_id=req.model_id, error="response_empty")
         if audit:
             await audit.write(_audit_record(r, req, "pass"))
-        return r
+        return _signal(http_response, r, "pass", "advise")
 
     if engine is None:
         r = _unknown(model_id=req.model_id, error="engine_unavailable")
         if audit:
             await audit.write(_audit_record(r, req, "pass"))
-        return r
+        return _signal(http_response, r, "pass", "advise")
 
     try:
         result = await engine.verify(req.prompt, req.response, req.model_id)
@@ -113,7 +158,7 @@ async def detect_verify(req: VerifyRequest, request: Request):
                 await audit.write(_audit_record(r, req, "pass"))
             except Exception as ae:
                 logger.error("Audit write failed after engine error: %s", ae)
-        return r
+        return _signal(http_response, r, "pass", "advise")
 
     # Determine action taken
     settings = getattr(request.app.state, "settings", None)
@@ -156,7 +201,10 @@ async def detect_verify(req: VerifyRequest, request: Request):
         risk_level=response.risk_level if response.risk_level in ("LOW", "MEDIUM", "HIGH", "CRITICAL") else "LOW",
     )
 
-    return response
+    # Surface the governance decision to the caller: policy `action` (mirrors action_taken in
+    # the audit) + profile-earned `gate_action`. Keeps HTTP 200; blocking-at-transport stays the
+    # job of proxy/middleware/interception.py. Consumers hard-block only when gate_action=="block".
+    return _signal(http_response, response, action, getattr(result, "gate_action", "advise"))
 
 
 def _determine_action(risk_level: str, settings) -> str:
