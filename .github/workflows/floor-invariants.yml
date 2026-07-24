@@ -1,0 +1,43 @@
+name: Floor Invariants
+
+# Deterministic FLOOR TIER: stdlib-only invariants run under a bare `pytest`
+# with ZERO project dependencies, so there is no interpreter variance. These
+# encode "stop the bleeding" build-quality invariants grounded in real defects
+# of this repo. Collection is restricted to test_*_floor.py / test_floor_*.py.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  floor:
+    name: floor-invariants
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      # Pin: actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Set up Python
+        # Pin: actions/setup-python v5.3.0
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install pytest ONLY (floor tier uses stdlib + pytest, nothing else)
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Run floor invariants
+        # Override python_files so ONLY floor tests are collected; a bare pytest
+        # must never try to import dependency-heavy suites. Empty collection
+        # (exit 5) fails the job — the floor tier must always carry an invariant.
+        run: |
+          pytest tests \
+            -o python_files="test_*_floor.py test_floor_*.py" \
+            -p no:cacheprovider -v

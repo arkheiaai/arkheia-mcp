@@ -1,0 +1,55 @@
+name: Unit Tests
+
+# Runs the repo's existing (but previously dormant) unit suites on every push
+# and PR to the DEFAULT branch (master). Note: smoke-test.yml / security_scan.yml
+# target `main`/`staging`, so before this workflow only CodeQL ran on master PRs
+# and these suites never executed in CI. This job makes them a real gate.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: unit-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      # Pin: actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Set up Python
+        # Pin: actions/setup-python v5.3.0
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r mcp_server/requirements.txt
+          # respx: fixture used by tests/test_detection_adapter.py.
+          # cryptography: imported by proxy/crypto/profile_crypto.py (encrypted
+          #   profiles) but MISSING from requirements.txt — a latent production
+          #   gap flagged in the PR. Installed here so the crypto suites run.
+          pip install cryptography respx pytest pytest-asyncio pytest-timeout
+
+      - name: Run hermetic unit suites
+        env:
+          # Hermetic, non-secret test value (mirrors smoke-test.yml). No live
+          # secrets are used: any suite that needs them self-skips or is gated
+          # separately (test_smoke_e2e is covered by smoke-test.yml).
+          JWT_SECRET: "ci-test-secret-not-for-production-use-minimum-32chars!!"
+        run: |
+          pytest \
+            proxy/tests \
+            mcp_server/tests \
+            registry_server/tests \
+            tests \
+            --ignore=tests/test_smoke_e2e.py \
+            -v --timeout=120
