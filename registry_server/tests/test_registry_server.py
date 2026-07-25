@@ -378,6 +378,39 @@ def test_storage_all_emitted_ids_downloadable():
     )
 
 
+@pytest.mark.parametrize("mid,expect", [
+    ("model#frag",   "model%23frag"),   # `#` would truncate the URL client-side before the request
+    ("model?q=1",    "model%3Fq%3D1"),  # `?` would turn the remainder into a query string
+    ("model%2e",     "model%252e"),     # a bare `%` reads as a malformed escape
+    ("model with sp", "model%20with%20sp"),
+    ("deepseek-ai/DeepSeek-V3.1", "deepseek-ai/DeepSeek-V3.1"),  # `/` stays literal: route is {model_id:path}
+    ("qwen3:8b",     "qwen3%3A8b"),     # `:` encoded; harmless in a path, encoded by urllib default
+])
+def test_download_url_percent_encodes_the_id(tmp_path, mid, expect):
+    """The advertised download_url must be FETCHABLE for every id the registry can emit.
+
+    Codex #13 LOW: the id was interpolated raw, so an id containing `#`, `?` or `%` advertised a URL
+    that cannot be requested — `#` truncates client-side, `?` becomes a query string, `%` reads as a
+    malformed escape. Slashes are deliberately NOT encoded: the route is
+    `/profiles/{model_id:path}/download`, so a literal `/` is what keeps slash-bearing registry ids
+    (deepseek-ai/DeepSeek-V3.1) resolving — encoding it would break the contract this branch added.
+    """
+    from urllib.parse import urlsplit
+    prof = tmp_path / "profiles"; prof.mkdir()
+    (prof / "p.yaml").write_text(
+        "metadata:\n  model_id: " + repr(mid) + "\n  version: '1'\n", encoding="utf-8")
+    st = ProfileStorage(profile_dir=prof, base_url="https://reg.example")
+    metas = st.list_profiles()
+    assert metas, "expected one profile"
+    url = metas[0]["download_url"]
+    assert url == f"https://reg.example/profiles/{expect}/download", url
+    # And it must survive URL parsing intact — no fragment, no query, nothing lost.
+    parts = urlsplit(url)
+    assert parts.fragment == "", f"id leaked into the fragment: {url}"
+    assert parts.query == "", f"id leaked into the query string: {url}"
+    assert parts.path.endswith("/download"), parts.path
+
+
 @pytest.mark.parametrize(
     "mid",
     ["qwen3:8b", "gemma4:latest", "granite4.1:30b",

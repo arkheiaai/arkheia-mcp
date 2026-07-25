@@ -13,6 +13,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 
 import yaml
 
@@ -184,7 +185,14 @@ class ProfileStorage:
                 return None
 
         checksum = hashlib.sha256(content).hexdigest()
-        download_url = f"{self.base_url}/profiles/{model_id}/download"
+        # Percent-encode the id INTO the URL path. `model_id` is a registry identifier, not a URL
+        # token: a `#` truncates the URL client-side before the request is ever sent, a `?` turns the
+        # rest into a query string, and a bare `%` can read as a malformed escape — so a raw
+        # interpolation advertises a download_url that cannot be fetched (Codex #13 LOW).
+        # `safe="/"` (urllib's default) is deliberate: the route is `/profiles/{model_id:path}/download`,
+        # so slashes must stay literal for a slash-bearing id to keep matching — encoding them would
+        # break the very contract this branch established.
+        download_url = f"{self.base_url}/profiles/{quote(model_id)}/download"
 
         return {
             "model_id": model_id,
