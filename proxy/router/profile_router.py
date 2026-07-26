@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import sys
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -112,6 +113,69 @@ def _verify_profile_license(profile: dict, filename: str) -> bool:
     return True
 
 
+@dataclass
+class ProfileLoadReport:
+    """
+    What a profile load actually did — the work-done record for ``load_all``.
+
+    Earned 2026-07-26. ``ProfileRouter.loaded_count`` is the TOTAL profile count,
+    plaintext included, so it cannot answer "did the encrypted half work?". With a
+    wrong decryption key over a directory of 3 plaintext + 2 encrypted profiles,
+    ``loaded_count`` is 3 and ``proxy/main.py`` logs
+    ``"Decryption key loaded — 3 encrypted profiles available"`` having decrypted
+    exactly ZERO. Same shape as the integrity manifest that reported
+    ``"Integrity check passed: 0 modules verified"``.
+
+    Every field that can be non-zero is a count of work DONE, and every unit of
+    work-not-done is carried by NAME, per DONE.md floor invariant 9(a).
+    """
+
+    key_present: bool = False
+    plaintext_present: int = 0
+    plaintext_loaded: int = 0
+    plaintext_rejected: list[str] = field(default_factory=list)
+    encrypted_present: int = 0
+    encrypted_attempted: int = 0
+    encrypted_decrypted: int = 0
+    #: Files whose AES-GCM authentication FAILED (tamper or wrong key).
+    encrypted_failed: list[str] = field(default_factory=list)
+    #: Files that decrypted but were then rejected (bad YAML, licence, no model_id).
+    encrypted_rejected: list[str] = field(default_factory=list)
+    #: Encrypted files not even attempted because no key was available.
+    encrypted_skipped_no_key: list[str] = field(default_factory=list)
+    total_loaded: int = 0
+
+    @property
+    def clean(self) -> bool:
+        """True only if every unit present was actually turned into a profile."""
+        return (
+            not self.encrypted_failed
+            and not self.encrypted_rejected
+            and not self.encrypted_skipped_no_key
+            and not self.plaintext_rejected
+            and self.encrypted_attempted == self.encrypted_present
+            and self.encrypted_decrypted == self.encrypted_present
+        )
+
+    def summary(self, profile_dir: str) -> str:
+        parts = [
+            f"loaded {self.total_loaded} profiles from {profile_dir}",
+            f"plaintext {self.plaintext_loaded}/{self.plaintext_present}",
+            f"encrypted {self.encrypted_decrypted}/{self.encrypted_present} decrypted",
+        ]
+        if self.encrypted_skipped_no_key:
+            parts.append(
+                "NOT ATTEMPTED (no key): " + ", ".join(self.encrypted_skipped_no_key)
+            )
+        if self.encrypted_failed:
+            parts.append("AUTHENTICATION FAILED: " + ", ".join(self.encrypted_failed))
+        if self.encrypted_rejected:
+            parts.append("decrypted but rejected: " + ", ".join(self.encrypted_rejected))
+        if self.plaintext_rejected:
+            parts.append("plaintext rejected: " + ", ".join(self.plaintext_rejected))
+        return "; ".join(parts)
+
+
 class ProfileRouter:
     """
     Thread-safe (asyncio-safe) profile dispatch table.
@@ -138,6 +202,7 @@ class ProfileRouter:
         self.profile_dir = profile_dir
         self._loaded_count = 0
         self._decryption_key = decryption_key
+        self.last_load_report = ProfileLoadReport()
         # The audit rail, handed in at CONSTRUCTION. ``proxy/main.py`` builds the
         # AuditWriter at step 0 for exactly this reason: the router decides
         # whether each encrypted profile authenticated, and before this change no
@@ -189,15 +254,24 @@ class ProfileRouter:
         self._flush_tasks.add(task)
         task.add_done_callback(self._flush_tasks.discard)
 
-    def set_decryption_key(self, key: bytes) -> None:
-        """Set the decryption key and reload encrypted profiles."""
+    def set_decryption_key(self, key: bytes) -> "ProfileLoadReport":
+        """Set the decryption key and reload encrypted profiles.
+
+        Returns the load report so the caller can state what the key actually
+        achieved. ``loaded_count`` is NOT that number -- it counts plaintext
+        profiles too, so it stays high (and reads like success) even when every
+        single encrypted profile failed to decrypt.
+        """
         self._decryption_key = key
         self.load_all()
         self._schedule_flush()
+        return self.last_load_report
 
     def load_all(self) -> None:
         """Load all YAML profiles from profile_dir. Supports .yaml and .yaml.enc."""
         profiles: dict[str, dict] = {}
+        report = ProfileLoadReport(key_present=self._decryption_key is not None)
+        self.last_load_report = report
         path = Path(self.profile_dir).resolve()
         if not path.exists():
             logger.warning("Profiles directory not found: %s", self.profile_dir)
@@ -206,25 +280,40 @@ class ProfileRouter:
             return
 
         # Load plaintext .yaml profiles
-        for f in path.glob("*.yaml"):
+        #
+        # NOTE, and it is the load-bearing note for this whole module: these are
+        # UNAUTHENTICATED. A .yaml dropped into the profile directory is parsed and
+        # used with no key, no tag and -- unless ARKHEIA_LICENSE_KEY is set, which
+        # it is not by default -- no signature check either. The AES-GCM path below
+        # protects only the models that ship as .yaml.enc. See
+        # tests/test_encrypted_profile_tamper.py::test_plaintext_yaml_bypasses_the
+        # _entire_crypto_path.
+        for f in sorted(path.glob("*.yaml")):
             if not f.resolve().parent == path:  # aikido-ignore
                 logger.warning("Skipping file outside profile dir: %s", f)
                 continue
             if f.name == "schema.yaml":
                 continue
+            report.plaintext_present += 1
             data = self._load_plaintext(f)
             if data:
                 model_id = self._extract_model_id(data, f.name)
                 if model_id:
                     profiles[model_id] = data
+                    report.plaintext_loaded += 1
+                    continue
+            report.plaintext_rejected.append(f.name)
 
         # Load encrypted .yaml.enc profiles (if decryption key available)
-        enc_files = list(path.glob("*.yaml.enc"))
+        enc_files = sorted(path.glob("*.yaml.enc"))
+        report.encrypted_present = len(enc_files)
         if enc_files and not self._decryption_key:
+            report.encrypted_skipped_no_key = [f.name for f in enc_files]
             logger.warning(
-                "Found %d encrypted profiles but no decryption key — skipping. "
+                "Found %d encrypted profiles but no decryption key — skipping: %s. "
                 "Detection will return UNKNOWN for these models.",
                 len(enc_files),
+                ", ".join(report.encrypted_skipped_no_key),
             )
             # One record: no per-profile decision was TAKEN here, so emitting a
             # per-profile row would overstate what happened. The names are
@@ -241,6 +330,7 @@ class ProfileRouter:
                 if not f.resolve().parent == path:  # aikido-ignore
                     continue
                 profile_name = f.name.replace(".yaml.enc", "")
+                report.encrypted_attempted += 1
                 encrypted = b""
                 try:
                     encrypted = f.read_bytes()
@@ -250,52 +340,87 @@ class ProfileRouter:
                     # disk are not the bytes that were sealed, or this is not the
                     # key they were sealed with. Previously this was one ERROR
                     # line in an unchained log; it is now a row on the
-                    # hash-chained rail carrying which bytes and which key.
+                    # hash-chained rail carrying which bytes and which key, AND a
+                    # named unit in the work-done report below -- it must never
+                    # vanish into a log line while the summary reports a clean
+                    # load. InvalidTag carries an EMPTY message, so the exception
+                    # type is named explicitly or the operator gets no reason at
+                    # all.
+                    report.encrypted_failed.append(f.name)
                     logger.error(
-                        "Profile %s FAILED AUTHENTICATION (AES-GCM tag rejected) — "
-                        "tampered file or wrong key", f.name,
+                        "AUTHENTICATION FAILED for encrypted profile %s (%s) — "
+                        "tampered file or wrong key. Profile DROPPED; no "
+                        "plaintext fallback.",
+                        f.name, type(e).__name__,
                     )
                     self._journal_auth(PROFILE_AUTH_FAILED, profile_name, encrypted, e)
                     continue
                 except ValueError as e:
-                    logger.error("Failed to decrypt profile %s: %s", f.name, e)
+                    # Too short to contain a nonce and a tag -- never reached the
+                    # cipher at all. Discriminated from a tamper (InvalidTag)
+                    # rather than filed as one, so a truncated file does not cry
+                    # wolf; still a dropped, named, non-clean unit.
+                    report.encrypted_failed.append(f.name)
+                    logger.error(
+                        "AUTHENTICATION FAILED for encrypted profile %s (%s: %s) — "
+                        "malformed ciphertext. Profile DROPPED; no plaintext "
+                        "fallback.",
+                        f.name, type(e).__name__, e or "<no detail>",
+                    )
                     self._journal_auth(PROFILE_AUTH_MALFORMED, profile_name, encrypted, e)
                     continue
                 except Exception as e:
-                    logger.error("Failed to decrypt profile %s: %s", f.name, e)
+                    report.encrypted_failed.append(f.name)
+                    logger.error(
+                        "AUTHENTICATION FAILED for encrypted profile %s (%s: %s) — "
+                        "tampered, or the wrong decryption key. Profile DROPPED; "
+                        "no plaintext fallback.",
+                        f.name, type(e).__name__, e or "<no detail>",
+                    )
                     self._journal_auth(PROFILE_AUTH_MALFORMED, profile_name, encrypted, e)
                     continue
 
                 # From here the profile HAS authenticated; every further refusal
                 # is a content decision, and each gets its own outcome so a
-                # tamper can never be confused with a licence expiry.
+                # tamper can never be confused with a licence expiry -- and its
+                # own named bucket in the work-done report.
                 try:
                     data = yaml.safe_load(plaintext)
                 except Exception as e:
+                    report.encrypted_rejected.append(f.name)
                     logger.error("Decrypted profile %s is not valid YAML: %s", f.name, e)
                     self._journal_auth(PROFILE_AUTH_NOT_YAML, profile_name, encrypted, e)
                     continue
                 if not data:
+                    report.encrypted_rejected.append(f.name)
                     self._journal_auth(PROFILE_AUTH_EMPTY, profile_name, encrypted, None)
                     continue
                 if not _verify_profile_license(data, f.name):
+                    report.encrypted_rejected.append(f.name)
                     self._journal_auth(PROFILE_AUTH_LICENSE_REJECTED, profile_name, encrypted, None)
                     continue
                 model_id = self._extract_model_id(data, f.name)
                 if not model_id:
+                    report.encrypted_rejected.append(f.name)
                     self._journal_auth(PROFILE_AUTH_NO_MODEL_ID, profile_name, encrypted, None)
                     continue
                 profiles[model_id] = data
+                report.encrypted_decrypted += 1
                 logger.debug("Loaded encrypted profile: %s -> %s", f.name, model_id)
                 self._journal_auth(PROFILE_AUTH_AUTHENTICATED, profile_name, encrypted, None)
 
         self._profiles = profiles
         self._loaded_count = len(profiles)
-        logger.info(
-            "ProfileRouter: loaded %d valid profiles from %s",
-            len(profiles),
-            self.profile_dir,
-        )
+        report.total_loaded = len(profiles)
+        # DONE.md floor invariant 9(b): the pass WORDING is gated on work done, not
+        # on absence-of-failure, and every work-not-done unit is NAMED. Before
+        # 2026-07-26 this line read "loaded N valid profiles" whatever happened to
+        # the encrypted half, so a wrong key produced a clean-looking INFO summary
+        # over zero successful decrypts.
+        if report.encrypted_failed or report.encrypted_rejected:
+            logger.error("ProfileRouter: %s", report.summary(self.profile_dir))
+        else:
+            logger.info("ProfileRouter: %s", report.summary(self.profile_dir))
 
     def _journal_auth(
         self,
