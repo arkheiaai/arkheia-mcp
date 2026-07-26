@@ -109,7 +109,29 @@ logger = logging.getLogger(__name__)
 DECISION_RECORDED = "recorded"
 DECISION_REFUSED = "refused"
 
-_DECISIONS = (DECISION_RECORDED, DECISION_REFUSED)
+#: The tool-registry allow/deny gate's own vocabulary. It sits BEFORE the tool body:
+#: `allowed` means the policy gate let the dispatch through (the body may still refuse
+#: on its own grounds, which is what `refused` records), `denied` means the gate itself
+#: stopped the call. Distinct words on purpose — "refused" and "denied" are different
+#: controls at different depths, and a query that cannot tell them apart cannot answer
+#: "was this stopped by policy, or by the tool?".
+DECISION_ALLOWED = "allowed"
+DECISION_DENIED = "denied"
+
+#: The THIRD honest bucket (DONE.md floor ledger #9d): the decision could not be
+#: represented as a record at all. Emitted only by a receipt path whose own
+#: `build_record` raised — never inferred, never used to stand in for allow or deny.
+#: A malformed decision must not silently vanish, and it must not be laundered into
+#: one of the two real verdicts either.
+DECISION_UNREPRESENTABLE = "unrepresentable"
+
+_DECISIONS = (
+    DECISION_RECORDED,
+    DECISION_REFUSED,
+    DECISION_ALLOWED,
+    DECISION_DENIED,
+    DECISION_UNREPRESENTABLE,
+)
 
 #: Surfaced to the caller alongside the receipt id, so an unwritten receipt is visible in
 #: the tool result and not only in a log line the agent never sees.
@@ -141,6 +163,7 @@ def build_record(
     receipt_id: str,
     tool: str,
     decision: str,
+    event_type: Optional[str] = None,
     **fields: Any,
 ) -> dict:
     """
@@ -149,11 +172,18 @@ def build_record(
     `decision` is validated rather than accepted: a typo'd decision would silently create
     a class of record that no query for "refused" would ever find, which is the receipt
     equivalent of an unregistered event type.
+
+    `event_type` defaults to `mcp.<tool>` — one stream per tool, which is what the
+    memory flow wants because each of its tools is a different governed action. A caller
+    whose decision is about the SAME control across many tools (the tool-registry gate:
+    one gate, nine tools) passes its own, so the whole control is one queryable stream
+    and `tool` stays the subject rather than becoming the stream name. Overriding it does
+    NOT relax the decision validation above — that is the guard, and it still applies.
     """
     if decision not in _DECISIONS:
         raise ValueError(f"unknown decision {decision!r}; expected one of {_DECISIONS}")
     return {
-        "event_type": f"mcp.{tool}",
+        "event_type": event_type or f"mcp.{tool}",
         "receipt_id": receipt_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tool": tool,
