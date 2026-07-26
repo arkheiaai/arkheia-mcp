@@ -33,6 +33,7 @@ from mcp_server.proxy_client import ProxyClient
 from mcp_server.tool_registry import check, PolicyViolation
 from mcp_server.tools.providers import call_grok, call_gemini, call_ollama, call_together
 from mcp_server.tools.memory import store_entity, retrieve_entities, store_relation
+from mcp_server.screening import annotate_screening, is_screened, unscreened_reason
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -132,6 +133,28 @@ async def arkheia_audit_log(session_id: str | None = None, limit: int = 50) -> d
 # Provider wrappers — single source of truth for all inference
 # ---------------------------------------------------------------------------
 
+def _log_verdict(tool: str, model: str, risk: dict) -> None:
+    """
+    Log the verdict for an OPERATOR, not just for a caller.
+
+    An unscreened response is logged at WARNING with its reason, because `risk=UNKNOWN
+    confidence=0.00` at INFO reads like a quiet, successful call — and the operator-visible
+    fact is that this response was never assessed. Silence, and calm-looking numbers, must
+    never read as "all clear".
+    """
+    if is_screened(risk):
+        logger.info(
+            "%s: model=%s risk=%s confidence=%.2f screened=yes",
+            tool, model, risk.get("risk_level", "?"), risk.get("confidence", 0.0),
+        )
+        return
+    logger.warning(
+        "%s: model=%s NOT SCREENED (reason=%s) — response ran UNSCORED; "
+        "risk=%s is a couldn't-assess, not an all-clear",
+        tool, model, unscreened_reason(risk), risk.get("risk_level", "?"),
+    )
+
+
 @mcp.tool(annotations=ToolAnnotations(
     title="Call xAI Grok with Fabrication Screening",
     readOnlyHint=True,
@@ -143,19 +166,29 @@ async def run_grok(
     model: str = "grok-4.20-non-reasoning",
 ) -> dict:
     """
-    Call xAI Grok and screen the response through Arkheia.
+    Call xAI Grok and route the response through Arkheia.
 
     Use this instead of calling Grok directly — ensures every response
     is in the audit log.
+
+    ⚠ THE DEFAULT MODEL IS NOT SCREENED. There is no detection profile for the
+    grok-4.20 pair yet (characterisation is queued), so on the default id every
+    response comes back `arkheia.risk_level = "UNKNOWN"`,
+    `error = "no_profile_for_model"` and `arkheia_screened = False`. That is a
+    couldn't-assess, NOT an all-clear: nothing was measured. Read
+    `arkheia_screened` before you rely on the output, and surface
+    `arkheia_warning` rather than presenting the answer as screened. A profiled
+    grok id (e.g. grok-4-1-fast-non-reasoning) IS screened if you need a scored
+    call — see profiles/ for what exists.
 
     Args:
         prompt: The prompt to send to Grok
         model:  Grok model ID (default: grok-4.20-non-reasoning)
                 Fleet pair: grok-4.20-non-reasoning / grok-4.20-reasoning —
                 identical pricing across both modes, so switching mode does not
-                change the cost model.
+                change the cost model. NEITHER has a detection profile.
                 Reserved (do not use for routine fleet work): grok-4.5 — the
-                frontier tier at 2.4x the output price.
+                frontier tier at 2.4x the output price. Also unprofiled.
                 `grok-code-fast-1` still resolves, but as an ALIAS onto a
                 different underlying model than it originally named; see
                 profiles/grok-code-fast-1.yaml before relying on it.
@@ -165,6 +198,11 @@ async def run_grok(
         model:              Model ID used
         prompt_hash:        SHA-256 of the prompt (for reproducibility)
         arkheia:            Full detection result (risk_level, confidence, etc.)
+        arkheia_screened:   False means this response was NOT assessed at all.
+        arkheia_unscreened_reason: machine-readable reason (e.g.
+                            no_profile_for_model), None when screened.
+        arkheia_warning:    plain English + what would clear it, when not
+                            screened or only weakly evidenced; None otherwise.
         error:              Set if provider call failed. `auth_failed` means the
                             API key was rejected — distinct from `http_400`,
                             which means the request itself was bad.
@@ -180,11 +218,8 @@ async def run_grok(
         response=provider_result["response"],
         model_id=model,
     )
-    logger.info(
-        "run_grok: model=%s risk=%s confidence=%.2f",
-        model, risk.get("risk_level", "?"), risk.get("confidence", 0.0),
-    )
-    return {**provider_result, "arkheia": risk}
+    _log_verdict("run_grok", model, risk)
+    return annotate_screening(provider_result, risk, model)
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -213,6 +248,11 @@ async def run_gemini(
         model:        Model ID used
         prompt_hash:  SHA-256 of the prompt
         arkheia:      Full detection result
+        arkheia_screened:   False means this response was NOT assessed at all —
+                      a couldn't-assess, not an all-clear.
+        arkheia_unscreened_reason: machine-readable reason, None when screened.
+        arkheia_warning:    plain English + what would clear it, when not screened
+                      or only weakly evidenced; None otherwise.
         error:        Set if provider call failed
     """
     try:
@@ -226,11 +266,8 @@ async def run_gemini(
         response=provider_result["response"],
         model_id=model,
     )
-    logger.info(
-        "run_gemini: model=%s risk=%s confidence=%.2f",
-        model, risk.get("risk_level", "?"), risk.get("confidence", 0.0),
-    )
-    return {**provider_result, "arkheia": risk}
+    _log_verdict("run_gemini", model, risk)
+    return annotate_screening(provider_result, risk, model)
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -262,6 +299,11 @@ async def run_ollama(
         prompt_hash:  SHA-256 of the prompt
         eval_count:   Token count (if available)
         arkheia:      Full detection result
+        arkheia_screened:   False means this response was NOT assessed at all —
+                      a couldn't-assess, not an all-clear.
+        arkheia_unscreened_reason: machine-readable reason, None when screened.
+        arkheia_warning:    plain English + what would clear it, when not screened
+                      or only weakly evidenced; None otherwise.
         error:        Set if provider call failed
     """
     try:
@@ -275,11 +317,8 @@ async def run_ollama(
         response=provider_result["response"],
         model_id=model,
     )
-    logger.info(
-        "run_ollama: model=%s risk=%s confidence=%.2f",
-        model, risk.get("risk_level", "?"), risk.get("confidence", 0.0),
-    )
-    return {**provider_result, "arkheia": risk}
+    _log_verdict("run_ollama", model, risk)
+    return annotate_screening(provider_result, risk, model)
 
 
 @mcp.tool(annotations=ToolAnnotations(
@@ -310,6 +349,11 @@ async def run_together(
         prompt_hash:  SHA-256 of the prompt
         usage:        Token usage if available
         arkheia:      Full detection result (risk_level, confidence, etc.)
+        arkheia_screened:   False means this response was NOT assessed at all —
+                      a couldn't-assess, not an all-clear.
+        arkheia_unscreened_reason: machine-readable reason, None when screened.
+        arkheia_warning:    plain English + what would clear it, when not screened
+                      or only weakly evidenced; None otherwise.
         error:        Set if provider call failed
 
     Note: Kimi K2.5 is a thinking model — it uses 100-500 tokens internally
@@ -326,11 +370,8 @@ async def run_together(
         response=provider_result["response"],
         model_id=model,
     )
-    logger.info(
-        "run_together: model=%s risk=%s confidence=%.2f",
-        model, risk.get("risk_level", "?"), risk.get("confidence", 0.0),
-    )
-    return {**provider_result, "arkheia": risk}
+    _log_verdict("run_together", model, risk)
+    return annotate_screening(provider_result, risk, model)
 
 
 @mcp.tool(annotations=ToolAnnotations(
