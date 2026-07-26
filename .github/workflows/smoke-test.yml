@@ -34,7 +34,8 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install -r mcp_server/requirements.txt
-          pip install pytest pytest-asyncio pytest-timeout
+          # NO ad-hoc installs — pytest/pytest-asyncio/pytest-timeout are declared
+          # in requirements.txt. Enforced by tests/test_ci_enforcement_floor.py.
 
       - name: Run smoke tests
         env:

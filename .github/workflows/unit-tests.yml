@@ -33,11 +33,11 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r mcp_server/requirements.txt
-          # respx: fixture used by tests/test_detection_adapter.py.
-          # cryptography: imported by proxy/crypto/profile_crypto.py (encrypted
-          #   profiles) but MISSING from requirements.txt — a latent production
-          #   gap flagged in the PR. Installed here so the crypto suites run.
-          pip install cryptography respx pytest pytest-asyncio pytest-timeout
+          # NO ad-hoc installs. cryptography / python-dotenv / respx /
+          # pytest-timeout are now DECLARED in requirements.txt. Installing them
+          # here instead meant CI green did not prove the declared manifest could
+          # run the suite — the workflow papered over its own dependency gap.
+          # Enforced by tests/test_ci_enforcement_floor.py (INV-2).
 
       - name: Run hermetic unit suites
         env:
