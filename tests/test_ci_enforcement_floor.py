@@ -55,6 +55,30 @@ INV-5  The required-context fixture is a committed CLAIM about a mutable remote
        every PR forever; a job renamed out from under the fixture is a gate the
        fixture still claims).
 
+       CODEX FINDING (2026-07-26): those two detectors prove the fixture is
+       FRESH and COHERENT. They do NOT prove branch protection actually requires
+       those contexts — that is fixture-trust, not proof. Offline the trust root
+       is IRREDUCIBLE: the floor contract forbids network access, and reading
+       protection needs an authenticated admin-scope API call.
+
+       The decision taken was to declare the boundary rather than dress it up.
+       In one sentence: **PROVEN — the fixture is fresh, well-formed and
+       coherent with the workflow tree; ASSUMED — that it matches live branch
+       protection on master.** ``TRUST_STATEMENT`` carries that wording into
+       every message these invariants emit (floor entry 9(d): a property that
+       was not observed must not be rendered as a success), the fixture must
+       carry its own ``_trust_root`` declaration or it is NOT OBSERVED, and
+       ``test_fixture_manipulation_is_undetectable_offline`` executes the gap so
+       a green floor tier can never be read as proof of the remote setting.
+
+       To make it LIVE (proposed, not implemented here): a scheduled privileged
+       job holding a PAT with ``administration: read`` that re-runs
+       ``refresh_command`` and fails on drift. The default ``GITHUB_TOKEN``
+       cannot read branch protection, so it needs a secret this PR does not
+       create. Cross-checking the check-runs POSTED on a PR is NOT a substitute:
+       posted and required are different properties — a job can post while being
+       non-required, which is the very confusion INV-3 was written to end.
+
 INV-4  ``tests/test_smoke_e2e.py::TestHostedFallback`` carried
        ``xfail(strict=True)`` nested under ``skipif(not _api_key)``. A skip
        short-circuits xfail evaluation, so the strict tripwire could never fire
@@ -483,7 +507,52 @@ def workflow_jobs(text: str) -> list[WorkflowJob]:
 
 _FIXTURE_KEYS = (
     "repo", "branch", "observed_at", "max_age_days", "refresh_command",
-    "github_actions_app_id", "required_checks",
+    "github_actions_app_id", "required_checks", "_trust_root",
+)
+
+# ---------------------------------------------------------------------------
+# THE TRUST ROOT  (Codex review, PR #15)
+#
+# The honest answer, stated once and not softened anywhere below.
+#
+# `.github/required-status-checks.json` is a COMMITTED READ-BACK of a mutable
+# remote setting. Everything this floor tier does with it is checking the file
+# against itself and against the workflow tree:
+#
+#   PROVEN offline —
+#     * the fixture is well-formed, names this repo's default branch, and is
+#       within its declared expiry (INV-5);
+#     * every required GitHub-Actions context in it is produced by a job that
+#       exists in the tree, so none is a phantom;
+#     * every test file is collected by a job whose check name appears in it
+#       (INV-3);
+#     * no deselection filter hides a test from such a job.
+#
+#   ASSUMED, and NOT provable here —
+#     * that the file faithfully reflects what branch protection ACTUALLY
+#       requires on master right now.
+#
+# That assumption is load-bearing and it is irreducible in this tier: the floor
+# contract is stdlib-only and offline, and reading branch protection needs an
+# authenticated API call with admin scope. If the file were wrong — or edited to
+# add `MCP server end-to-end smoke test` — every check here would still pass and
+# the orphan INV-3 exists to catch would be credited by a job that gates nothing.
+# `test_fixture_manipulation_is_undetectable_offline` demonstrates exactly that,
+# on purpose, so the gap is executable rather than a paragraph someone skims.
+#
+# Per DONE.md floor entry 9(d) a property that was not observed must not be
+# rendered as a success, so this statement travels with every message these
+# invariants emit, and the fixture must carry its own `_trust_root` declaration
+# or it is NOT OBSERVED.
+# ---------------------------------------------------------------------------
+
+TRUST_STATEMENT = (
+    "TRUST ROOT: what is PROVEN here is that .github/required-status-checks.json "
+    "is fresh, well-formed and coherent with the workflow tree; what is ASSUMED "
+    "is that it matches live branch protection on "
+    f"{DEFAULT_BRANCH!r}. This tier is offline and cannot call the protection "
+    "API, so the assumption is not checkable here — it holds only because a "
+    "human or a privileged job refreshed the file."
 )
 
 
@@ -538,6 +607,30 @@ def validate_required_checks(data: object, today: date) -> list[str]:
             f"required_checks + observed_at, and say in the commit whether the "
             f"remote actually changed."
         )
+
+    # The fixture must declare its own trust root. A read-back that does not say
+    # which part of it is assumed reads as though all of it were observed, which
+    # is the 9(d) failure this whole section exists to prevent.
+    trust = data["_trust_root"]
+    if not isinstance(trust, dict):
+        problems.append(
+            f"_trust_root must be an object naming what is proven and what is "
+            f"assumed, got {type(trust).__name__}"
+        )
+    else:
+        for field in ("proven", "assumed"):
+            value = trust.get(field)
+            if not isinstance(value, list) or not value:
+                problems.append(
+                    f"_trust_root.{field} must be a non-empty list. A read-back "
+                    f"with nothing listed under {field!r} is claiming either "
+                    f"total proof or total ignorance; neither is true."
+                )
+        if not str(trust.get("verified_by", "")).strip():
+            problems.append(
+                "_trust_root.verified_by must name WHO or WHAT refreshed this "
+                "file. An assumption with no owner cannot be re-checked."
+            )
 
     checks = data["required_checks"]
     if not isinstance(checks, list) or not checks:
@@ -801,7 +894,7 @@ def test_every_test_file_is_collectable_by_a_required_context() -> None:
     assert not problems, (
         "INV-3 NOT OBSERVED — the required-status-context fixture is unusable, so "
         "no statement about what gates this repo can be made. This is a FAILURE, "
-        "not a pass:\n  - " + "\n  - ".join(problems)
+        "not a pass:\n  - " + "\n  - ".join(problems) + "\n\n" + TRUST_STATEMENT
     )
 
     credited, rejected = credited_invocations(workflow_texts(), required)
@@ -830,6 +923,7 @@ def test_every_test_file_is_collectable_by_a_required_context() -> None:
         + "\n  - ".join(detail)
         + "\n\nNOT credited (ran pytest but is not a required gate):\n  - "
         + ("\n  - ".join(rejected) if rejected else "(none)")
+        + "\n\n" + TRUST_STATEMENT
     )
 
 
@@ -976,7 +1070,7 @@ def test_required_context_fixture_is_fresh_and_wellformed() -> None:
     assert not problems, (
         "the committed branch-protection read-back is unusable or expired, so "
         "INV-3 cannot certify anything (NOT OBSERVED, not a pass):\n  - "
-        + "\n  - ".join(problems)
+        + "\n  - ".join(problems) + "\n\n" + TRUST_STATEMENT
     )
     assert checks, "required_checks parsed empty — the detector measured nothing."
     # Work-done with units named: these are the contexts INV-3 will credit.
@@ -998,8 +1092,48 @@ def test_inv5_freshness_positive_control() -> None:
         "refresh_command": "gh api ...",
         "github_actions_app_id": GITHUB_ACTIONS_APP_ID,
         "required_checks": [{"context": "unit-tests", "app_id": GITHUB_ACTIONS_APP_ID}],
+        "_trust_root": {
+            "proven": ["fixture is fresh and coherent with the workflow tree"],
+            "assumed": ["that it matches live branch protection on master"],
+            "why_irreducible_here": "offline tier cannot call the protection API",
+            "verified_by": "human refresh",
+        },
     }
     assert validate_required_checks(good, today) == [], validate_required_checks(good, today)
+
+    # --- the trust-root declaration is itself validated -------------------
+    # Named explicitly, not just via the _FIXTURE_KEYS loop below: dropping
+    # "_trust_root" from that tuple made every other assertion here still pass,
+    # because the real fixture happened to carry the key. That mutation
+    # SURVIVED until this line existed. What must be pinned is the REQUIREMENT,
+    # not the current file's compliance with it.
+    without_trust = {k: v for k, v in good.items() if k != "_trust_root"}
+    assert validate_required_checks(without_trust, today) == [
+        "missing required key '_trust_root'"
+    ], (
+        "a fixture with no declared trust root must be NOT OBSERVED. Without "
+        "this, the read-back can go back to presenting a trusted input as a "
+        "verified one."
+    )
+
+    # A fixture may not claim total proof by leaving `assumed` empty, and an
+    # assumption with no owner cannot be re-checked.
+    no_assumed = {**good, "_trust_root": {**good["_trust_root"], "assumed": []}}
+    aprobs = validate_required_checks(no_assumed, today)
+    assert len(aprobs) == 1 and "_trust_root.assumed" in aprobs[0], aprobs
+    assert "total proof" in aprobs[0], aprobs
+
+    no_proven = {**good, "_trust_root": {**good["_trust_root"], "proven": []}}
+    pprobs = validate_required_checks(no_proven, today)
+    assert len(pprobs) == 1 and "_trust_root.proven" in pprobs[0], pprobs
+
+    no_owner = {**good, "_trust_root": {**good["_trust_root"], "verified_by": "  "}}
+    oprobs = validate_required_checks(no_owner, today)
+    assert len(oprobs) == 1 and "verified_by" in oprobs[0], oprobs
+
+    not_object = {**good, "_trust_root": "we checked it"}
+    nprobs = validate_required_checks(not_object, today)
+    assert len(nprobs) == 1 and "must be an object" in nprobs[0], nprobs
 
     stale = {**good, "observed_at": (today - timedelta(days=46)).isoformat()}
     probs = validate_required_checks(stale, today)
@@ -1895,3 +2029,148 @@ def test_inv4_unmodelled_surface_positive_control() -> None:
     # NOT-OBSERVED control — an unparseable source is reported, never silent.
     broken = unmodelled_skip_mechanisms("def (:\n")
     assert len(broken) == 1 and "could not be parsed" in broken[0], broken
+
+
+# ---------------------------------------------------------------------------
+# THE TRUST ROOT, made executable  (Codex review, PR #15)
+#
+# Codex's finding was not that a check is wrong — INV-3 and INV-5 do what they
+# claim. It was that the GUARANTEE rests on a committed fixture, and expiry plus
+# "the job exists" cross-checks prove the file is fresh and coherent, NOT that
+# branch protection actually requires those contexts.
+#
+# The decision taken, stated plainly rather than engineered around: offline, the
+# trust root is IRREDUCIBLE. The floor contract is stdlib-only with no network,
+# and reading branch protection needs an authenticated admin-scope API call. So
+# the correct outcome is not a more confident PASS — it is a declared assumption
+# that travels with every verdict these invariants produce.
+# ---------------------------------------------------------------------------
+
+def test_the_trust_root_is_declared_and_names_what_is_assumed() -> None:
+    """
+    The fixture must say which part of itself is observed and which is trusted.
+
+    Floor entry 9(d): a property that was not observed must not be rendered as a
+    success. A read-back that lists only its contents reads as though all of it
+    were verified — the reader cannot tell that the central claim (this matches
+    live protection) was never checked.
+    """
+    data = json.loads(REQUIRED_CHECKS_FIXTURE.read_text(encoding="utf-8"))
+    trust = data.get("_trust_root")
+    assert isinstance(trust, dict), (
+        f"{REQUIRED_CHECKS_FIXTURE.name} has no _trust_root declaration. It is a "
+        "claim about a mutable remote setting; without a declared boundary its "
+        "freshness checks read as proof of correctness."
+    )
+
+    assert trust.get("proven"), "_trust_root.proven is empty"
+    assert trust.get("assumed"), (
+        "_trust_root.assumed is EMPTY — that asserts the fixture is fully "
+        "verified offline, which is false. The one thing this tier cannot check "
+        "is whether the file matches live branch protection."
+    )
+    # The assumption must actually be the load-bearing one, not a token entry.
+    assumed_text = " ".join(trust["assumed"]).lower()
+    assert "branch protection" in assumed_text, (
+        "_trust_root.assumed does not name the branch-protection assumption, "
+        f"which is the only one that matters here: {trust['assumed']}"
+    )
+    assert str(trust.get("why_irreducible_here", "")).strip(), (
+        "_trust_root must say WHY the assumption cannot be discharged in this "
+        "tier, or a future reader will assume it was simply overlooked."
+    )
+    assert str(trust.get("verified_by", "")).strip(), (
+        "_trust_root.verified_by must name who refreshes this file."
+    )
+
+    # And the statement the invariants emit must agree with the fixture.
+    assert "ASSUMED" in TRUST_STATEMENT and "PROVEN" in TRUST_STATEMENT, (
+        "TRUST_STATEMENT must distinguish the two; it is what gets rendered."
+    )
+    assert DEFAULT_BRANCH in TRUST_STATEMENT
+
+
+def test_trust_statement_travels_with_every_fixture_dependent_verdict() -> None:
+    """
+    A named assumption is only surfaced if it reaches the reader.
+
+    Every invariant that consumes the fixture must carry TRUST_STATEMENT in the
+    message it emits, so a failure never reads as "the gate is broken" when the
+    real content is "the gate rests on something nobody re-checked".
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    consumers = (
+        "test_every_test_file_is_collectable_by_a_required_context",
+        "test_required_context_fixture_is_fresh_and_wellformed",
+    )
+    for name in consumers:
+        start = source.index(f"def {name}(")
+        end = source.find("\ndef ", start + 1)
+        body = source[start:end if end != -1 else len(source)]
+        assert "TRUST_STATEMENT" in body, (
+            f"{name} consumes the required-context fixture but does not render "
+            "TRUST_STATEMENT. Its verdict would present a trusted input as a "
+            "verified one."
+        )
+
+
+def test_fixture_manipulation_is_undetectable_offline() -> None:
+    """
+    The gap, executed. This test PASSES by demonstrating the hole.
+
+    Codex's exact scenario: the fixture is edited to add the smoke-test context.
+    The orphan INV-3 exists to catch is then credited by a job that gates
+    nothing, and every offline check still passes — because "is this context
+    really required?" is precisely the question no offline check can ask.
+
+    Pinning it as a test rather than a comment means nobody can later read the
+    green floor tier as proof that branch protection is what the file says.
+    """
+    real = json.loads(REQUIRED_CHECKS_FIXTURE.read_text(encoding="utf-8"))
+    smoke_context = "MCP server end-to-end smoke test"
+
+    # Precondition: the context is NOT required today, and IS produced by a job
+    # that triggers on master. That combination is what makes it dangerous.
+    assert smoke_context not in {c["context"] for c in real["required_checks"]}, (
+        "precondition changed: the smoke-test context is now recorded as "
+        "required. Re-derive this demonstration rather than deleting it."
+    )
+    produced = set()
+    for _wf, text in workflow_texts().items():
+        for job in workflow_jobs(text):
+            produced |= set(job.check_contexts())
+    assert smoke_context in produced, (
+        "precondition changed: no job produces the smoke-test context, so this "
+        f"demonstration no longer models the risk. Produced: {sorted(produced)}"
+    )
+
+    # The manipulation: one line added to a committed JSON file.
+    tampered = {
+        **real,
+        "required_checks": real["required_checks"]
+        + [{"context": smoke_context, "app_id": real["github_actions_app_id"]}],
+    }
+
+    problems = validate_required_checks(tampered, date.today())
+    assert problems == [], (
+        "the tampered fixture was rejected by the offline validator, which would "
+        f"be a stronger guarantee than claimed: {problems}. If a real defence "
+        "now exists, update _trust_root and this test to describe it."
+    )
+
+    # And it changes what INV-3 credits: the smoke job becomes a gate.
+    tampered_required = {str(c["context"]) for c in tampered["required_checks"]}
+    credited, _rejected = credited_invocations(workflow_texts(), tampered_required)
+    credited_contexts = {ctx for _wf, ctx, _inv in credited}
+    assert smoke_context in credited_contexts, (
+        "the tampered fixture did not change what INV-3 credits, so this "
+        "demonstration is not exercising the risk it documents. Credited: "
+        f"{sorted(credited_contexts)}"
+    )
+
+    # THE POINT: no offline check distinguishes the tampered file from the real
+    # one. This is the assumption, not a defect to be fixed here.
+    assert True, (
+        "unreachable — retained so the intent is explicit: offline, a fixture "
+        "that LIES is indistinguishable from one that is correct."
+    )
