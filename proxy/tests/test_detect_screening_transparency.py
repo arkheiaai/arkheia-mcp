@@ -27,8 +27,10 @@ responses byte-indistinguishable from a real verdict:
 
   gemini-2.5-flash  ->  LOW  conf 0.00   mode gate fired, features_used = 0,
                                           evidence_depth_limited = True
-  grok-3            ->  HIGH conf 1.00   scored by profile `grok-3-mini-fast`,
-                                          a DIFFERENT model, 1 feature
+  grok-3            ->  HIGH conf 1.00   scored by a `grok-3-mini*` profile,
+                                          a DIFFERENT model, 1 feature — and
+                                          WHICH one is filesystem-order
+                                          dependent (see MODEL_SUBSTITUTED)
   deepseek-coder:33b-instruct -> LOW conf 1.00  scored by the cloud profile
                                           `deepseek-ai/DeepSeek-V4-Pro`
 
@@ -80,8 +82,22 @@ MODEL_FULLY_SCORED = "phi4:14b"
 # run_gemini's DEFAULT model: mode gate fires, features_used = 0.
 MODEL_GATE_SUPPRESSED = "gemini-2.5-flash"
 # Resolves, via ProfileRouter prefix matching, to a DIFFERENT model's profile.
+#
+# Which one is NOT DETERMINISTIC, and that is itself a finding. Two shipped
+# profiles prefix-match "grok-3" -- `grok-3-mini` and `grok-3-mini-fast` -- and
+# ProfileRouter.get() returns the FIRST match in dict-insertion order, which comes
+# from `Path.glob` i.e. unordered `os.scandir`. Measured: macOS/APFS yields
+# grok-3-mini-fast, Linux/ext4 (CI) yields grok-3-mini. So which model's
+# fingerprint scores a response depends on filesystem directory-listing order, and
+# two identical installs can return different verdicts for the same
+# (prompt, response, model) triple.
+#
+# Not fixed here: proxy/router/profile_router.py is owned by open PR #13. So the
+# shipped-profile test below asserts what is actually TRUE and STABLE -- that the
+# candidate set is ambiguous and that whichever wins is NAMED to the caller -- and
+# a separate hermetic test pins the substitution mechanism exactly, over a
+# purpose-built profile dir where no ambiguity can arise.
 MODEL_SUBSTITUTED = "grok-3"
-PROFILE_OF_SUBSTITUTED = "grok-3-mini-fast"
 # No profile at any match tier.
 MODEL_UNPROFILED = "no-such-vendor-no-such-model-9x"
 
@@ -122,6 +138,17 @@ def engineless_client() -> TestClient:
     return TestClient(app)
 
 
+def _prefix_candidates(router: ProfileRouter, model_id: str) -> set[str]:
+    """
+    Every loaded profile ProfileRouter's prefix tier could legitimately return
+    for model_id. More than one member means the choice is ambiguous and, because
+    the winner is taken from unordered `Path.glob` insertion order, unstable
+    across filesystems.
+    """
+    m = model_id.lower()
+    return {k for k in router.profile_ids if k.startswith(m) or m.startswith(k)}
+
+
 def _verify(client: TestClient, model_id: str, response: str = SHORT_FABRICATION):
     http = client.post(
         "/detect/verify",
@@ -151,11 +178,19 @@ def test_fixture_models_select_the_branches_under_test(real_router: ProfileRoute
         "suppression tests below are no longer testing suppression."
     )
 
+    candidates = _prefix_candidates(real_router, MODEL_SUBSTITUTED)
+    assert len(candidates) > 1, (
+        f"{MODEL_SUBSTITUTED} no longer has AMBIGUOUS prefix candidates in the "
+        f"shipped profile set (found {sorted(candidates)}), so the "
+        "order-dependence finding this fixture exists to demonstrate no longer "
+        "reproduces. Re-derive it or drop these tests deliberately."
+    )
     subbed = real_router.get(MODEL_SUBSTITUTED)
-    assert subbed is not None and subbed["model"] == PROFILE_OF_SUBSTITUTED, (
-        f"{MODEL_SUBSTITUTED} is expected to resolve to the DIFFERENT profile "
-        f"{PROFILE_OF_SUBSTITUTED} (that substitution is the thing under test); "
-        f"it resolved to {subbed['model']!r}."
+    assert subbed is not None
+    assert subbed["model"] in candidates
+    assert subbed["model"] != MODEL_SUBSTITUTED, (
+        f"{MODEL_SUBSTITUTED} must resolve to a DIFFERENT model's profile — that "
+        "substitution is the thing under test."
     )
 
     assert real_router.get(MODEL_UNPROFILED) is None
@@ -209,21 +244,33 @@ def test_fully_scored_verdict_is_not_marked_evidence_limited(client: TestClient)
 # 2. A verdict must name the profile that actually produced it
 # ---------------------------------------------------------------------------
 
-def test_profile_substitution_is_named_to_the_caller(client: TestClient) -> None:
+def test_profile_substitution_is_named_to_the_caller(
+    client: TestClient, real_router: ProfileRouter
+) -> None:
     """
-    ProfileRouter resolved `grok-3` to the `grok-3-mini-fast` fingerprint. The
-    response echoed `model_id: grok-3` and named the substituted profile
+    ProfileRouter resolves `grok-3` to one of the `grok-3-mini*` fingerprints.
+    The response echoed `model_id: grok-3` and named the substituted profile
     nowhere, so a HIGH at confidence 1.00 measured against another model's
     behavioural baseline was presented as a verdict on the model asked about.
+
+    Which candidate wins is filesystem-order dependent (see the module header),
+    so the assertion is on the invariant that is actually true and stable: the
+    substitution is NAMED, and named as one of the real candidates rather than
+    echoing the request. `test_substitution_is_named_exactly` pins the mechanism
+    to a single exact value over a hermetic profile dir.
     """
     _http, body = _verify(client, MODEL_SUBSTITUTED)
+    candidates = _prefix_candidates(real_router, MODEL_SUBSTITUTED)
 
     assert body["model_id"] == MODEL_SUBSTITUTED
-    assert body["profile_model_id"] == PROFILE_OF_SUBSTITUTED, (
+    assert body["profile_model_id"] != body["model_id"], (
         "The caller cannot tell that a DIFFERENT model's profile scored this "
         f"response. profile_model_id = {body.get('profile_model_id')!r}"
     )
-    assert body["profile_model_id"] != body["model_id"]
+    assert body["profile_model_id"] in candidates, (
+        "profile_model_id must name a profile that could really have scored "
+        f"this: {body.get('profile_model_id')!r} not in {sorted(candidates)}"
+    )
 
 
 def test_exact_profile_match_reports_itself(client: TestClient) -> None:
@@ -322,10 +369,14 @@ def test_evidence_limitation_header_mirrors_the_body(
     assert body["evidence_depth_limited"] is (expected_limited == "true")
 
 
-def test_profile_header_names_the_scoring_profile(client: TestClient) -> None:
+def test_profile_header_names_the_scoring_profile(
+    client: TestClient, real_router: ProfileRouter
+) -> None:
     http, body = _verify(client, MODEL_SUBSTITUTED)
-    assert http.headers["X-Arkheia-Profile"] == PROFILE_OF_SUBSTITUTED
-    assert body["profile_model_id"] == PROFILE_OF_SUBSTITUTED
+    # Header and body must agree with each other exactly, whichever candidate the
+    # filesystem happened to order first: two decision sites, one verdict.
+    assert http.headers["X-Arkheia-Profile"] == body["profile_model_id"]
+    assert body["profile_model_id"] in _prefix_candidates(real_router, MODEL_SUBSTITUTED)
 
     # Positive control: no profile => the header says so explicitly rather than
     # being absent, because an absent header is indistinguishable from an old
@@ -429,7 +480,6 @@ def audited(real_router: ProfileRouter):
     [
         (MODEL_FULLY_SCORED, False, "profile_multi_feature", MODEL_FULLY_SCORED),
         (MODEL_GATE_SUPPRESSED, True, "tool_surface_suppressed", MODEL_GATE_SUPPRESSED),
-        (MODEL_SUBSTITUTED, True, "profile_multi_feature", PROFILE_OF_SUBSTITUTED),
         (MODEL_UNPROFILED, True, None, None),
     ],
 )
@@ -478,3 +528,81 @@ def test_audit_record_and_response_cannot_disagree(audited) -> None:
                 f"audit row and response disagree on {field!r} for {model_id}: "
                 f"{rec[field]!r} vs {body[field]!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# 7. The substitution MECHANISM, pinned exactly — hermetic profile dir
+#
+# The shipped-profile tests above cannot pin profile_model_id to one value,
+# because the shipped set is ambiguous for `grok-3` and the winner comes from
+# unordered Path.glob insertion order. This test removes the ambiguity by
+# construction: a temp profile dir with exactly ONE profile that can match, so
+# the value IS determinable and is asserted exactly. Without it, every
+# substitution assertion in this file would be a set-membership check.
+# ---------------------------------------------------------------------------
+
+def _write_profile(directory: Path, model: str, version: str = "1.0") -> None:
+    """A minimal profile that scores on one always-computable structural feature."""
+    (directory / f"{model.replace('/', '_').replace(':', '_')}.yaml").write_text(
+        f'model: "{model}"\n'
+        f'version: "{version}"\n'
+        "detection:\n"
+        "  strategy: multi_feature\n"
+        "  min_required_features: 1\n"
+        "  features:\n"
+        "    unique_word_ratio:\n"
+        "      weight: 1.0\n"
+        "      polarity: positive\n"
+        "      threshold_low: 0.10\n"
+        "      threshold_medium: 0.20\n"
+        "      truth_mean: 0.10\n"
+        "      fab_mean: 0.90\n",
+        encoding="utf-8",
+    )
+
+
+def test_substitution_is_named_exactly(tmp_path: Path) -> None:
+    """
+    One requested model, one candidate profile that prefix-matches it, no
+    ambiguity: `profile_model_id` must be that profile's id EXACTLY, and must
+    not echo the requested model.
+    """
+    _write_profile(tmp_path, "borrowed-surface-v9")
+    router = ProfileRouter(str(tmp_path))
+    assert router.loaded_count == 1, router.profile_ids
+
+    app = FastAPI()
+    app.include_router(detect_router)
+    app.state.engine = DetectionEngine(router)
+    app.state.audit_writer = None
+    app.state.settings = None
+    client = TestClient(app)
+
+    requested = "borrowed-surface-v9-turbo-2026"
+    _http, body = _verify(client, requested)
+
+    assert body["model_id"] == requested
+    assert body["profile_model_id"] == "borrowed-surface-v9"
+    assert body["profile_model_id"] != requested
+
+
+def test_exact_request_is_not_reported_as_a_substitution(tmp_path: Path) -> None:
+    """
+    POSITIVE CONTROL for the test above. On an exact match the two must be
+    EQUAL, so `profile_model_id` cannot be passing by always differing from
+    `model_id` — which a naive implementation (e.g. reporting the filename) could.
+    """
+    _write_profile(tmp_path, "borrowed-surface-v9")
+    router = ProfileRouter(str(tmp_path))
+
+    app = FastAPI()
+    app.include_router(detect_router)
+    app.state.engine = DetectionEngine(router)
+    app.state.audit_writer = None
+    app.state.settings = None
+    client = TestClient(app)
+
+    _http, body = _verify(client, "borrowed-surface-v9")
+
+    assert body["model_id"] == "borrowed-surface-v9"
+    assert body["profile_model_id"] == "borrowed-surface-v9"
