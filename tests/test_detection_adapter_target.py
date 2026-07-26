@@ -211,6 +211,12 @@ MALFORMED = [
     ("http://", "scheme but no host"),
     ("//adapter:7070", "protocol-relative — no scheme to dial"),
     ("/v1/events/proxy", "a path, not a base URL"),
+    # Refused rather than silently truncated. Appending a path to a URL that
+    # already has a query or fragment cannot preserve both, and quietly dropping
+    # half of what an operator wrote is the same silence this whole change is
+    # about — they would see a working push to an address they did not specify.
+    ("http://adapter:7070?tenant=acme", "a query string cannot survive a path append"),
+    ("http://adapter:7070/#frag", "a fragment cannot survive a path append"),
 ]
 
 

@@ -57,7 +57,6 @@ None of these can cause the specific regression it guards (an env-supplied base
 concatenated raw), which is the property it is here for.
 """
 import ast
-import re
 from pathlib import Path
 
 import pytest
