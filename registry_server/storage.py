@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import urlencode
 
 import yaml
 
@@ -185,14 +185,33 @@ class ProfileStorage:
                 return None
 
         checksum = hashlib.sha256(content).hexdigest()
-        # Percent-encode the id INTO the URL path. `model_id` is a registry identifier, not a URL
-        # token: a `#` truncates the URL client-side before the request is ever sent, a `?` turns the
-        # rest into a query string, and a bare `%` can read as a malformed escape — so a raw
-        # interpolation advertises a download_url that cannot be fetched (Codex #13 LOW).
-        # `safe="/"` (urllib's default) is deliberate: the route is `/profiles/{model_id:path}/download`,
-        # so slashes must stay literal for a slash-bearing id to keep matching — encoding them would
-        # break the very contract this branch established.
-        download_url = f"{self.base_url}/profiles/{quote(model_id)}/download"
+        # Carry the id in the QUERY, not in the path. `model_id` is a REGISTRY identifier, not a URL
+        # token: it may contain `#` (truncates the URL client-side), `?` (starts a query string), `/`,
+        # `:` — and even a literal `%`. So it must be escaped into whichever slot carries it, and the
+        # PATH is the wrong slot: percent-escaping there is only correct if the path is unescaped
+        # EXACTLY ONCE between advertising the URL and the handler reading it, and the number of
+        # unescapes is not ours to control. Both counts exist in THIS stack (measured, not assumed):
+        #   * uvicorn — the shipping server — decodes ONCE (h11_impl.py: `unquote(raw_path)`), so
+        #     `/profiles/model%2523/download` reaches the handler as `model%23`: correct.
+        #   * starlette's TestClient decodes TWICE (testclient.py:262 `"path": unquote(path)` where
+        #     `path = httpx.URL.path` is ALREADY decoded), so the same URL arrives as `model#`: 404.
+        #     That is Codex's exact failing set — ids holding a VALID escape (`model%23`, `model%2e`,
+        #     `model%2f`, `model%3f`, `model%41`) break, while a bare `%` or an invalid escape
+        #     (`model%`, `model%zz`) survives, because `%25`->`%`->(nothing left to decode).
+        # Path-normalising reverse proxies/CDNs do the same second decode in production, and no
+        # path-based escaping can be safe under an unknown decode count: "try the raw value, then the
+        # decoded one" would silently serve `model#`'s profile for a request for `model%23`.
+        # A `?model_id=` query is decoded EXACTLY ONCE by both (TestClient forwards `query_string`
+        # verbatim; uvicorn never touches it) — so the advertised URL is decode-invariant: its path
+        # holds no escape at all. `urlencode` escapes `#`, `?`, `/`, `:`, `%`, `+` and space into the
+        # query, so nothing leaks into another URL component, and the id stays human-readable (the raw
+        # id is also still returned in `model_id` for display).
+        # The legacy `/profiles/{model_id:path}/download` route is KEPT as an alias — it resolves every
+        # id wherever the path is decoded exactly once, slash ids included; it is simply no longer what
+        # we advertise, because it cannot express a `%` id robustly (Codex #13 LOW).
+        download_url = (
+            f"{self.base_url}/profiles/download?{urlencode({'model_id': model_id})}"
+        )
 
         return {
             "model_id": model_id,

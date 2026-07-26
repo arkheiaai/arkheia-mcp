@@ -21,10 +21,16 @@ and that traversal ids are still rejected end-to-end (route 404 + write path Non
 RED on head (cebf77a): slash ids 404 on their advertised URL and, once cached,
 never load (`router.get` → None). GREEN after the `:path` route + single-component
 encode fix.
+
+Codex #13 LOW (second pass): the ADVERTISED shape is now
+`/profiles/download?model_id=...` — the id rides in the query, which every layer
+decodes exactly once, instead of in the path, which uvicorn decodes once and
+starlette's TestClient twice (so `model%23` arrived as `model#` → 404). This module
+therefore GETs `download_url` verbatim; slicing the path off it would drop the
+query and test a request the registry never advertised.
 """
 import hashlib
 from pathlib import Path
-from urllib.parse import urlparse
 
 import httpx
 import pytest
@@ -82,7 +88,7 @@ def registry_client_env(monkeypatch):
 
 def _route_pull_through_app(monkeypatch, registry_app):
     """Make every httpx.AsyncClient built by RegistryClient dispatch to the real
-    registry ASGI app (real `/profiles` list + real `:path` download route)."""
+    registry ASGI app (real `/profiles` list + real advertised download route)."""
     real_cls = httpx.AsyncClient
 
     def _factory(*args, **kwargs):
@@ -132,8 +138,13 @@ def test_e2e_every_advertised_url_downloads_and_caches_top_level(tmp_path, monke
         http_404, checksum_bad, not_top_level = [], [], []
         for p in profiles:
             mid = p["model_id"]
-            url_path = urlparse(p["download_url"]).path  # advertised, verbatim
-            resp = c.get(url_path, headers=_AUTH)
+            # GET the advertised URL **verbatim** — do NOT re-derive it. Taking
+            # only `urlparse(...).path` (as this test used to) silently DROPS the
+            # query, i.e. tests a request the registry never advertised. That
+            # "assert something adjacent to the real thing" move is exactly how the
+            # first pass at Codex #13 LOW passed while the advertised URL still
+            # 404'd for `%` ids.
+            resp = c.get(p["download_url"], headers=_AUTH)
             if resp.status_code != 200:
                 http_404.append((mid, resp.status_code))
                 continue
@@ -163,7 +174,7 @@ def test_e2e_every_advertised_url_downloads_and_caches_top_level(tmp_path, monke
 @pytest.mark.asyncio
 async def test_e2e_registry_pull_caches_and_router_loads_all(tmp_path, monkeypatch, registry_client_env):
     """FAITHFUL end-to-end through the REAL RegistryClient.pull(): real `/profiles`
-    list → real advertised `:path` download → validate → cache → router.reload →
+    list → real advertised download URL (query form) → validate → cache → router.reload →
     get. Every emitted id must end up loaded and resolvable. RED on head."""
     _route_pull_through_app(monkeypatch, registry_client_env)
     cache = tmp_path
@@ -226,18 +237,27 @@ async def test_e2e_download_and_apply_slash_id_loads(tmp_path, monkeypatch, regi
 # ---------------------------------------------------------------------------
 
 def test_e2e_download_route_rejects_traversal(registry_client_env):
-    """SECURITY: the `:path` download route never returns 200 for a traversal
-    vector — Starlette decodes `%2f`/`%2e` before the handler, and storage
-    containment (pre-filter + realpath) rejects whatever reaches it."""
+    """SECURITY: NEITHER download route returns 200 for a traversal vector — the
+    advertised query form (`?model_id=`) and the legacy `:path` alias both resolve
+    through the same `get_profile_bytes` chokepoint, so the pre-filter + realpath
+    containment rejects whatever reaches it."""
     with TestClient(app) as c:
         leaked = []
         for v in _TRAVERSAL_VECTORS:
-            resp = c.get(f"/profiles/{v}/download", headers=_AUTH)
-            if resp.status_code == 200 or "SUPER_SECRET" in resp.text or "root:" in resp.text:
-                leaked.append((v, resp.status_code))
+            for label, resp in (
+                ("path", c.get(f"/profiles/{v}/download", headers=_AUTH)),
+                ("query", c.get("/profiles/download", params={"model_id": v}, headers=_AUTH)),
+            ):
+                if resp.status_code == 200 or "SUPER_SECRET" in resp.text or "root:" in resp.text:
+                    leaked.append((label, v, resp.status_code))
         assert leaked == [], f"traversal vectors reached content (200/leak): {leaked}"
-        # control: a legitimate slash id DOES resolve on the same route
+        # controls: a legitimate slash id resolves on BOTH routes
         assert c.get("/profiles/deepseek-ai/DeepSeek-V3.1/download", headers=_AUTH).status_code == 200
+        assert c.get(
+            "/profiles/download",
+            params={"model_id": "deepseek-ai/DeepSeek-V3.1"},
+            headers=_AUTH,
+        ).status_code == 200
 
 
 def test_e2e_write_path_rejects_traversal(tmp_path):

@@ -16,9 +16,11 @@ Passing criteria:
 
 import os
 import hashlib
+import json
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 from fastapi.testclient import TestClient
@@ -378,37 +380,225 @@ def test_storage_all_emitted_ids_downloadable():
     )
 
 
-@pytest.mark.parametrize("mid,expect", [
-    ("model#frag",   "model%23frag"),   # `#` would truncate the URL client-side before the request
-    ("model?q=1",    "model%3Fq%3D1"),  # `?` would turn the remainder into a query string
-    ("model%2e",     "model%252e"),     # a bare `%` reads as a malformed escape
-    ("model with sp", "model%20with%20sp"),
-    ("deepseek-ai/DeepSeek-V3.1", "deepseek-ai/DeepSeek-V3.1"),  # `/` stays literal: route is {model_id:path}
-    ("qwen3:8b",     "qwen3%3A8b"),     # `:` encoded; harmless in a path, encoded by urllib default
-])
-def test_download_url_percent_encodes_the_id(tmp_path, mid, expect):
-    """The advertised download_url must be FETCHABLE for every id the registry can emit.
+# ---------------------------------------------------------------------------
+# ADVERTISED-URL ROUND-TRIP (Codex #13 LOW, second pass)
+#
+# The contract is NOT "the URL string looks right": it is **advertise a URL, GET
+# that exact URL, receive 200 and the right bytes**. The first attempt at this
+# LOW asserted the constructed string and ran `urlsplit` over it — it never
+# fetched — which is precisely why a bug about percent-encoding survived a fix
+# about percent-encoding: the assertion could not see the second decode happening
+# downstream of URL construction.
+#
+# The probe set is Codex's failing set plus the ids this branch exists to keep
+# working. `%`-bearing ids are the discriminator: an id holding a VALID escape
+# (`model%23`) breaks under a DOUBLE path decode (`%2523` -> `%23` -> `#`) while a
+# bare `%` or an invalid escape (`model%`, `model%zz`) survives, because there is
+# nothing decodable left after the first pass. `+` and a space are included
+# because the query slot treats `+` as a space unless it is escaped.
+ROUNDTRIP_PROBE_IDS = [
+    "plain-model",                  # control: no escaping needed at all
+    "model#frag",                   # `#` — would truncate the URL client-side
+    "model?q=1",                    # `?` — would start a query string
+    "model%",                       # trailing bare `%` (invalid escape)
+    "model%zz",                     # invalid escape
+    "model%23",                     # VALID escape -> 404 on the path form
+    "model%2e",
+    "model%2f",
+    "model%3f",
+    "model%41",
+    "deepseek-ai/DeepSeek-V3.1",    # `/` — the slash ids this branch fixed
+    "qwen3:8b",                     # `:` — ollama-style id
+    "model+plus",                   # `+` — a space in the query unless escaped
+    "model with space",
+]
 
-    Codex #13 LOW: the id was interpolated raw, so an id containing `#`, `?` or `%` advertised a URL
-    that cannot be requested — `#` truncates client-side, `?` becomes a query string, `%` reads as a
-    malformed escape. Slashes are deliberately NOT encoded: the route is
-    `/profiles/{model_id:path}/download`, so a literal `/` is what keeps slash-bearing registry ids
-    (deepseek-ai/DeepSeek-V3.1) resolving — encoding it would break the contract this branch added.
-    """
-    from urllib.parse import urlsplit
-    prof = tmp_path / "profiles"; prof.mkdir()
-    (prof / "p.yaml").write_text(
-        "metadata:\n  model_id: " + repr(mid) + "\n  version: '1'\n", encoding="utf-8")
+# Ids whose escaped PATH is decode-idempotent (they contain no literal `%`), so
+# the LEGACY path route resolves them under either one or two path decodes.
+_PATH_SAFE_PROBE_IDS = [m for m in ROUNDTRIP_PROBE_IDS if "%" not in m]
+
+
+def _probe_profile_body(mid: str) -> str:
+    """A spec-format profile whose emitted model_id is exactly `mid` (json.dumps
+    gives a correctly quoted YAML scalar for `#`, `%`, `?`, spaces)."""
+    return (
+        "metadata:\n"
+        f"  model_id: {json.dumps(mid)}\n"
+        "  version: '1'\n"
+        f"probe: {json.dumps(mid)}\n"
+    )
+
+
+@pytest.fixture()
+def probe_app(monkeypatch, tmp_path):
+    """Factory -> (profiles_root, {model_id: expected_bytes}) for a profiles root
+    holding one profile per requested id, with the registry app pointed at it."""
+    def _make(ids):
+        root = tmp_path / "profiles"
+        root.mkdir(exist_ok=True)
+        expected = {}
+        for i, mid in enumerate(ids):
+            body = _probe_profile_body(mid)
+            (root / f"probe{i}.yaml").write_text(body, encoding="utf-8")
+            expected[mid] = body.encode("utf-8")
+        monkeypatch.setenv("ARKHEIA_REGISTRY_KEYS", VALID_KEY)
+        monkeypatch.setenv("ARKHEIA_REGISTRY_PROFILE_DIR", str(root))
+        monkeypatch.setenv("ARKHEIA_REGISTRY_BASE_URL", "http://testserver")
+        return root, expected
+    return _make
+
+
+@pytest.mark.parametrize("mid", ROUNDTRIP_PROBE_IDS)
+def test_advertised_download_url_round_trips_through_the_app(probe_app, mid):
+    """CONTRACT (RED on HEAD for the 5 valid-escape ids): read the advertised
+    `download_url` out of `/profiles` and GET **that exact URL** through the app —
+    200 plus the profile's exact bytes and advertised checksum.
+
+    Runs over starlette's TestClient, which decodes the request PATH twice
+    (testclient.py:262 `unquote(httpx.URL.path)` — `URL.path` is already decoded).
+    On HEAD that made `model%23` & friends 404; the fix keeps the id out of the
+    path entirely, so the advertised URL is decode-invariant and this harness — the
+    one the repo actually runs — can finally express the contract."""
+    _root, expected = probe_app([mid])
+    with TestClient(app) as c:
+        listing = c.get("/profiles", headers={"Authorization": f"Bearer {VALID_KEY}"}).json()
+        rows = [p for p in listing["profiles"] if p["model_id"] == mid]
+        assert rows, f"{mid!r} not emitted in the listing: {listing}"
+        row = rows[0]
+        url = row["download_url"]
+        resp = c.get(url, headers={"Authorization": f"Bearer {VALID_KEY}"})
+        assert resp.status_code == 200, f"advertised {url!r} -> {resp.status_code}"
+        assert resp.content == expected[mid], f"advertised {url!r} served the wrong bytes"
+        assert hashlib.sha256(resp.content).hexdigest() == row["checksum"]
+
+
+@pytest.mark.parametrize("mid", ROUNDTRIP_PROBE_IDS)
+def test_advertised_download_url_path_is_decode_invariant(tmp_path, mid):
+    """STRUCTURAL guard for the same defect class: the advertised URL's PATH must
+    contain NO percent escape, so no layer can change the request by decoding it
+    (uvicorn decodes the path once, starlette's TestClient twice, a normalising
+    reverse proxy may too). The id rides in the query, which every layer in this
+    stack decodes exactly once — and it must parse back to the id verbatim."""
+    from urllib.parse import parse_qsl, unquote, urlsplit
+
+    prof = tmp_path / "profiles"
+    prof.mkdir()
+    (prof / "p.yaml").write_text(_probe_profile_body(mid), encoding="utf-8")
     st = ProfileStorage(profile_dir=prof, base_url="https://reg.example")
     metas = st.list_profiles()
     assert metas, "expected one profile"
     url = metas[0]["download_url"]
-    assert url == f"https://reg.example/profiles/{expect}/download", url
-    # And it must survive URL parsing intact — no fragment, no query, nothing lost.
+
     parts = urlsplit(url)
+    assert parts.path == "/profiles/download", parts.path
+    assert "%" not in parts.path, f"escape in the advertised path is not decode-safe: {url}"
+    assert unquote(parts.path) == parts.path, f"path decoding is not a no-op: {url}"
     assert parts.fragment == "", f"id leaked into the fragment: {url}"
-    assert parts.query == "", f"id leaked into the query string: {url}"
-    assert parts.path.endswith("/download"), parts.path
+    assert dict(parse_qsl(parts.query, keep_blank_values=True)) == {"model_id": mid}, url
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mid", ROUNDTRIP_PROBE_IDS)
+async def test_advertised_download_url_round_trips_single_decode_transport(probe_app, mid):
+    """DIFFERENTIAL: the same round-trip over a transport that decodes the path
+    ONCE (httpx's ASGITransport — the uvicorn-equivalent count) instead of twice.
+
+    Two transports with different decode counts is what makes this suite an honest
+    oracle: a fix that only satisfies one of them is a fix that depends on a decode
+    count we do not control. Both must pass."""
+    root, expected = probe_app([mid])
+    # ASGITransport does not run lifespan; set state the way lifespan would.
+    app.state.storage = ProfileStorage(profile_dir=str(root), base_url="http://testserver")
+    metas = {m["model_id"]: m for m in app.state.storage.list_profiles()}
+    url = metas[mid]["download_url"]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as c:
+        resp = await c.get(url, headers={"Authorization": f"Bearer {VALID_KEY}"})
+    assert resp.status_code == 200, f"advertised {url!r} -> {resp.status_code} (single-decode)"
+    assert resp.content == expected[mid]
+
+
+def test_advertised_download_url_round_trips_over_real_uvicorn(probe_app, monkeypatch):
+    """HIGHEST-FIDELITY oracle: every probe id round-trips over a REAL uvicorn
+    server on a real socket — the server this service actually ships with — with
+    ONE server for the whole probe set.
+
+    This is the check that settles which layer was at fault: HEAD's path-form URL
+    passes here (uvicorn decodes the path once) and fails under TestClient (twice).
+    The advertised query form passes under both."""
+    uvicorn = pytest.importorskip("uvicorn")
+    import socket
+    import threading
+    import time
+
+    root, expected = probe_app(ROUNDTRIP_PROBE_IDS)
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    monkeypatch.setenv("ARKHEIA_REGISTRY_BASE_URL", f"http://127.0.0.1:{port}")
+
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 20
+        while not server.started and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert server.started, "uvicorn did not start"
+
+        auth = {"Authorization": f"Bearer {VALID_KEY}"}
+        with httpx.Client(timeout=10.0) as c:
+            listing = c.get(f"http://127.0.0.1:{port}/profiles", headers=auth).json()
+            rows = {p["model_id"]: p for p in listing["profiles"]}
+            missing = [m for m in ROUNDTRIP_PROBE_IDS if m not in rows]
+            assert missing == [], f"ids not emitted: {missing}"
+            bad = []
+            for mid in ROUNDTRIP_PROBE_IDS:
+                url = rows[mid]["download_url"]
+                resp = c.get(url, headers=auth)
+                if resp.status_code != 200 or resp.content != expected[mid]:
+                    bad.append((mid, url, resp.status_code))
+        assert bad == [], f"advertised URLs that did NOT serve their bytes: {bad}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+@pytest.mark.parametrize("mid", _PATH_SAFE_PROBE_IDS)
+def test_legacy_path_download_route_still_resolves(probe_app, mid):
+    """DON'T BREAK WHAT WORKS: the legacy `/profiles/{model_id:path}/download`
+    alias still serves every id whose escaped path is decode-idempotent — the
+    slash (`deepseek-ai/DeepSeek-V3.1`) and colon (`qwen3:8b`) ids this branch
+    exists to fix included."""
+    from urllib.parse import quote
+
+    _root, expected = probe_app([mid])
+    with TestClient(app) as c:
+        resp = c.get(
+            f"/profiles/{quote(mid)}/download",
+            headers={"Authorization": f"Bearer {VALID_KEY}"},
+        )
+    assert resp.status_code == 200, f"legacy path route regressed for {mid!r}"
+    assert resp.content == expected[mid]
+
+
+@pytest.mark.parametrize("vector", ALL_TRAVERSAL_VECTORS)
+def test_download_query_route_rejects_traversal(client_ext_secret, vector):
+    """SECURITY parity for the NEW surface: the query-form download route routes
+    through the same `get_profile_bytes` chokepoint, so no traversal / absolute /
+    encoded vector ever returns 200 or echoes the out-of-root secret."""
+    resp = client_ext_secret.get(
+        "/profiles/download",
+        params={"model_id": vector},
+        headers={"Authorization": f"Bearer {VALID_KEY}"},
+    )
+    assert resp.status_code != 200, f"query route served {vector!r}"
+    assert "SUPER_SECRET" not in resp.text
+    assert "root:" not in resp.text
 
 
 @pytest.mark.parametrize(
