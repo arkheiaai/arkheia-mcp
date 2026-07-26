@@ -1,0 +1,47 @@
+{
+  "_what_this_is": "The REQUIRED status contexts on this repo's default branch, as read back from the GitHub branch-protection API. Committed as a fixture because the floor tier is stdlib-only and offline: it cannot call the API. Consumed by tests/test_ci_enforcement_floor.py (INV-3, INV-5).",
+  "_why_it_exists": "INV-3 used to credit ANY workflow that triggers on master. That conflates 'a gate that CAN run' with 'a gate that IS required' — the exact distinction PR #15 argued for in prose and then failed to encode. Re-adding --ignore=tests/test_smoke_e2e.py to the REQUIRED unit-tests job still passed INV-3, because the non-required smoke-test.yml got the credit. Only a context in this file can make a test file 'covered'.",
+  "_staleness_contract": "This file is a CLAIM about a mutable remote setting. It goes out of date silently, so it carries its own expiry: observed_at + max_age_days. Past that, INV-3 and INV-5 fail as NOT-OBSERVED (never pass) until someone re-runs refresh_command and updates observed_at. A stale fixture must not be able to certify anything.",
+  "repo": "arkheiaai/arkheia-mcp",
+  "branch": "master",
+  "observed_at": "2026-07-26",
+  "max_age_days": 45,
+  "refresh_command": "gh api repos/arkheiaai/arkheia-mcp/branches/master/protection --jq '{strict: .required_status_checks.strict, checks: .required_status_checks.checks, enforce_admins: .enforce_admins.enabled}'",
+  "github_actions_app_id": 15368,
+  "strict": true,
+  "enforce_admins": false,
+  "required_checks": [
+    { "context": "floor-invariants", "app_id": 15368 },
+    { "context": "unit-tests", "app_id": 15368 },
+    { "context": "CodeQL Analysis (python)", "app_id": 15368 },
+    { "context": "CodeQL Analysis (javascript)", "app_id": 15368 },
+    { "context": "Aikido Security: check code", "app_id": 898896 }
+  ],
+  "_not_required_but_triggers_on_master": {
+    "smoke-test.yml / MCP server end-to-end smoke test": "runs pytest tests/test_smoke_e2e.py and DOES trigger on push+pull_request to master since 6c3ec67, but it is NOT in required_checks. It therefore credits NOTHING in INV-3. This is the entry that made Codex's probe pass.",
+    "security_scan.yml / bandit, dependency-audit, secrets-check": "also triggers on master, also not required, also credits nothing."
+  },
+  "_caveats_not_waived": {
+    "enforce_admins_false": "An admin can push straight to master and bypass all five contexts. INV-3/INV-5 certify what gates an ORDINARY PR; they do not certify that master cannot be written past.",
+    "no_required_reviews": "required_pull_request_reviews is null on master. Status checks are the only gate.",
+    "app_id_not_verified_per_run": "app_id is recorded from the protection payload so INV-5 can tell a GitHub-Actions context (must be produced by a job in this repo) from an external app's context (Aikido, app_id 898896 — produced outside the workflow tree and therefore exempt). INV-5 does not verify that the external app actually posts."
+  },
+  "_raw_api_response_2026_07_26": {
+    "strict": true,
+    "contexts": [
+      "floor-invariants",
+      "unit-tests",
+      "CodeQL Analysis (python)",
+      "CodeQL Analysis (javascript)",
+      "Aikido Security: check code"
+    ],
+    "checks": [
+      { "app_id": 15368, "context": "floor-invariants" },
+      { "app_id": 15368, "context": "unit-tests" },
+      { "app_id": 15368, "context": "CodeQL Analysis (python)" },
+      { "app_id": 15368, "context": "CodeQL Analysis (javascript)" },
+      { "app_id": 898896, "context": "Aikido Security: check code" }
+    ],
+    "enforce_admins": false
+  }
+}
