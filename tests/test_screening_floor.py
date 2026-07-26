@@ -92,9 +92,15 @@ SCREENED_TEXT_KWARG = "response"
 PROD_DIRS = ("mcp_server", "proxy", "registry_server")
 PROD_ROOT_FILES = ("server.py",)
 
-# Floor: the four shipped provider wrappers. A lower number means a wrapper was
-# deleted or stopped calling its provider; the check must not silently shrink.
-MIN_SCREENED_WRAPPERS = 4
+# The declared inference surface: every function that may call a provider.
+# Asserted as SET EQUALITY, so this fails in both directions — a wrapper that
+# stops calling its provider AND a new, undeclared inference path both go red.
+EXPECTED_PROVIDER_WRAPPERS = {
+    "run_grok",
+    "run_gemini",
+    "run_ollama",
+    "run_together",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -325,22 +331,26 @@ def test_population_is_non_zero_and_named(report: dict) -> None:
         "every wrapper was deleted. A screening check with nothing to screen is "
         "not evidence of screening."
     )
-    assert len(report["screened"]) >= MIN_SCREENED_WRAPPERS, (
-        f"INV-1 FAILED: expected at least {MIN_SCREENED_WRAPPERS} screened "
-        f"provider wrappers, found {len(report['screened'])}: "
-        f"{sorted(report['screened'])}. Provider call sites seen: {sites}. "
+    # Set EQUALITY, not a lower bound. A `>= 4` bound fails only when the
+    # population shrinks; the clause is that a counter must fail in BOTH
+    # directions. Equality also means a new provider wrapper cannot land without
+    # a human editing this contract — which is the point, because a wrapper
+    # nobody declared is exactly the one likely to be unscreened.
+    assert set(sites) == EXPECTED_PROVIDER_WRAPPERS, (
+        "INV-1 FAILED: the set of functions that call a provider changed.\n"
+        f"  expected: {sorted(EXPECTED_PROVIDER_WRAPPERS)}\n"
+        f"  found:    {sorted(sites)}\n"
+        f"  missing:  {sorted(EXPECTED_PROVIDER_WRAPPERS - set(sites))}\n"
+        f"  new:      {sorted(set(sites) - EXPECTED_PROVIDER_WRAPPERS)}\n"
         "A wrapper that stopped calling its provider, or a provider import that "
-        "was renamed, shrinks this population silently — which is why the bound "
-        "is asserted in both directions."
+        "was rebound, shrinks this population silently. A NEW entry means a new "
+        "inference path — declare it here, deliberately."
     )
-    # Positive control: the four shipped wrappers are individually present, so a
-    # population that merely reaches the count with different members still fails.
-    for name in ("run_grok", "run_gemini", "run_ollama", "run_together"):
-        assert name in sites, (
-            f"INV-1 FAILED: {name} no longer contains a provider call. If the "
-            "tool was intentionally removed, remove it here too — do not let the "
-            "population shrink unobserved."
-        )
+    assert set(report["screened"]) == EXPECTED_PROVIDER_WRAPPERS, (
+        "INV-1 FAILED: a function calls a provider but is not in the screened "
+        f"set. screened = {sorted(report['screened'])}, "
+        f"call sites = {sorted(sites)}."
+    )
 
 
 def test_every_provider_wrapper_screens_mandatorily(report: dict) -> None:
