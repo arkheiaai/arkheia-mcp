@@ -311,7 +311,8 @@ File: `C:\Users\<user>\.claude\settings.json`
   "mcpServers": {
     "arkheia": {
       "command": "python",
-      "args": ["C:/arkheia-mcp/server.py"],
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "C:/arkheia-mcp",
       "env": {
         "ARKHEIA_PROXY_URL": "http://localhost:8099"
       }
@@ -319,6 +320,13 @@ File: `C:\Users\<user>\.claude\settings.json`
   }
 }
 ```
+
+> **Changed 2026-07-26.** This previously read `"args": ["C:/arkheia-mcp/server.py"]`.
+> Repo-root `server.py` was a second, independent MCP server that bypassed the
+> tool-registry policy gate and posted the wrong field name to `/detect/verify`
+> (`model` instead of the required `model_id`), so every verify call failed. It is
+> now a thin re-export of `mcp_server.server`, which means the old config still
+> works — but use `-m mcp_server.server` so there is one documented entry point.
 
 Note: use **forward slashes** in all paths — Windows bash converts backslashes.
 
