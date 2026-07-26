@@ -206,11 +206,16 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
         except Exception as e:
             logger.error("Audit write failed (detection result unaffected): %s", e)
 
-    # Push to Arkheia Governance Detection Adapter (fail-open, fire-and-forget)
+    # Push to Arkheia Governance Detection Adapter (fail-open, fire-and-forget).
+    # `audit` is passed so the OUTCOME of the push leaves its own hash-chained
+    # receipt: the detection receipt above records what we decided, this records
+    # whether the governance plane was actually told. They are different facts and
+    # a rail that only records the first cannot tell "delivered" from "dark".
     schedule_push(
         tenant_id=_ADAPTER_TENANT_ID,
         source_id=req.model_id,
         event_type="mcp_detection",
+        audit=audit,
         payload={
             "detection_id": response.detection_id,
             "model_id": response.model_id,
@@ -222,7 +227,13 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
             "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
             "action_taken": action,
         },
-        risk_level=response.risk_level if response.risk_level in ("LOW", "MEDIUM", "HIGH", "CRITICAL") else "LOW",
+        # Pass the RAW band. This used to coerce anything unrecognised (i.e.
+        # UNKNOWN -- engine unavailable, engine error, no profile) to "LOW",
+        # which published an evidence-limited non-verdict to the governance plane
+        # as a clean LOW. detection_adapter.build_proxy_event now carries UNKNOWN
+        # through as classification=UNCERTAIN plus context.risk_level_raw, so a
+        # couldn't-assess never reads as an all-clear.
+        risk_level=response.risk_level,
     )
 
     # Surface the governance decision to the caller: policy `action` (mirrors action_taken in
