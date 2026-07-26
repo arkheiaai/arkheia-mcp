@@ -172,6 +172,43 @@ def test_secret_in_session_id_never_reaches_disk_via_the_endpoint(harness):
     )
 
 
+def test_secret_inside_a_LONG_caller_field_is_still_redacted(harness):
+    """
+    Length must not be an escape hatch.
+
+    session_id is an arbitrary caller string, so a credential can arrive
+    embedded in a long one (a pasted session label, a wrapped command). Added
+    because a mutant that skipped redaction for strings over 200 chars SURVIVED
+    this file's original corpus — every entry happened to be short, so the tests
+    agreed with a broken implementation. The floor tier killed that mutant (its
+    corpus holds a 292-char PAT); this closes it at the endpoint tier too.
+    """
+    secret = SECRETS["anthropic"]
+    long_field = (
+        "session-label " + "context padding that a caller might paste. " * 12
+        + secret + " trailing context that must survive."
+    )
+    assert len(long_field) > 500, "the long-field case is not actually long"
+
+    content = harness.post_all([{
+        "prompt": "p", "response": "a response", "model_id": SENTINEL_MODEL,
+        "session_id": long_field,
+    }])
+    records = _lines(content)
+
+    assert len(records) == 1, "POSITIVE CONTROL FAILED: no record on disk."
+    assert "trailing context that must survive." in records[0]["session_id"], (
+        "POSITIVE CONTROL FAILED: the surrounding audit content was destroyed, not "
+        "just the credential — over-redaction is also a defect."
+    )
+    assert REDACTION_MARKER in records[0]["session_id"], (
+        "POSITIVE CONTROL FAILED: nothing was redacted in the field under test."
+    )
+    assert _body(secret) not in content, (
+        "a credential embedded in a LONG caller field reached disk unredacted."
+    )
+
+
 def test_secret_in_model_id_never_reaches_disk_via_the_endpoint(harness):
     """model_id is caller-supplied and is stored verbatim — so it is a leak surface too."""
     secret = SECRETS["anthropic"]
