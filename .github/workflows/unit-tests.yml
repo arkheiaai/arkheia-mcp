@@ -42,14 +42,23 @@ jobs:
       - name: Run hermetic unit suites
         env:
           # Hermetic, non-secret test value (mirrors smoke-test.yml). No live
-          # secrets are used: any suite that needs them self-skips or is gated
-          # separately (test_smoke_e2e is covered by smoke-test.yml).
+          # secrets are used: any suite that needs them self-skips.
           JWT_SECRET: "ci-test-secret-not-for-production-use-minimum-32chars!!"
         run: |
+          # tests/test_smoke_e2e.py is NO LONGER --ignore'd. It was doubly
+          # orphaned: --ignore'd here AND its own workflow (smoke-test.yml) only
+          # triggered on `main`, a branch that does not exist -- so NO required
+          # status context could ever collect it. Its first two stages are fully
+          # hermetic (real `python -m mcp_server.server` subprocess over stdio,
+          # no secrets, no live services, 2.1s for 5 tests) and are the only
+          # end-to-end proof that the shipped MCP server starts, completes the
+          # MCP initialize handshake, and advertises all 9 documented tools.
+          # Stages 3 and 4 self-skip (hosted API key / local proxy on :8098).
+          # `-rs` makes every skip reason appear in the summary of this REQUIRED
+          # job, so a not-observed stage cannot hide. See PR body items 3 and 4.
           pytest \
             proxy/tests \
             mcp_server/tests \
             registry_server/tests \
             tests \
-            --ignore=tests/test_smoke_e2e.py \
-            -v --timeout=120
+            -v -rs --timeout=120
