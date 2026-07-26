@@ -146,6 +146,19 @@ class ProfileRouter:
             if data:
                 model_id = self._extract_model_id(data, f.name)
                 if model_id:
+                    # A duplicate declared model id is a SILENT DISCARD: the dict is keyed by
+                    # the declared id, so whichever file the glob reaches last wins and the
+                    # other file's characterisation is dead weight that looks live in the
+                    # repo. Found 2026-07-26: profiles/gpt-5.2-codex.yaml declares
+                    # model: "gpt-5-codex", colliding with profiles/gpt-5-codex.yaml, so its
+                    # v4.0 content never loads and _by_model_id("gpt-5.2-codex") returns None.
+                    if model_id in profiles:
+                        logger.error(
+                            "Profile %s declares model id %r which is ALREADY provided by "
+                            "another profile file — one of them is being silently discarded. "
+                            "Detection for %r is running against whichever file loaded last.",
+                            f.name, model_id, model_id,
+                        )
                     profiles[model_id] = data
 
         # Load encrypted .yaml.enc profiles (if decryption key available)
