@@ -414,6 +414,101 @@ def test_every_packed_first_party_source_compiles(artifact: Artifact):
 
 
 # ---------------------------------------------------------------------------
+# THE REGISTRY MANIFEST DESCRIBES THE ARTIFACT, SO CHECK IT AGAINST THE ARTIFACT
+# ---------------------------------------------------------------------------
+
+def test_the_mcp_registry_manifest_names_the_artifact_that_was_packed(
+    artifact: Artifact,
+):
+    """
+    `server.json` is what the MCP registry publishes: it tells every MCP client
+    which npm package and which VERSION to install. It is a claim ABOUT the
+    artifact, and until now nothing compared the two — so it drifted, and the
+    thing a client installed was not the thing this repo builds.
+
+    Found on master while sweeping for siblings: `server.json` advertised
+    `@arkheia/mcp-server` at `0.1.1` while `package.json` was at `1.3.0`. A client
+    following the registry entry would install a version predating everything in
+    this repo, including the packaging fix — the defect this floor exists for,
+    reached by a different route.
+
+    The comparison is anchored on the TARBALL's own `package.json`, not the repo's,
+    for the same reason as everything else here: the tarball is the artifact.
+    """
+    manifests = _registry_manifests()
+    assert manifests, (
+        "no MCP registry manifest found anywhere in the repo (searched for "
+        "`server.json` files carrying a modelcontextprotocol `$schema`). If the "
+        "registry entry was deliberately removed, remove this check in the same "
+        "change rather than leaving a floor that examines nothing."
+    )
+
+    packed_manifest = json.loads(
+        (artifact.package / "package.json").read_text(encoding="utf-8")
+    )
+    packed_name = packed_manifest.get("name")
+    packed_version = packed_manifest.get("version")
+    assert packed_name and packed_version, (
+        f"the packed package.json has no name/version "
+        f"({packed_name!r}/{packed_version!r}), so there is nothing to compare"
+    )
+
+    unmatched: list[str] = []
+    drifted: list[str] = []
+    for rel, registry in manifests:
+        npm_entries = [
+            p
+            for p in registry.get("packages", [])
+            if p.get("registryType") == "npm" and p.get("identifier") == packed_name
+        ]
+        if not npm_entries:
+            listed = [p.get("identifier") for p in registry.get("packages", [])]
+            unmatched.append(f"{rel}: declares {listed}, none of them {packed_name!r}")
+            continue
+        for entry in npm_entries:
+            if entry.get("version") != packed_version:
+                drifted.append(
+                    f"{rel}: advertises {packed_name}@{entry.get('version')!r}"
+                )
+
+    assert not unmatched, (
+        "an MCP registry manifest points clients at a package this repo does not "
+        "build:\n" + "\n".join(f"    {u}" for u in unmatched)
+    )
+    assert not drifted, (
+        f"the packed artifact is {packed_name}@{packed_version}, but:\n"
+        + "\n".join(f"    {d}" for d in drifted)
+        + "\nAn MCP client follows the registry entry, so this drift installs a "
+        "different artifact than the one this repo's checks were run against. Bump "
+        "both in the same change."
+    )
+
+
+def _registry_manifests() -> list[tuple[str, dict]]:
+    """
+    Every MCP registry manifest in the repo, discovered rather than named.
+
+    Selected by `$schema` rather than by filename alone, so an unrelated
+    `server.json` is not mistaken for a registry entry and a renamed one is not
+    silently dropped from the check.
+    """
+    found: list[tuple[str, dict]] = []
+    for path in sorted(_ROOT.rglob("server.json")):
+        rel = path.relative_to(_ROOT)
+        if any(part in {".git", "node_modules"} for part in rel.parts):
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            pytest.fail(f"{rel} is not readable JSON ({exc}); it cannot be checked")
+        if not isinstance(data, dict):
+            continue
+        if "modelcontextprotocol" in str(data.get("$schema", "")):
+            found.append((rel.as_posix(), data))
+    return found
+
+
+# ---------------------------------------------------------------------------
 # PROVE THE CHECK CAN FAIL (DONE.md v1.22) — two controls, one of them a real pack
 # ---------------------------------------------------------------------------
 
