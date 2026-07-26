@@ -119,9 +119,10 @@ _ALLOWED_SCHEMES = ("http", "https")
 
 # Env var names, named once so error text can point the operator at the setting
 # to change instead of at a stack frame.
+# Only the URL's name is needed as a constant: it is interpolated into operator-
+# facing error text. The secret's and key id's names are deliberately NOT held in
+# constants that get read into log messages -- see `validate_config_or_raise`.
 ENV_URL = "DETECTION_ADAPTER_URL"
-ENV_SECRET = "DETECTION_ADAPTER_HMAC_SECRET"
-ENV_KEY_ID = "DETECTION_ADAPTER_KEY_ID"
 
 
 class AdapterConfigError(ValueError):
@@ -242,13 +243,26 @@ def validate_config_or_raise() -> None:
         except AdapterConfigError as exc:
             raise RuntimeError(f"Cannot start: {exc}") from None
 
-    if url_set != secret_set:
-        missing = ENV_SECRET if url_set else ENV_URL
+    # Two fully-literal branches rather than one message parameterised by which
+    # setting is missing. The parameterised form read a constant whose NAME matches
+    # `*SECRET*`, and CodeQL's `py/clear-text-logging-sensitive-data` taints any
+    # such read as sensitive data reaching a log sink — 2 HIGH alerts, on a line
+    # that only ever logged an env var's NAME. The heuristic is right to be blunt
+    # about that pattern, and splitting the branches removes the flow instead of
+    # suppressing the finding. It also lets each message say the more useful thing.
+    if url_set and not secret_set:
         logger.warning(
-            "Governance detection push is HALF-CONFIGURED: %s is missing, so no "
-            "event will be pushed (nothing unsigned is ever sent). Set %s to arm "
-            "the rail, or clear both to disable it deliberately.",
-            missing, missing,
+            "Governance detection push is HALF-CONFIGURED: DETECTION_ADAPTER_URL is "
+            "set but no signing secret is, so NOTHING will be pushed (there is "
+            "deliberately no unsigned path). Set DETECTION_ADAPTER_HMAC_SECRET to "
+            "arm the rail, or clear both to disable it deliberately."
+        )
+    elif secret_set and not url_set:
+        logger.warning(
+            "Governance detection push is HALF-CONFIGURED: a signing secret is set "
+            "but DETECTION_ADAPTER_URL is not, so NOTHING will be pushed. Set "
+            "DETECTION_ADAPTER_URL to arm the rail, or clear both to disable it "
+            "deliberately."
         )
 
 
