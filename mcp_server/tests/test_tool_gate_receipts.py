@@ -293,3 +293,62 @@ class TestTheRecordIsOnTheSharedRail:
             f"what must be at least as protected as the thing it describes; under the "
             f"npm install the package tree sits in a shared node_modules."
         )
+
+
+# ---------------------------------------------------------------------------
+# 4 — "enqueued" is not "landed"
+# ---------------------------------------------------------------------------
+
+class TestEnqueuedIsNotLanded:
+    """``AuditWriter._writer_loop`` catches every exception around its own write and
+    then marks the queue item DONE, so a drained queue proves the record was *taken*,
+    not that it was *stored*. ``receipts.emit`` therefore reads the row back by id
+    before reporting success — and that read-back is a control, so it needs a test in
+    which the write genuinely fails.
+
+    Added after the mutation run: deleting the read-back SURVIVED the whole suite,
+    because every other test here writes to a healthy path where enqueue and land are
+    the same event. The suite could not tell the two apart, which is precisely the
+    thing the read-back exists to tell apart.
+    """
+
+    @pytest.mark.skipif(
+        hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
+        reason="running as root ignores file permissions, so the induced failure "
+               "would not occur and the test would pass without observing anything",
+    )
+    async def test_emit_reports_FALSE_when_the_row_does_not_land(self, tmp_path):
+        """A REAL OS failure, not a patched exception: an unwritable log file makes
+        the writer loop's own ``open(..., 'a')`` raise PermissionError, which the loop
+        swallows by design."""
+        log = tmp_path / "readonly.jsonl"
+        log.write_text("")
+        log.chmod(0o400)
+
+        record = receipts.build_record(
+            receipt_id="abc123", tool="exfiltrate", decision=receipts.DECISION_DENIED,
+            event_type=GATE_EVENT_TYPE,
+        )
+        ok = await receipts.emit(log, record)
+
+        assert ok is False, (
+            "emit() reported success for a record that never reached disk. The queue "
+            "drained, so 'enqueued' looked like 'written' — writing a record is not "
+            "the same as the record landing."
+        )
+        assert receipts.find_receipt(log, "abc123") is None  # and it really is absent
+
+    @pytest.mark.skipif(
+        hasattr(__import__("os"), "geteuid") and __import__("os").geteuid() == 0,
+        reason="running as root ignores file permissions",
+    )
+    async def test_emit_reports_TRUE_on_a_healthy_path(self, tmp_path):
+        """The passing control row for the case above (DONE.md v1.15 clause 5): a pair
+        of assertions that only ever expect failure cannot discriminate."""
+        log = tmp_path / "healthy.jsonl"
+        record = receipts.build_record(
+            receipt_id="def456", tool="run_grok", decision=receipts.DECISION_ALLOWED,
+            event_type=GATE_EVENT_TYPE,
+        )
+        assert await receipts.emit(log, record) is True
+        assert receipts.find_receipt(log, "def456")["tool"] == "run_grok"
