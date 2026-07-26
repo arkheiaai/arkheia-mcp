@@ -24,6 +24,16 @@ Compounding Floor: defect -> invariant -> deterministic check.
        broad `except` swallowed that at debug level, so `schedule_push` did
        nothing at all from sync code while looking healthy.
 
+  F-5  The target is COMPOSED IN ONE PLACE and the base URL is never concatenated
+       raw. `f"{url}{ADAPTER_PATH}"` against
+       `DETECTION_ADAPTER_URL=http://adapter:7070/` posts to `//v1/events/proxy`,
+       which the receiver's router 404s with an EMPTY BODY on a fire-and-forget
+       path. One character in one env var, and the rail this branch was opened to
+       repair is dark again.
+
+  F-6  Every failure log names the TARGET. A 404 with no body and no address is
+       the least diagnosable line a governance rail can emit.
+
 EVERY CHECK IS STRUCTURAL (AST), NOT TEXTUAL. The first draft of F-1 was a
 substring search and it fired on this module's own docstring, which QUOTES the
 defective construction. A floor that cannot tell code from prose cries wolf, and
@@ -172,19 +182,29 @@ def test_the_failure_marker_is_stable_and_actually_used(tree):
     assert len(loads) >= 4, f"marker defined but barely used ({len(loads)} loads)"
 
 
-def test_both_failure_branches_of_push_event_log_at_error(tree):
+def test_every_failure_branch_of_push_event_logs_at_error(tree):
     """
-    Specifically the two that were debug: the non-2xx branch and the transport
-    exception handler.
+    Originally: the two branches that were `debug` — the non-2xx branch and the
+    transport handler. Rewritten to DISCOVER handlers rather than pin their count.
+
+    The count-of-one form failed the moment a second, legitimate handler was added
+    (the malformed-URL guard), and a floor whose only failure mode is "someone
+    added a branch" teaches the next author to relax it. Discovering every handler
+    is strictly stronger: a third one, added a year from now, is covered without
+    anyone remembering this file exists.
     """
     fn = _func(tree, "push_event")
     assert fn is not None, "push_event is gone — measured nothing"
 
     handlers = [n for n in ast.walk(fn) if isinstance(n, ast.ExceptHandler)]
-    assert len(handlers) == 1, f"expected one transport except handler, found {len(handlers)}"
-    assert [c for c in _calls(handlers[0]) if _chain(c.func) == "logger.error"], (
-        "the transport failure handler does not log at ERROR"
+    assert len(handlers) >= 2, (
+        f"expected at least the transport and config handlers, found {len(handlers)}"
     )
+    for h in handlers:
+        assert [c for c in _calls(h) if _chain(c.func) == "logger.error"], (
+            f"the except handler at line {h.lineno} swallows its failure without "
+            f"an ERROR — that is how a rail goes dark"
+        )
 
     # the >=400 branch
     compares = [
@@ -262,6 +282,156 @@ def test_no_deprecated_get_event_loop(tree):
 
     ok = [c for c in _calls(tree) if _chain(c.func) == "asyncio.get_running_loop"]
     assert len(ok) == 1, "get_running_loop() not found — the gate measured nothing"
+
+
+# ── F-5: one composer, and no raw concatenation of the base URL ──────────────
+
+def test_the_post_target_is_a_name_not_an_inline_concatenation(tree):
+    """
+    The POST target must be a plain NAME (`target`), computed once by the
+    normalising composer — never an f-string or `+` assembled at the call site.
+
+    Structural on purpose: this is the exact shape of the defect. `f"{url}{ADAPTER_PATH}"`
+    reads as obviously correct and is wrong for every base URL a human would
+    naturally write. Requiring a pre-computed name means the composition cannot be
+    re-inlined without failing here.
+    """
+    posts = [c for c in _calls(tree) if _chain(c.func).endswith(".post")]
+    assert len(posts) == 1, f"expected exactly one outbound POST, found {len(posts)}"
+    target = posts[0].args[0] if posts[0].args else None
+    assert isinstance(target, ast.Name), (
+        "the POST target is composed inline; it must come from the single "
+        f"normalising composer, got {type(target).__name__}"
+    )
+
+
+def test_the_base_url_is_never_joined_to_a_path_by_raw_concatenation(tree):
+    """
+    Auto-discovering: ANY f-string or `+` in this module that puts a slot directly
+    before a literal beginning with "/" is the defect's shape, wherever it appears.
+    The one legitimate join lives in `adapter_target`, which normalises first.
+    """
+    composer = _func(tree, "adapter_target")
+    assert composer is not None, "adapter_target is gone — measured nothing"
+    exempt = {id(n) for n in ast.walk(composer)}
+
+    offenders = []
+    for node in ast.walk(tree):
+        if id(node) in exempt:
+            continue
+        if isinstance(node, ast.JoinedStr):
+            parts = node.values
+            for a, b in zip(parts, parts[1:]):
+                if (
+                    isinstance(a, ast.FormattedValue)
+                    and isinstance(b, ast.Constant)
+                    and isinstance(b.value, str)
+                    and b.value.startswith("/")
+                ):
+                    offenders.append((node.lineno, ast.unparse(node)))
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            right = node.right
+            if isinstance(right, ast.Constant) and isinstance(right.value, str) \
+                    and right.value.startswith("/"):
+                offenders.append((node.lineno, ast.unparse(node)))
+
+    assert offenders == [], (
+        f"raw base-URL/path concatenation outside adapter_target: {offenders}"
+    )
+
+    # Positive control: the scanner CAN find this shape — prove it against the
+    # pre-fix construction rather than trusting an empty result (DONE.md: a check
+    # that passes by finding nothing must prove it can find something).
+    probe = ast.parse('x = f"{url}/v1/events/proxy"')
+    found = [
+        n for n in ast.walk(probe)
+        if isinstance(n, ast.JoinedStr)
+        for a, b in zip(n.values, n.values[1:])
+        if isinstance(a, ast.FormattedValue) and isinstance(b, ast.Constant)
+        and isinstance(b.value, str) and b.value.startswith("/")
+    ]
+    assert found, "the scanner cannot detect the very defect it guards — it is decoration"
+
+
+def test_a_malformed_url_is_its_own_outcome_and_not_folded_into_skipped(tree):
+    """
+    `SKIPPED` is silent by design ("nobody asked for this rail"). Filing a typo
+    under it would be fail-SILENT wearing a fail-open badge, so the misconfigured
+    state must exist as a distinct member.
+    """
+    members = {
+        t.id
+        for n in ast.walk(tree)
+        if isinstance(n, ast.ClassDef) and n.name == "PushOutcome"
+        for s in n.body
+        if isinstance(s, ast.Assign)
+        for t in s.targets
+        if isinstance(t, ast.Name)
+    }
+    assert {"SKIPPED", "MISCONFIGURED", "DELIVERED", "REJECTED", "FAILED"} <= members, (
+        f"PushOutcome lost a state: {sorted(members)}"
+    )
+
+
+def test_the_startup_guard_exists_and_raises(tree):
+    """
+    Invalid config must be refusable at BOOT. A guard that only warns would leave
+    the operator to discover the fault one lost push at a time.
+    """
+    fn = _func(tree, "validate_config_or_raise")
+    assert fn is not None, "the startup guard is gone — measured nothing"
+    raises = [
+        n for n in ast.walk(fn)
+        if isinstance(n, ast.Raise) and "RuntimeError" in ast.dump(n)
+    ]
+    assert raises, "validate_config_or_raise never raises — it cannot fail a boot"
+
+
+# ── F-6: every failure log names the target ──────────────────────────────────
+
+def test_every_failure_log_in_push_event_names_the_target(tree):
+    """
+    A 404 from axum has an EMPTY BODY. Without the attempted address the operator
+    reads "GOVERNANCE_PUSH_FAILED ... HTTP 404: " and learns nothing at all.
+
+    Discovered, not enumerated: every `logger.error` inside `push_event` must
+    interpolate `target` (or, for the branch where no target could be composed,
+    the exception carrying the offending value).
+    """
+    fn = _func(tree, "push_event")
+    errors = [c for c in _calls(fn) if _chain(c.func) == "logger.error"]
+    assert len(errors) >= 3, f"expected the three failure paths to log; found {len(errors)}"
+
+    for call in errors:
+        names = {a.id for a in call.args if isinstance(a, ast.Name)}
+        assert names & {"target", "exc"}, (
+            f"the ERROR at line {call.lineno} names neither the attempted target "
+            f"nor the offending config value"
+        )
+
+
+def test_the_receipt_records_the_composed_target(tree):
+    """
+    The durable half. `adapter_url` must be fed the composed target, not the raw
+    base URL, or the forensic record cannot distinguish a misroute from a refusal.
+    """
+    fn = _func(tree, "push_event")
+    record = _func(fn, "_record")
+    assert record is not None, "_record is gone — measured nothing"
+    assert "target" in {a.arg for a in record.args.args}, (
+        "_record does not take the target, so the receipt cannot name the address used"
+    )
+
+    keys = [
+        (k.value, v)
+        for n in ast.walk(record) if isinstance(n, ast.Dict)
+        for k, v in zip(n.keys, n.values)
+        if isinstance(k, ast.Constant) and k.value == "adapter_url"
+    ]
+    assert len(keys) == 1, f"expected one adapter_url field, found {len(keys)}"
+    assert isinstance(keys[0][1], ast.Name) and keys[0][1].id == "target", (
+        "adapter_url is not the composed target"
+    )
 
 
 def test_fire_and_forget_tasks_report_their_own_failure(tree):

@@ -192,3 +192,60 @@ PROXY_MODEL_REQUIRED = ("model_id",)
 PROXY_DETECTION_REQUIRED = ("fabrication_risk", "confidence", "classification")
 # Fields serde types as `Uuid` — a non-UUID string fails the whole deserialisation.
 PROXY_EVENT_UUID_FIELDS = ("event_id",)
+
+
+# ── Router oracle: `main.rs`'s axum `Router` ──────────────────────────────────
+# Transcribed from arkheia-synesis/services/detection-adapter/src/main.rs:
+#
+#     let app = Router::new()
+#         .route("/v1/events/proxy",  post(handlers::receive_proxy_event))
+#         .route("/v1/events/onprem", post(handlers::receive_onprem_event))
+#         .route("/healthz",          get(handlers::healthz))
+#         .route("/readyz",           get(handlers::readyz))
+#         .route("/metrics",          get(metrics::handler))
+#
+# WHY THE ROUTER IS PART OF THE ORACLE, NOT AN IMPLEMENTATION DETAIL.
+# A signature the receiver would accept is worthless if the request never reaches
+# the handler that verifies it. The signing string and the body schema were both
+# run to ground against this receiver; the ADDRESS was not, and an address is the
+# one part of the contract the OPERATOR supplies. `DETECTION_ADAPTER_URL` is set
+# by hand in a deployment, and the commonest way a human writes a base URL is
+# with a trailing slash.
+#
+# The decisive fact, verified in main.rs: the router is built with NO
+# `tower_http::normalize_path::NormalizePathLayer` and no other middleware. axum
+# routes on the raw path via `matchit`, so `//v1/events/proxy` — an empty first
+# segment — does not match `/v1/events/proxy`. It is a 404 into an empty body:
+# the least diagnosable failure available, on a fire-and-forget path.
+ROUTES: dict[str, frozenset[str]] = {
+    "/v1/events/proxy": frozenset({"POST"}),
+    "/v1/events/onprem": frozenset({"POST"}),
+    "/healthz": frozenset({"GET"}),
+    "/readyz": frozenset({"GET"}),
+    "/metrics": frozenset({"GET"}),
+}
+
+NOT_FOUND = 404
+METHOD_NOT_ALLOWED = 405
+ROUTE_MATCHED = 200
+
+
+def route(method: str, path: str) -> int:
+    """
+    Port of axum's dispatch for THIS router: which status the path alone earns
+    before any handler (and therefore before any HMAC verification) runs.
+
+    Returns `ROUTE_MATCHED` when the request would reach its handler. Never
+    returns 200 to mean "the push succeeded" — the handler still has to accept
+    the signature and the body; this answers only "did it arrive at the door".
+
+    Exact-match only, deliberately: no trailing-slash tolerance, no `//` folding,
+    no case-insensitivity. Reproducing axum's strictness is the whole point — a
+    permissive oracle would have passed the very defect this closes.
+    """
+    allowed = ROUTES.get(path)
+    if allowed is None:
+        return NOT_FOUND
+    if method.upper() not in allowed:
+        return METHOD_NOT_ALLOWED
+    return ROUTE_MATCHED

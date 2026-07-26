@@ -92,7 +92,11 @@ async def test_a_delivered_push_leaves_a_receipt_tied_to_its_event(
     assert row["source"] == "governance_push"
     assert row["event_type"] == "governance_detection_push"
     assert row["signed"] is True
-    assert row["adapter_url"] == URL
+    # The TARGET, not the base URL. A receipt holding the un-composed base cannot
+    # answer the only question a misroute raises — what address did this attempt
+    # use? — and a trailing slash in DETECTION_ADAPTER_URL used to make base and
+    # target differ by a lost push.
+    assert row["adapter_url"] == ENDPOINT
     assert row["key_id"] == KEY_ID
     assert row["model_id"] == "gpt-4o"
     assert row["risk_level"] == "MEDIUM"

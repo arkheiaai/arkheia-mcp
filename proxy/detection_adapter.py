@@ -41,6 +41,26 @@ non-2xx and every transport failure is logged at **ERROR** with the stable marke
 ``GOVERNANCE_PUSH_FAILED``, and -- when an audit writer is supplied -- leaves a
 durable, hash-chained receipt of the outcome. Silence is never "delivered".
 
+THE ADDRESS IS PART OF THE CONTRACT TOO
+---------------------------------------
+The signing string and the body schema are computed here and cannot drift without
+a code change. The ADDRESS is different: an operator types it into a deployment,
+so it is the one term of the contract that a human can get wrong at any time.
+
+This module composed its target as ``f"{url}{ADAPTER_PATH}"``. With
+``DETECTION_ADAPTER_URL=http://adapter:7070/`` -- a trailing slash, the commonest
+way anyone writes a base URL -- that POSTs to ``//v1/events/proxy``. `httpx` does
+not fold the empty segment, and the receiver's axum router is built with no
+`NormalizePathLayer`, so the request is a **404 with an empty body**: no reason
+text, on a fire-and-forget path, with a perfect signature over a request that
+never arrived. One character reverts the rail to dark and nothing above notices.
+
+So the base URL is normalised and VALIDATED in one place (`normalise_base_url` /
+`adapter_target`), a value that cannot address the receiver is refused at STARTUP
+(`validate_config_or_raise`) rather than discovered one lost push at a time, and
+every failure log names the target that was actually attempted -- because a 404
+with an empty body says nothing at all without it.
+
 NO UNSIGNED FALLBACK
 --------------------
 If the URL or the HMAC secret is absent, nothing is sent. There is no unsigned
@@ -62,6 +82,7 @@ import json
 import logging
 import os
 import time
+import urllib.parse
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -91,17 +112,164 @@ _DETECTION_ID_NS = uuid.UUID("6b8f1e2a-0c3d-4f5e-9a7b-1d2c3e4f5a6b")
 
 _VALID_RISK = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
+# The only schemes that can carry an HMAC-signed POST to the receiver. Anything
+# else -- a bare hostname, a path, `ftp://` -- cannot be dialled, so it is a
+# configuration fault rather than a delivery failure and is reported as one.
+_ALLOWED_SCHEMES = ("http", "https")
+
+# Env var names, named once so error text can point the operator at the setting
+# to change instead of at a stack frame.
+ENV_URL = "DETECTION_ADAPTER_URL"
+ENV_SECRET = "DETECTION_ADAPTER_HMAC_SECRET"
+ENV_KEY_ID = "DETECTION_ADAPTER_KEY_ID"
+
+
+class AdapterConfigError(ValueError):
+    """
+    `DETECTION_ADAPTER_URL` cannot address the receiver.
+
+    Distinct from every delivery failure on purpose: no retry, no backoff and no
+    amount of waiting will fix it, and it is not "unconfigured" either -- someone
+    set the value and got it wrong. Its own type, so its own outcome and its own
+    message.
+    """
+
+
+def normalise_base_url(raw: Optional[str]) -> str:
+    """
+    Turn whatever an operator wrote into a base URL that composes cleanly.
+
+    Returns "" for an absent value -- absent is a THIRD answer, distinct from both
+    valid and malformed, because a deployment that never enabled this rail must
+    stay silent while a deployment that mistyped the address must not.
+
+    Handles, deliberately, the ways this value actually arrives in the wild:
+      * a trailing slash (or several) -- the defect that motivated this function;
+      * surrounding whitespace, which survives `.env` files, YAML block scalars
+        and copy-paste out of a dashboard, and which `httpx` would percent-encode
+        into the HOST rather than reject;
+      * a sub-path mount (`https://gw/adapter`), which is PRESERVED -- a gateway
+        in front of the receiver is a legitimate topology, and the receiver still
+        verifies over its own mounted `ADAPTER_PATH`, so the signature is
+        unaffected by any prefix a gateway strips.
+
+    Raises `AdapterConfigError`, naming the setting and the offending value, for
+    anything that cannot be dialled. Refusing here is what lets the caller fail
+    at startup instead of at push time.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return ""
+
+    parts = urllib.parse.urlsplit(text)
+    scheme = parts.scheme.lower()
+    if scheme not in _ALLOWED_SCHEMES or not parts.netloc:
+        raise AdapterConfigError(
+            f"{ENV_URL}={text!r} is not a usable base URL: expected "
+            f"scheme://host[:port][/prefix] with scheme one of "
+            f"{'/'.join(_ALLOWED_SCHEMES)}"
+        )
+    if parts.query or parts.fragment:
+        raise AdapterConfigError(
+            f"{ENV_URL}={text!r} is not a usable base URL: a query string or "
+            f"fragment cannot survive having {ADAPTER_PATH} appended to it"
+        )
+
+    # rstrip, not replace: only the JOIN is ambiguous. A `//` inside an operator's
+    # deliberate sub-path prefix is theirs to keep -- we are not rewriting their
+    # gateway's routing, only refusing to introduce an empty segment ourselves.
+    return urllib.parse.urlunsplit((scheme, parts.netloc, parts.path.rstrip("/"), "", ""))
+
+
+def adapter_target(raw: Optional[str]) -> str:
+    """
+    The one place a base URL and `ADAPTER_PATH` are joined.
+
+    Every send goes through here, so the misroute has exactly one place to live
+    and exactly one place to be tested. Returns "" when unconfigured.
+    """
+    base = normalise_base_url(raw)
+    return f"{base}{ADAPTER_PATH}" if base else ""
+
+
+def _config() -> tuple[str, str, str]:
+    """
+    Read the whole config surface, once, at CALL time (never frozen at import).
+
+    One reader so the startup guard and the send path cannot disagree about what
+    is configured -- and so the signing secret has exactly one source in this
+    module, which `tests/test_governance_push_floor.py` pins structurally.
+    """
+    return (
+        os.getenv("DETECTION_ADAPTER_URL", ""),
+        os.getenv("DETECTION_ADAPTER_HMAC_SECRET", ""),
+        os.getenv("DETECTION_ADAPTER_KEY_ID", "mcp-v1"),
+    )
+
+
+def validate_config_or_raise() -> None:
+    """
+    Startup guard. Call from application boot, BEFORE any traffic.
+
+    Discovering an undialable address at push time loses every push until someone
+    reads the logs, and the value cannot become valid later -- so the honest
+    moment to refuse is boot, where an operator is watching and the fix is one
+    env var. Raises `RuntimeError` (the pattern `proxy/main.py` already uses for
+    `JWT_SECRET` and missing config) rather than `AdapterConfigError`, so a boot
+    failure reads as a boot failure.
+
+    Demo/local parity (DONE.md Gate 2): this fires ONLY on a value someone
+    actually set and got wrong. With the rail unconfigured -- which is what
+    `.env.example` and `docker-compose.yaml` ship -- it returns silently. A guard
+    that bricked a clean local boot would be switched off within a day, and then
+    there would be no guard.
+
+    A half-configured rail (one of URL/secret, not both) is WARNED, not fatal:
+    nothing unsigned is ever sent so the state is safe, but `push_event` would
+    report it as `skipped_unconfigured` -- the same answer it gives a deployment
+    that never wanted the rail. Someone who set one of the two plainly wanted it,
+    so the ambiguity is resolved out loud at boot.
+    """
+    url, secret, _key_id = _config()
+    url_set, secret_set = bool(url.strip()), bool(secret)
+
+    if not url_set and not secret_set:
+        return
+
+    if url_set:
+        try:
+            normalise_base_url(url)
+        except AdapterConfigError as exc:
+            raise RuntimeError(f"Cannot start: {exc}") from None
+
+    if url_set != secret_set:
+        missing = ENV_SECRET if url_set else ENV_URL
+        logger.warning(
+            "Governance detection push is HALF-CONFIGURED: %s is missing, so no "
+            "event will be pushed (nothing unsigned is ever sent). Set %s to arm "
+            "the rail, or clear both to disable it deliberately.",
+            missing, missing,
+        )
+
 
 class PushOutcome:
     """
     What actually happened to a governance push.
 
-    Returned (never raised) so a caller can distinguish the four states that a
-    ``-> None`` signature collapses into one: not configured, delivered, rejected
-    by the receiver, and never reached the receiver.
+    Returned (never raised) so a caller can distinguish the five states that a
+    ``-> None`` signature collapses into one: not configured, misconfigured,
+    delivered, rejected by the receiver, and never reached the receiver.
+
+    `MISCONFIGURED` is deliberately NOT folded into `SKIPPED`. `SKIPPED` means
+    "nobody asked for this rail" and is silent by design; filing an operator's
+    typo under that heading is precisely how a rail goes dark while reporting
+    itself healthy. The honest buckets are observed-good, observed-bad, and
+    not-observed -- and a value that was never sent belongs in the third with a
+    reason attached, never in the first.
     """
 
     SKIPPED = "skipped_unconfigured"
+    MISCONFIGURED = "misconfigured"  # a value was set and cannot address anything
     DELIVERED = "delivered"
     REJECTED = "rejected"       # receiver answered, with a non-2xx
     FAILED = "failed"           # never got an answer (network, timeout, ...)
@@ -287,26 +455,24 @@ async def push_event(
     """
     Push a detection event to the governance adapter.
 
-    Fails open -- never raises -- but never fails silently: a rejected or
-    undelivered push is logged at ERROR and receipted. Returns a `PushOutcome` so
-    "not configured", "delivered", "rejected" and "never arrived" are
-    distinguishable.
+    Fails open -- never raises -- but never fails silently: a rejected,
+    misconfigured or undelivered push is logged at ERROR and receipted. Returns a
+    `PushOutcome` so "not configured", "misconfigured", "delivered", "rejected"
+    and "never arrived" are distinguishable.
     """
-    url = os.getenv("DETECTION_ADAPTER_URL", "")
-    secret = os.getenv("DETECTION_ADAPTER_HMAC_SECRET", "")
-    key_id = os.getenv("DETECTION_ADAPTER_KEY_ID", "mcp-v1")
+    url, secret, key_id = _config()
 
     # No URL or no secret => send NOTHING. There is deliberately no unsigned
     # fallback: an unauthenticated governance record is worse than no record.
-    if not url or not secret:
+    # `.strip()` so a whitespace-only value reads as absent rather than as a
+    # malformed address someone needs to be shouted at about.
+    if not url.strip() or not secret:
         return PushOutcome(PushOutcome.SKIPPED)
 
     body_dict = build_proxy_event(tenant_id, source_id, event_type, payload, risk_level)
     event_id = body_dict["event_id"]
-    body = json.dumps(body_dict).encode()
-    headers = _sign_headers(body, secret, key_id)
 
-    def _record(outcome: PushOutcome) -> dict:
+    def _record(outcome: PushOutcome, target: str) -> dict:
         return {
             # Unique per ATTEMPT. `detection_id` correlates the receipt to the
             # decision, but it is not unique: a retried push for the same
@@ -317,7 +483,10 @@ async def push_event(
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "source": "governance_push",
             "event_type": "governance_detection_push",
-            "adapter_url": url,
+            # The TARGET, not the raw base URL. A misroute's only question is
+            # "what address did this attempt actually use?", and a receipt holding
+            # the un-composed base cannot answer it.
+            "adapter_url": target,
             "key_id": key_id,
             "signed": True,
             "delivery_status": outcome.status,
@@ -327,10 +496,30 @@ async def push_event(
             "model_id": body_dict["model"]["model_id"],
         }
 
+    # Belt to the startup guard's braces. `validate_config_or_raise` should have
+    # caught this at boot, but this module is imported by callers that have no
+    # boot sequence (the MCP server, scripts, tests), and env vars are read at
+    # call time and can change under a running process. Fail-open applies: report,
+    # never raise into the governed decision.
+    try:
+        target = adapter_target(url)
+    except AdapterConfigError as exc:
+        outcome = PushOutcome(
+            PushOutcome.MISCONFIGURED, error=str(exc), event_id=event_id
+        )
+        logger.error(
+            "%s nothing sent for event_id=%s: %s", FAILURE_MARKER, event_id, exc,
+        )
+        await _receipt(audit, _record(outcome, ""))
+        return outcome
+
+    body = json.dumps(body_dict).encode()
+    headers = _sign_headers(body, secret, key_id)
+
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.post(
-                f"{url}{ADAPTER_PATH}",
+                target,
                 content=body,
                 headers=headers,
             )
@@ -341,9 +530,9 @@ async def push_event(
         # A governance record that never left the box. Visible, or the rail is dark.
         logger.error(
             "%s transport error posting event_id=%s to %s: %s",
-            FAILURE_MARKER, event_id, url, outcome.error,
+            FAILURE_MARKER, event_id, target, outcome.error,
         )
-        await _receipt(audit, _record(outcome))
+        await _receipt(audit, _record(outcome, target))
         return outcome
 
     if resp.status_code >= 400:
@@ -353,20 +542,37 @@ async def push_event(
             error=resp.text[:200],
             event_id=event_id,
         )
+        # A 404/405 is the ROUTE-MISS signature, and it is the hardest rejection
+        # to diagnose because axum answers an unmatched path with an EMPTY BODY --
+        # `resp.text` carries nothing, so without the target and a named cause the
+        # log line says only "something, somewhere, returned 404". It is also the
+        # one rejection class that is a CONFIGURATION fault rather than a
+        # credential or receiver fault, so it names the setting to change.
+        if resp.status_code in (404, 405):
+            hint = (
+                f" -- that address is not mounted on the receiver, which serves "
+                f"exactly {ADAPTER_PATH!r}; this is a configuration fault, check "
+                f"{ENV_URL}"
+            )
+        else:
+            hint = ""
         # THE defect this module shipped with: a 401/400 here used to be a
         # logger.debug. A governance push the receiver refused is a governance
         # record that does not exist, so it is an ERROR, not a debug crumb.
+        # ONE log call, one sentence derived from one verdict: where the verdict,
+        # the receipt and the wording an operator reads are separate decisions,
+        # they eventually disagree (DONE.md floor entry 9).
         logger.error(
-            "%s adapter rejected event_id=%s with HTTP %s: %s",
-            FAILURE_MARKER, event_id, resp.status_code, outcome.error,
+            "%s adapter rejected event_id=%s with HTTP %s posting to %s: %s%s",
+            FAILURE_MARKER, event_id, resp.status_code, target, outcome.error, hint,
         )
-        await _receipt(audit, _record(outcome))
+        await _receipt(audit, _record(outcome, target))
         return outcome
 
     outcome = PushOutcome(
         PushOutcome.DELIVERED, http_status=resp.status_code, event_id=event_id
     )
-    await _receipt(audit, _record(outcome))
+    await _receipt(audit, _record(outcome, target))
     return outcome
 
 
