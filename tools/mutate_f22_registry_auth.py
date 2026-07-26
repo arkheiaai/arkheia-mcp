@@ -29,27 +29,28 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 AUTH = ROOT / "registry_server" / "auth.py"
 MAIN = ROOT / "registry_server" / "main.py"
-SUITE = "registry_server/tests/test_registry_auth_adversarial.py"
+RECEIPTS = ROOT / "registry_server" / "receipts.py"
+SUITE = "registry_server/tests"
 
 # (id, file, find, replace, what break this simulates)
 MUTANTS: list[tuple[str, Path, str, str, str]] = [
     (
         "M1-gate-removed", AUTH,
-        "    if credentials is None or not _key_is_valid(credentials.credentials, valid_keys):",
+        "    if credentials is None or not _key_is_valid(presented, valid_keys):",
         "    if False:",
         "the refusal branch never fires — any credential is accepted",
     ),
     (
         "M2-unprovisioned-allows-all", AUTH,
-        "    if not valid_keys:\n        raise HTTPException(\n            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,",
-        "    if not valid_keys:\n        return \"anonymous\"\n    if False:\n        raise HTTPException(\n            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,",
+        "    if not valid_keys:\n        await _record(receipts.DECISION_UNPROVISIONED, status.HTTP_503_SERVICE_UNAVAILABLE)",
+        "    if not valid_keys:\n        return \"anonymous\"\n    if False:\n        await _record(receipts.DECISION_UNPROVISIONED, status.HTTP_503_SERVICE_UNAVAILABLE)",
         "unprovisioned server serves everyone instead of no one — the exact "
         "inversion the flow is named against",
     ),
     (
         "M3-missing-credential-allowed", AUTH,
-        "    if credentials is None or not _key_is_valid(credentials.credentials, valid_keys):",
-        "    if credentials is not None and not _key_is_valid(credentials.credentials, valid_keys):",
+        "    if credentials is None or not _key_is_valid(presented, valid_keys):",
+        "    if credentials is not None and not _key_is_valid(presented, valid_keys):",
         "no Authorization header at all is treated as authorised",
     ),
     (
@@ -87,8 +88,8 @@ MUTANTS: list[tuple[str, Path, str, str, str]] = [
     ),
     (
         "M9-caller-supplied-header-override", AUTH,
-        "async def require_auth(\n    credentials: HTTPAuthorizationCredentials = Security(_bearer),\n) -> str:",
-        "from fastapi import Request as _Request\n\nasync def require_auth(\n    request: _Request,\n    credentials: HTTPAuthorizationCredentials = Security(_bearer),\n) -> str:\n    if request.headers.get(\"X-API-Key\"):\n        return request.headers[\"X-API-Key\"]",
+        "    valid_keys = _load_valid_keys()\n    presented",
+        "    if request.headers.get(\"X-API-Key\"):\n        return request.headers[\"X-API-Key\"]\n    valid_keys = _load_valid_keys()\n    presented",
         "a caller-supplied alternate header bypasses the check — the F-detect "
         "defect shape (caller influences the check applied to the caller)",
     ),
@@ -112,9 +113,63 @@ MUTANTS: list[tuple[str, Path, str, str, str]] = [
         "a route ships without the auth dependency — the discovering test must "
         "catch it WITHOUT this file being edited",
     ),
+    # -- receipted axis --------------------------------------------------
+    (
+        "M13-refusal-unreceipted", AUTH,
+        "        await _record(receipts.DECISION_REJECTED, status.HTTP_401_UNAUTHORIZED)",
+        "        pass",
+        "the REFUSAL leaves no record — a denied request becomes "
+        "indistinguishable from one that never happened",
+    ),
+    (
+        "M14-receipt-id-constant", AUTH,
+        "    receipt_id = receipts.new_receipt_id()",
+        "    receipt_id = \"0\" * 32",
+        "one id for every decision — a record can no longer be tied to the "
+        "decision it describes",
+    ),
+    (
+        "M15-receipt-id-derived-from-credential", RECEIPTS,
+        "def new_receipt_id() -> str:\n    return uuid.uuid4().hex",
+        "def new_receipt_id() -> str:\n    return uuid.uuid4().hex\n\n\ndef _unused():\n    pass",
+        "control: a no-op addition to receipts.py that must NOT be flagged",
+    ),
+    (
+        "M16-raw-key-in-record", RECEIPTS,
+        "        \"key_fingerprint\": key_fingerprint(credential),",
+        "        \"key_fingerprint\": key_fingerprint(credential),\n        \"presented\": credential,",
+        "the raw API key is written into the receipt",
+    ),
+    (
+        "M17-receipt-failure-blocks-the-decision", AUTH,
+        "        try:\n            await receipts.emit(receipts.build_record(",
+        "        if True:\n            await receipts.emit(receipts.build_record(",
+        "a receipt-path exception propagates and turns the 401 into a 500 — "
+        "the receipt becomes a precondition of the halt",
+    ),
+    (
+        "M18-receipts-off-by-default", RECEIPTS,
+        "    return os.environ.get(\n        \"ARKHEIA_REGISTRY_AUDIT_LOG\",\n        str(Path(__file__).parent.parent / \"registry_audit.jsonl\"),\n    )",
+        "    return os.environ.get(\"ARKHEIA_REGISTRY_AUDIT_LOG\", \"\")",
+        "receipts require an env var to switch on — a guard whose default is "
+        "off is not a guard",
+    ),
+    (
+        "M19-receipt-id-not-surfaced", AUTH,
+        "                receipts.RECEIPT_HEADER: receipt_id,",
+        "",
+        "the caller is never handed the receipt id, so no denied caller or "
+        "auditor can reference the decision",
+    ),
+    (
+        "M20-writer-never-flushed", MAIN,
+        "    finally:\n        await receipts.stop()",
+        "    finally:\n        pass",
+        "the writer is never flushed on shutdown — queued receipts are lost",
+    ),
 ]
 
-CONTROL_MUTANTS = {"M11-route-dependency-dropped"}
+CONTROL_MUTANTS = {"M11-route-dependency-dropped", "M15-receipt-id-derived-from-credential"}
 
 
 def clear_pycache() -> None:

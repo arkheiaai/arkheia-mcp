@@ -145,9 +145,15 @@ def profile_dir(tmp_path):
 
 
 @pytest.fixture()
-def env(monkeypatch, profile_dir):
+def env(monkeypatch, profile_dir, tmp_path):
     monkeypatch.setenv("ARKHEIA_REGISTRY_PROFILE_DIR", str(profile_dir))
     monkeypatch.setenv("ARKHEIA_REGISTRY_BASE_URL", "http://testserver")
+    # HERMETICITY: every request here writes an auth-decision receipt, and the
+    # DEFAULT receipt path is package-relative — i.e. the repo root. Without
+    # this line the suite appends a real audit log to the checkout on every
+    # run (it reached 3.3 MB of untracked file during mutation trials before
+    # this was fixed). Redirected per-test into tmp_path.
+    monkeypatch.setenv("ARKHEIA_REGISTRY_AUDIT_LOG", str(tmp_path / "receipts.jsonl"))
     return monkeypatch
 
 
@@ -636,11 +642,30 @@ def test_unknown_key_is_byte_identical_to_absent_key(provisioned):
     unknown = provisioned.get("/profiles", headers=auth(WRONG_KEY))
     near_miss = provisioned.get("/profiles", headers=auth(VALID_KEY[:-1] + "z"))
 
+    # `x-arkheia-receipt` is excluded because it is SUPPOSED to differ: it is
+    # a fresh uuid4 per request, carrying the auth-decision receipt id. That
+    # it varies is not an oracle — but only if it varies for reasons unrelated
+    # to the credential, which is asserted immediately below rather than
+    # assumed.
+    IGNORED = ("date", "server", "x-arkheia-receipt")
+    def strip(h):
+        return {k.lower(): v for k, v in h.items() if k.lower() not in IGNORED}
+
     for other, label in ((unknown, "unknown key"), (near_miss, "near-miss key")):
         assert other.status_code == absent.status_code, label
         assert other.content == absent.content, f"{label}: {other.content!r} vs {absent.content!r}"
-        strip = lambda h: {k.lower(): v for k, v in h.items() if k.lower() not in ("date", "server")}
         assert strip(other.headers) == strip(absent.headers), label
+
+    # The excluded header must be present, random, and not a function of the
+    # credential — otherwise excluding it would be excluding the oracle.
+    ids = [r.headers["x-arkheia-receipt"] for r in (absent, unknown, near_miss)]
+    assert all(len(i) == 32 and all(c in "0123456789abcdef" for c in i) for i in ids), ids
+    assert len(set(ids)) == 3, f"receipt id repeats across requests: {ids}"
+    repeat = provisioned.get("/profiles", headers=auth(WRONG_KEY)).headers["x-arkheia-receipt"]
+    assert repeat != unknown.headers["x-arkheia-receipt"], (
+        "the SAME wrong key produced the SAME receipt id; the id is derived from "
+        "the credential and is therefore itself an enumeration oracle"
+    )
     assert_authorised_call_succeeds(provisioned, "GET", "/profiles")
 
 
