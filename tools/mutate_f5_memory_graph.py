@@ -13,7 +13,16 @@ re-run it in well under a minute to find out whether their change is actually co
 
     python tools/mutate_f5_memory_graph.py
 
-Last full run (2026-07-26, branch sweep/mcp-memory-knowledge-graph): see the PR body.
+Last full run (2026-07-26, branch sweep/mcp-memory-knowledge-graph): baseline 40 passed / 0 failed;
+27 mutants, 27 KILLED by their own expected assertion, 0 KILLED-BY-OTHER, 0 SURVIVED, 0 NOT-OBSERVED.
+
+TWO OF THE HARNESS'S OWN DEFECTS, found by running it — quoted because a kill rate means nothing
+without them. The first pass reported 2 SURVIVED and both were the instrument, not the coverage:
+M20 was a mutant that changed no behaviour (it added a no-op line instead of actually moving the
+write before the refusal), and M22 was never loaded at all (see _purge_bytecode). A later pass
+reported 3 NOT-OBSERVED after `_get_conn` was refactored and three anchors stopped matching — that
+one is the discipline working as intended: the anchors were stale, the mutants never applied, and
+the harness said so instead of counting three unexamined guards as clean.
 
 THREE BUCKETS ONLY, and the third is never folded into the others:
     KILLED        — the mutant was applied AND the run observed >=1 assertion failure.
@@ -125,18 +134,33 @@ MUTANTS = [
       "test_a_pre_existing_world_readable_db_is_tightened"]),
 
     ("M9-modes-set-only-on-create", MEM,
-     '    try:\n        parent.chmod(_DIR_MODE)\n    except OSError:\n        pass',
-     '    try:\n        pass\n    except OSError:\n        pass',
+     '    _enforce_mode(parent, _DIR_MODE)',
+     '    pass  # directory mode no longer re-asserted',
      "the directory mode is re-asserted no longer, so mkdir's umask-masked mode stands and an "
      "install that already ran under the defective code stays world-readable forever",
      ["test_a_pre_existing_world_readable_db_is_tightened"]),
 
     ("M10-file-chmod-dropped", MEM,
-     '    try:\n        os.chmod(path, _FILE_MODE)\n    except OSError:\n        pass',
-     '    try:\n        pass\n    except OSError:\n        pass',
+     '    _enforce_mode(Path(path), _FILE_MODE)',
+     '    pass  # file mode never set',
      "the DB file keeps whatever mode sqlite3 created it with (0644 under the default umask)",
      ["test_new_db_and_directory_are_owner_only",
       "test_a_pre_existing_world_readable_db_is_tightened"]),
+
+    ("M11a-mode-failure-swallowed-silently", MEM,
+     '    except OSError as exc:\n        logger.warning(',
+     '    except OSError as exc:\n        return\n        logger.warning(',
+     "a chmod that cannot be applied is swallowed, so the operator believes in a boundary that "
+     "was never set — the 'guard wired but switched off' defect, and invisible because the store "
+     "keeps working perfectly",
+     ["test_an_unenforceable_mode_is_reported_not_swallowed"]),
+
+    ("M11b-mode-failure-logged-at-debug", MEM,
+     '        logger.warning(\n            "memory: could not set mode %o on %s (%s).',
+     '        logger.debug(\n            "memory: could not set mode %o on %s (%s).',
+     "the warning is demoted to DEBUG, so it is emitted but never seen at default log level — "
+     "present-but-undiscovered, which is decoration",
+     ["test_an_unenforceable_mode_is_reported_not_swallowed"]),
 
     # ---- INV-3: search strings are matched literally ---------------------------
     ("M11-escape-is-a-no-op", MEM,
@@ -253,9 +277,9 @@ MUTANTS = [
      ["test_content_round_trips_byte_identical"]),
 
     ("M25-redactor-imported-into-memory", MEM,
-     'from pathlib import Path\n\n# Directory holding the knowledge graph',
+     'from pathlib import Path\n\nlogger = logging.getLogger',
      'from pathlib import Path\nfrom proxy.audit.redactor import redact  # noqa: F401\n\n'
-     '# Directory holding the knowledge graph',
+     'logger = logging.getLogger',
      "the ACCESS-CONTROL ruling is quietly reversed by importing the audit redactor. The pin "
      "exists so that decision cannot drift without a test going red and the ledger being revisited.",
      ["test_no_redactor_is_imported_by_the_memory_module"]),

@@ -217,6 +217,35 @@ class TestStoreIsOwnerPrivate:
         assert (db.stat().st_mode & 0o777) == 0o600
         assert (db.parent.stat().st_mode & 0o777) == 0o700
 
+    @pytest.mark.asyncio
+    async def test_an_unenforceable_mode_is_reported_not_swallowed(self, db, monkeypatch, caplog):
+        """
+        A permission control that cannot be applied must SAY SO.
+
+        The store deliberately does not scrub observation text and names the filesystem as
+        its only confidentiality control, so a chmod that fails silently would leave the
+        operator believing in a boundary that was never set — the "guard wired but switched
+        off" defect. Memory must still work (some filesystems cannot express 0600), so the
+        contract is: proceed, and warn loudly.
+
+        Pinned on the WARNING level and on the message actually naming the consequence, not
+        merely on "something was logged".
+        """
+        def _refuse(*_args, **_kwargs):
+            raise OSError(1, "Operation not permitted")
+
+        monkeypatch.setattr(memory_mod.os, "chmod", _refuse)
+
+        with caplog.at_level("WARNING", logger=memory_mod.__name__):
+            result = await store_entity("Acme Corp", "company", ["still stored"])
+
+        # The store still worked — a permission failure never breaks memory.
+        assert result["observations_added"] == 1
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 2  # once for the directory, once for the file
+        assert all("filesystem permissions" in r.getMessage() for r in warnings)
+
 
 # ---------------------------------------------------------------------------
 # INV-3 — search strings are matched literally

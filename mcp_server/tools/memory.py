@@ -50,11 +50,14 @@ not with redaction, which would not help there either.
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Directory holding the knowledge graph: owner-only. The DB file itself: owner-only.
 _DIR_MODE = 0o700
@@ -90,17 +93,35 @@ def _get_conn() -> sqlite3.Connection:
     parent.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
     # mkdir's mode is masked by the umask and is a no-op when the dir already
     # exists, so assert the mode explicitly rather than hoping for it.
-    try:
-        parent.chmod(_DIR_MODE)
-    except OSError:
-        pass  # non-POSIX or foreign-owned dir: connect anyway, do not break memory
+    _enforce_mode(parent, _DIR_MODE)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
-    try:
-        os.chmod(path, _FILE_MODE)
-    except OSError:
-        pass
+    _enforce_mode(Path(path), _FILE_MODE)
     return conn
+
+
+def _enforce_mode(target: Path, mode: int) -> None:
+    """
+    Apply `mode` to `target`, and if that is not possible SAY SO.
+
+    Memory is never broken over a permission failure — a store that refuses because
+    the filesystem cannot express 0600 (Windows, some network and container mounts)
+    would be a worse outcome than a readable file. But the failure is NOT swallowed:
+    this module's stated position is that the filesystem IS the confidentiality
+    control for unscrubbed observation text, so a control that could not be applied
+    has to be visible. Silently passing here would be exactly the "guard wired but
+    switched off" defect — the operator would believe in a boundary that was never set.
+    """
+    try:
+        os.chmod(target, mode)
+    except OSError as exc:
+        logger.warning(
+            "memory: could not set mode %o on %s (%s). The knowledge graph stores "
+            "observation text unredacted and relies on filesystem permissions as its "
+            "only confidentiality control; on this filesystem that control is NOT in "
+            "effect and the graph may be readable by other local users.",
+            mode, target, exc,
+        )
 
 
 def _like_escape(value: str) -> str:
