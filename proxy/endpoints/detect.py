@@ -54,6 +54,12 @@ class VerifyResponse(BaseModel):
     timestamp: str
     detection_id: str
     error: Optional[str] = None
+    # Was the verdict computed from real evidence, or is it a "couldn't assess"? The engine
+    # computes this and it used to be DROPPED here, so a LOW off ZERO fired features looked
+    # identical to a well-evidenced LOW at the only surface a caller reads. None = the
+    # detection path did not report it (older/hosted responses), which is NOT the same as
+    # False and must never be rendered as "assessed".
+    evidence_depth_limited: Optional[bool] = None
     # Governance decision surfaced to the CALLER so a configured block is not silently
     # decorative. These two fields are NOT interchangeable:
     #   action      = POLICY INTENT (NOT authorization). The customer policy applied, from
@@ -82,6 +88,8 @@ def _unknown(
         timestamp=_now(),
         detection_id=detection_id or _uuid(),
         error=error or None,
+        # A detection that never ran observed nothing at all.
+        evidence_depth_limited=True,
     )
 
 
@@ -197,6 +205,7 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
         timestamp=result.timestamp,
         detection_id=result.detection_id,
         error=result.error,
+        evidence_depth_limited=getattr(result, "evidence_depth_limited", None),
     )
 
     # Async audit write -- does not block; never crashes the response pipeline
@@ -206,7 +215,14 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
         except Exception as e:
             logger.error("Audit write failed (detection result unaffected): %s", e)
 
-    # Push to Arkheia Governance Detection Adapter (fail-open, fire-and-forget)
+    # Push to Arkheia Governance Detection Adapter (fail-open, fire-and-forget).
+    #
+    # The envelope band used to be `... else "LOW"` — an UNRECOGNISED band defaulted to the
+    # SAFEST-SOUNDING value, so the governance record showed the fleet's unscreened default
+    # path (grok-4.20-*: UNKNOWN / no_profile_for_model) as a clean LOW, and dropped the
+    # reason entirely. A detection that never ran was indistinguishable, to an operator, from
+    # one that ran and found nothing wrong. The honest default for "we do not recognise this"
+    # is UNKNOWN. `error` now travels with it so the band is never a bare verdict.
     schedule_push(
         tenant_id=_ADAPTER_TENANT_ID,
         source_id=req.model_id,
@@ -221,14 +237,33 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
             "prompt_hash": hashlib.sha256(req.prompt.encode()).hexdigest(),
             "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
             "action_taken": action,
+            "error": response.error,
+            "evidence_depth_limited": response.evidence_depth_limited,
         },
-        risk_level=response.risk_level if response.risk_level in ("LOW", "MEDIUM", "HIGH", "CRITICAL") else "LOW",
+        risk_level=_envelope_risk_band(response.risk_level),
     )
 
     # Surface the governance decision to the caller: policy `action` (mirrors action_taken in
     # the audit) + profile-earned `gate_action`. Keeps HTTP 200; blocking-at-transport stays the
     # job of proxy/middleware/interception.py. Consumers hard-block only when gate_action=="block".
     return _signal(http_response, response, action, getattr(result, "gate_action", "advise"))
+
+
+# Bands the governance surface understands. UNKNOWN is in the set on purpose: "we could not
+# assess this" is a real, reportable outcome and must not be laundered into a risk band.
+_ENVELOPE_RISK_BANDS = ("LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN")
+
+
+def _envelope_risk_band(risk_level: str) -> str:
+    """
+    The band to record on the governance envelope.
+
+    Anything we do not recognise becomes UNKNOWN, never LOW. The old code defaulted to LOW,
+    which meant every unrecognised or unassessable outcome was recorded as the quietest
+    possible result — the exact shape of a check that reports clean when it measured nothing.
+    """
+    band = (risk_level or "").strip().upper()
+    return band if band in _ENVELOPE_RISK_BANDS else "UNKNOWN"
 
 
 def _determine_action(risk_level: str, settings) -> str:
@@ -257,4 +292,7 @@ def _audit_record(response: VerifyResponse, req: VerifyRequest, action: str) -> 
         "action_taken": action,
         "source": "proxy",
         "error": response.error,
+        # Carried so the operator dashboard can distinguish an ASSESSED verdict from a
+        # couldn't-assess one; without it a LOW off zero features looks like evidence.
+        "evidence_depth_limited": response.evidence_depth_limited,
     }
