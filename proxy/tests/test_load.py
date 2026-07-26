@@ -40,6 +40,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 if HAS_LOCUST:
+    # See the note in test_verify_latency_under_load: retired-at-vendor, profiled locally,
+    # never egressed. Intentional.
     MODELS = ["claude-sonnet-4-6", "gpt-4o", "grok-3-mini-fast"]
     PROMPTS = [
         ("What is the capital of France?", "The capital of France is Paris."),
@@ -137,6 +139,10 @@ async def test_concurrent_async_load():
       3. p99 latency < 50ms
     """
     n = 1_000
+    # grok-3-mini-fast is RETIRED at the vendor and kept here deliberately: this benchmark
+    # measures local profile-lookup and scoring latency, never egresses to xAI, and needs an
+    # id that HAS a profile in profiles/. Retired-model profiles are retained on purpose, so
+    # this is the correct choice — do not "modernise" it to a live id that has no profile.
     models = ["claude-sonnet-4-6", "gpt-4o", "grok-3-mini-fast"]
 
     async with httpx.AsyncClient() as client:

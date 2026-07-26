@@ -140,7 +140,7 @@ async def arkheia_audit_log(session_id: str | None = None, limit: int = 50) -> d
 ))
 async def run_grok(
     prompt: str,
-    model: str = "grok-4-fast-non-reasoning",
+    model: str = "grok-4.20-non-reasoning",
 ) -> dict:
     """
     Call xAI Grok and screen the response through Arkheia.
@@ -150,16 +150,24 @@ async def run_grok(
 
     Args:
         prompt: The prompt to send to Grok
-        model:  Grok model ID (default: grok-4-fast-non-reasoning)
-                Options: grok-4-fast-reasoning, grok-4-1-fast-reasoning,
-                         grok-3, grok-code-fast-1
+        model:  Grok model ID (default: grok-4.20-non-reasoning)
+                Fleet pair: grok-4.20-non-reasoning / grok-4.20-reasoning —
+                identical pricing across both modes, so switching mode does not
+                change the cost model.
+                Reserved (do not use for routine fleet work): grok-4.5 — the
+                frontier tier at 2.4x the output price.
+                `grok-code-fast-1` still resolves, but as an ALIAS onto a
+                different underlying model than it originally named; see
+                profiles/grok-code-fast-1.yaml before relying on it.
 
     Returns:
         response:           The model's response text
         model:              Model ID used
         prompt_hash:        SHA-256 of the prompt (for reproducibility)
         arkheia:            Full detection result (risk_level, confidence, etc.)
-        error:              Set if provider call failed
+        error:              Set if provider call failed. `auth_failed` means the
+                            API key was rejected — distinct from `http_400`,
+                            which means the request itself was bad.
     """
     try:
         check("run_grok")
