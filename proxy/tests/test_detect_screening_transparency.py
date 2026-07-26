@@ -400,30 +400,65 @@ def test_local_field_set_covers_what_the_hosted_path_promises(client: TestClient
 
     Asserted as a DIFFERENTIAL against the runtime mapping itself (parsed from
     the source) rather than a hand-copied list, so the two cannot drift apart.
+
+    The hosted path no longer builds its response as a dict literal: after the
+    PR #17 finding-1 fix it routes through ``_detection_response()``, the single
+    constructor every ProxyClient return path uses. This parser handles BOTH
+    forms deliberately. The literal branch is retained rather than deleted
+    because it is what must never come back — a per-path literal is exactly how
+    the transparency fields went missing on eight of nine paths — and the guard
+    below asserts the parse found something either way, so a future refactor
+    cannot quietly reduce this differential to comparing against nothing. (It
+    did exactly that when the constructor landed: CI caught it here, which is
+    the check doing its job.)
     """
     import ast
     import inspect
 
-    from mcp_server.proxy_client import ProxyClient
+    from mcp_server.proxy_client import DETECTION_FIELDS, ProxyClient
 
     source = inspect.getsource(ProxyClient._verify_hosted)
     tree = ast.parse(source.strip())
 
-    # Only the dict the SUCCESS path RETURNS — not the request payload and not the
+    # Only what the SUCCESS path RETURNS — not the request payload and not the
     # request headers, which are also dict literals in that function.
     hosted_keys: set[str] = set()
+    routed_through_constructor = False
     for node in ast.walk(tree):
-        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+        if not isinstance(node, ast.Return):
+            continue
+        value = node.value
+        if isinstance(value, ast.Dict):
             hosted_keys |= {
                 k.value
-                for k in node.value.keys
+                for k in value.keys
                 if isinstance(k, ast.Constant) and isinstance(k.value, str)
             }
+        elif (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id == "_detection_response"
+        ):
+            routed_through_constructor = True
+            # The constructor emits the whole contract regardless of which
+            # keywords this call site passes (unpassed fields take their
+            # degraded defaults), so the PROMISED field set is the contract.
+            hosted_keys |= set(DETECTION_FIELDS)
 
     assert hosted_keys, (
         "Parsed ZERO returned response keys out of ProxyClient._verify_hosted — "
-        "this differential would then be comparing against nothing."
+        "this differential would then be comparing against nothing. The hosted "
+        "path returns neither a dict literal nor a _detection_response() call, "
+        "so this parser no longer understands how the response is built."
     )
+    if routed_through_constructor:
+        # Cross-check the contract against what the constructor really builds,
+        # so DETECTION_FIELDS cannot drift into a promise nothing keeps.
+        from mcp_server.proxy_client import _detection_response
+        assert set(_detection_response(source="differential")) == set(DETECTION_FIELDS), (
+            "DETECTION_FIELDS does not describe what _detection_response() "
+            "builds, so this differential is comparing against a stale contract."
+        )
     # Guard the parse itself: if it silently started matching the request payload
     # or headers instead of the response mapping, this differential would be
     # asserting the wrong contract.
