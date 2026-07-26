@@ -38,7 +38,9 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import base64
 import json
+import quopri
 import random
 import re
 import string
@@ -61,6 +63,27 @@ def _rnd(n: int, alphabet: str = _ALNUM, seed: int = 0) -> str:
     """Deterministic synthetic high-entropy body. Never a real credential."""
     rng = random.Random(f"arkheia-floor-{seed}-{n}-{len(alphabet)}")
     return "".join(rng.choice(alphabet) for _ in range(n))
+
+
+# --- transport encodings, for the wrapper corpus ---------------------------
+# These are the encodings a credential picks up in transit. None of them is
+# obfuscation: each is reversed for free by a grep-and-decode.
+
+def _pct(s: str) -> str:
+    """STRICT percent-encoding — every non-alphanumeric, hyphens included."""
+    return "".join(c if c.isalnum() else "%%%02X" % ord(c) for c in s)
+
+
+def _b64(s: str) -> str:
+    return base64.b64encode(s.encode()).decode()
+
+
+def _b64url(s: str) -> str:
+    return base64.urlsafe_b64encode(s.encode()).decode().rstrip("=")
+
+
+def _qp(s: str) -> str:
+    return quopri.encodestring(s.encode()).decode()
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +139,56 @@ SECRET_SHAPES: list[tuple[str, str]] = [
     ("inside-quoted-shell",   "curl -H 'x-api-key: sk-ant-api03-" + _rnd(80, seed=35)
                               + "' https://api.example"),
     ("key-eq-value-form",     "ANTHROPIC_API_KEY=sk-ant-api03-" + _rnd(80, seed=36)),
+
+    # --- ENCODING WRAPPERS (Codex review, PR #16) -------------------------
+    # Every pattern above matches the credential's PLAINTEXT body, so a
+    # reversible transport encoding removes the anchor and the value reaches
+    # disk fully recoverable. Note `quote(safe="")` alone does NOT reproduce
+    # this: it leaves `-._~` untouched, so a hyphenated key is unchanged and
+    # the plain pattern still fires. The leak needs a STRICT encoder.
+    ("pct-encoded-anthropic",   "callback=" + _pct("sk-ant-api03-" + _rnd(60, seed=50))),
+    ("pct-encoded-double",      "cb=" + _pct("sk-ant-api03-" + _rnd(60, seed=51)).replace("%", "%25")),
+    ("pct-encoded-github-pat",  "next=" + _pct("ghp_" + _rnd(36, seed=52))),
+    ("b64-wrapped-anthropic",   "payload=" + _b64("sk-ant-api03-" + _rnd(60, seed=53))),
+    ("b64-wrapped-labelled-aws",
+     "blob=" + _b64("aws_secret_access_key=" + _rnd(40, _B64STD, seed=54))),
+    ("b64url-wrapped-xai",      "state=" + _b64url("xai-" + _rnd(40, seed=55))),
+    # An OPAQUE body behind an encoding. The entries above all decode to a
+    # value some pattern recognises, so `_contains_secret` alone catches them
+    # and they do NOT exercise the encoded pass's opaque branch: a mutation
+    # deleting that branch survived until this case existed. Percent-encoding
+    # only escapes `+` and `/` in a base64 body, which is enough to shatter it
+    # into sub-threshold fragments that the entropy rule cannot see.
+    # The `+` and `/` are placed EXPLICITLY, not left to the PRNG: a seeded
+    # 40-char draw happened to contain neither, percent-encoding was then a
+    # no-op, and the case silently tested the plain opaque rule instead of the
+    # encoded one. A corpus entry that does not contain the thing it is testing
+    # is not a test.
+    ("pct-encoded-opaque-in-context",
+     "aws_secret=" + _pct(_rnd(24, _ALNUM, seed=64) + "/"
+                          + _rnd(24, _ALNUM, seed=65))),
+
+    # --- ARMOURED BLOCKS beyond PEM --------------------------------------
+    # Same delimiter, same armour, different noun. The first pattern hardcoded
+    # the `PRIVATE KEY` label, so PGP walked through.
+    ("pgp-private-key-block",
+     "-----BEGIN PGP PRIVATE KEY BLOCK-----\n"
+     + _rnd(64, _B64STD, seed=58) + "\n" + _rnd(64, _B64STD, seed=59)
+     + "\n-----END PGP PRIVATE KEY BLOCK-----"),
+    ("openssh-private-key-block",
+     "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+     + _rnd(64, _B64STD, seed=60) + "\n-----END OPENSSH PRIVATE KEY-----"),
+
+    # --- OPAQUE values no prefix identifies -------------------------------
+    # The shape the real incident had. No value-anchored pattern can EVER fire
+    # on these: there is nothing to anchor to. Caught by entropy gated on
+    # credential context, which is what the `====AWS PROD====` heading is.
+    ("opaque-aws-under-equals-heading",
+     "====AWS PROD====\n" + _rnd(40, _B64STD, seed=61)),
+    ("opaque-aws-bare-line-in-context",
+     "credentials\n" + _rnd(40, _B64STD, seed=62) + "\nend"),
+    ("opaque-token-under-heading",
+     "====SERVICE ACCESS TOKEN====\n" + _rnd(48, _B64STD, seed=63)),
 ]
 
 # ---------------------------------------------------------------------------
@@ -137,6 +210,53 @@ MUST_SURVIVE: list[tuple[str, str]] = [
     ("absolute-path",      "/var/log/arkheia/audit.jsonl"),
     ("upstream-url",       "https://api.anthropic.com/v1/messages"),
     ("prose",              "The response cited four sources, three of which resolve."),
+
+    # --- ADVERSARIAL near-misses (Codex review, PR #16) -------------------
+    # The opaque-value rule fires on ENTROPY gated by CONTEXT, so the cases
+    # that matter are legitimate audit content sitting NEXT TO a credential
+    # word. Entropy alone would eat every one of these, and an audit log
+    # scrubbed to uselessness fails its own purpose just as surely as a leaky
+    # one fails its own. Each is excluded structurally — hex-only, UUID shape,
+    # no letters, or base64 that unwraps to clean text — not by a length
+    # threshold that would drift.
+    ("sha256-under-apikey-heading",
+     "====api_key rotation audit====\n" + _rnd(64, _HEX, seed=70)),
+    ("git-sha-in-secret-scan-line",
+     "secret scan completed at commit " + _rnd(40, _HEX, seed=71)),
+    ("uuid-beside-token-label",
+     "token_request_id=3f2504e0-4f89-11d3-9a0c-0305e82c3301"),
+    ("docker-digest-in-credentials-line",
+     "credentials image sha256:" + _rnd(58, _HEX, seed=72)),
+    ("data-uri-png-under-password-heading",
+     "====password reset email====\ndata:image/png;base64,iVBORw0KGgoAAAANSUhEUg"
+     + _rnd(200, _B64STD, seed=73) + "=="),
+    ("detection-id-near-auth",
+     "auth event det_01HQ8X7Y6Z5W4V3U2T1S0R9Q8P recorded"),
+    ("numeric-id-near-secret",
+     "secret rotation for account 884723519920347715"),
+    ("model-id-near-apikey",
+     "api_key profile for claude-opus-4-8-20260115 loaded"),
+    ("upper-constant-near-key",
+     "key ARKHEIA_DETECTION_ENGINE_VERSION_TWO_POINT_ZERO"),
+    ("b64-prose-near-token",
+     "token note " + _b64("the quick brown fox jumps over the lazy dog")),
+    ("pct-encoded-docs-url-near-apikey",
+     "apikey docs https%3A%2F%2Fdocs.arkheia.ai%2Fguide%2Fgetting-started"),
+    ("chain-hash-field-near-secret",
+     "secret chain this_hash " + "0" * 64),
+    ("semver-near-private-key",
+     "private_key rotation shipped in v2.14.3+build.20260726.a1b2c3d"),
+    ("prose-with-password-word",
+     "The password policy requires rotation every ninety days for operators."),
+    # MIXED-CASE hex and UUID. The lowercase forms above are excluded by the
+    # upper/lower/digit rule alone, so they do NOT exercise the hex-only and
+    # UUID guards; a mutation deleting those guards survived until these two
+    # cases existed. Mixed-case digests and UUIDs occur wherever a value has
+    # been through a display layer.
+    ("mixed-case-hex-digest-near-secret",
+     "secret chain 9F8e7D6c5B4a39281706F5e4D3c2B1a098765432abcd1234abcd1234"),
+    ("mixed-case-uuid-near-token",
+     "token id 3F2504e0-4F89-11d3-9A0c-0305E82c3301"),
 ]
 
 # A stable non-secret token written alongside every record. Its presence on

@@ -32,6 +32,30 @@ DESIGN CONTRACT — read before adding or widening a pattern
    base64 payloads (see 2). Pinned as a known-partial case rather than left
    as an unstated surprise.
 
+4. **A value-anchored pattern cannot see an OPAQUE credential.** Point 1 says
+   match the shape of the value; that is necessary and it is not sufficient.
+   It holds for credentials with a recognisable prefix, and it fails entirely
+   for ones without — an AWS secret access key has no prefix to anchor to, which
+   is precisely the shape the real incident had. Those are caught by
+   ``_is_opaque_credential``: entropy AND credential context, never entropy
+   alone. Entropy alone eats every sha, UUID and base64 payload in the log.
+
+WHAT IS NOT HANDLED — named, so absence is not mistaken for coverage
+--------------------------------------------------------------------
+  * **Quoted-printable.** Implemented, then removed: it could not be shown to
+    catch anything (every mutation deleting it survived). In ASCII credential
+    text QP only escapes ``=``, which in practice is trailing base64 padding,
+    leaving the body in front of it long enough for the entropy rule. The
+    ``=\\n`` soft-line-break form does hide a credential, but that is the same
+    shape as limitation 3 and is pinned there.
+  * **Opaque values with NO credential context anywhere in the string.** A bare
+    high-entropy value under a neutral label (``redirect=<40 chars>``) is not
+    redacted, encoded or not. Closing it needs entropy alone, which fails
+    point 2. This is a deliberate trade, not an oversight.
+  * **Compression wrappers** (gzip/zlib inside base64) are not decompressed.
+  * **Split-across-records** secrets: redaction is per string value, so a
+    credential assembled from two fields is invisible to it.
+
 Hook for enterprise upgrade: swap the pattern tables for a runtime-loaded
 policy (e.g. from HashiCorp Vault, AWS Secrets Manager) and add
 field-name-based rules for context-sensitive redaction.
@@ -40,7 +64,6 @@ field-name-based rules for context-sensitive redaction.
 import base64
 import hashlib
 import math
-import quopri
 import re
 import urllib.parse
 from typing import Any
@@ -209,14 +232,16 @@ def _base64_views(tok: str) -> list[str]:
     return []
 
 
-def _qp_views(tok: str) -> list[str]:
-    """Quoted-printable view (`=3D` escapes). Soft line breaks: see LIMITS."""
-    if not re.search(r'=[0-9A-F]{2}', tok):
-        return []
-    try:
-        return [quopri.decodestring(tok.encode()).decode("utf-8")]
-    except Exception:
-        return []
+# QUOTED-PRINTABLE is NOT handled. It was implemented, then removed, because it
+# could not be shown to catch anything:
+#   * `=XX` escapes — in ASCII credential text QP only ever escapes `=` itself,
+#     which in practice is base64 padding at the END of a body. The body in
+#     front of it stays long enough for the entropy rule to see, so a QP decode
+#     changes no outcome. Every mutation deleting the QP pass SURVIVED.
+#   * `=\n` soft line breaks — these do hide a credential, by wrapping it across
+#     lines, but that is the same shape as limitation 3 above (a secret split
+#     across a newline) and is pinned there as a known partial.
+# An unproven mechanism is worse than an absent one: it reads as coverage.
 
 
 def _contains_secret(text: str) -> bool:
@@ -228,7 +253,7 @@ def _contains_secret(text: str) -> bool:
 
 
 def _decoded_views(tok: str) -> list[str]:
-    return _percent_views(tok) + _base64_views(tok) + _qp_views(tok)
+    return _percent_views(tok) + _base64_views(tok)
 
 
 # ---------------------------------------------------------------------------
@@ -326,10 +351,21 @@ def _redact_encoded_and_opaque(value: str) -> str:
         window = lines[max(0, i - 3): i + 1]
         ctx = any(_CREDENTIAL_CONTEXT.search(w) for w in window)
 
+        def _view_is_secret(view: str) -> bool:
+            if _contains_secret(view):
+                return True
+            # Opaque bodies are only credentials in credential context, and the
+            # candidate test must run on TOKENS inside the decoded view — a
+            # whole decoded line of prose can trivially satisfy the mixed-case
+            # and entropy tests that a credential body satisfies.
+            return ctx and any(
+                _is_opaque_credential(t) for t in _OPAQUE_TOKEN.findall(view)
+            )
+
         def repl(m: "re.Match") -> str:
             tok = m.group(0)
             for view in _decoded_views(tok):
-                if _contains_secret(view) or (ctx and _is_opaque_credential(view)):
+                if _view_is_secret(view):
                     return _placeholder(tok)
             return tok
 
