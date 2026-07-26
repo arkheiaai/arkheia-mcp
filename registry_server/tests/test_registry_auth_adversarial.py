@@ -45,7 +45,7 @@ whitespace shaping turns a key that is not configured into one that is.
 """
 
 import hashlib
-import os
+import re
 
 import pytest
 import yaml
@@ -109,8 +109,21 @@ def protected_routes() -> list[tuple[str, str]]:
 
 
 def concrete(path: str) -> str:
-    """Substitute a real, resolvable id for any path parameter."""
-    return path.replace("{model_id}", "adversarial-model")
+    """
+    Substitute a real, resolvable id for EVERY path parameter, whatever
+    converter it declares.
+
+    Deliberately a regex over `{...}` rather than `.replace("{model_id}", ...)`:
+    PR #13 re-declares the legacy download route as `{model_id:path}`, and a
+    literal replace silently produced the un-substituted URL — which 404s, so
+    every refusal assertion on that route would still have "passed" while
+    testing a route that does not exist. A parametrised test that quietly
+    stops exercising its subject is the failure mode this whole file exists
+    to avoid, so the substitution asserts it consumed every placeholder.
+    """
+    concrete_path = re.sub(r"\{[^}]+\}", "adversarial-model", path)
+    assert "{" not in concrete_path, f"unsubstituted path parameter in {path!r}"
+    return concrete_path
 
 
 def request_for(client: TestClient, method: str, path: str, **kw):
