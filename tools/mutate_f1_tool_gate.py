@@ -309,6 +309,22 @@ MUTANTS: list[Mutant] = [
         expect="inv6",
     ),
     Mutant(
+        "M34", SERVER,
+        "if __name__ == \"__main__\":\n    startup_policy_selfcheck()\n    mcp.run()",
+        "if __name__ == \"__main__\":\n    mcp.run()  # MUTANT: no boot coverage check",
+        "FLOOR INV-8 sees an entry point skip the boot self-check",
+        suite="floor",
+        expect="inv8",
+    ),
+    Mutant(
+        "M35", "server.py",
+        "if __name__ == \"__main__\":\n    startup_policy_selfcheck()\n    mcp.run()",
+        "if __name__ == \"__main__\":\n    mcp.run()  # MUTANT: root shim skips the check",
+        "FLOOR INV-8 sees the ROOT entry point skip the boot self-check",
+        suite="floor",
+        expect="inv8",
+    ),
+    Mutant(
         "M33", GATE,
         "    if policy.requires_human_confirm and not human_confirmed:",
         "    if policy.network_egress and not human_confirmed:",

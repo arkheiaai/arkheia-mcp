@@ -738,3 +738,89 @@ def test_inv7_the_set_of_policy_deny_sites_is_pinned():
         f"enforcement scan is now blind to real enforcement, or a refusal has been "
         f"added somewhere nobody reviewed. Update DENY_FUNCTIONS deliberately."
     )
+
+
+# ---------------------------------------------------------------------------
+# INV-8 — no entry point starts the server without the boot coverage check
+# ---------------------------------------------------------------------------
+
+# Every module whose __main__ block starts the MCP server. Both documented entry
+# points route here (`python -m mcp_server.server`; the root `server.py` shim that
+# ARKHEIA_INSTALL.md's Windows config points at). Asserted exactly, so a THIRD
+# launcher cannot appear without being reviewed.
+SERVER_ENTRY_POINTS = ("mcp_server/server.py", "server.py")
+
+
+def _main_block(tree: ast.Module) -> ast.If | None:
+    for node in tree.body:
+        if isinstance(node, ast.If) and "__main__" in ast.dump(node.test):
+            return node
+    return None
+
+
+def test_inv8_every_entry_point_runs_the_boot_selfcheck_before_run():
+    """``startup_policy_selfcheck`` is the RUNTIME backstop for INV-2 — the one that
+    still holds once REGISTRY is loaded from a signed/remote policy store, where no
+    static parse can see the contents. An entry point that calls ``mcp.run()``
+    without it ships a build whose registry/advertisement parity was never checked,
+    and the published install instructions have pointed at exactly the wrong file
+    before (the INV-4 defect).
+    """
+    checked: list[str] = []
+    for rel in SERVER_ENTRY_POINTS:
+        path = ROOT / rel
+        assert path.is_file(), (
+            f"declared entry point {rel} does not exist. Either it was removed (then "
+            f"remove it here, and check no documentation still points at it) or this "
+            f"floor is looking at the wrong paths and covering nothing."
+        )
+        tree = _parse(path)
+        block = _main_block(tree)
+        assert block is not None, f"{rel} has no `if __name__ == '__main__'` block"
+
+        calls = [
+            (n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", None))
+            for n in ast.walk(block) if isinstance(n, ast.Call)
+        ]
+        assert "startup_policy_selfcheck" in calls, (
+            f"{rel} starts the server without calling startup_policy_selfcheck(). "
+            f"The boot coverage check is the runtime backstop for registry parity."
+        )
+        assert "run" in calls, (
+            f"{rel} does not call mcp.run() in its __main__ block — either this is no "
+            f"longer an entry point (remove it from SERVER_ENTRY_POINTS) or the "
+            f"launcher moved and this check now covers nothing."
+        )
+        assert calls.index("startup_policy_selfcheck") < calls.index("run"), (
+            f"{rel} calls mcp.run() BEFORE the self-check, so an ungoverned "
+            f"advertisement is already live by the time the check refuses."
+        )
+        checked.append(rel)
+
+    # Work-done assertion: a loop that checked nothing must not pass.
+    assert checked == list(SERVER_ENTRY_POINTS), (
+        f"checked {checked}, expected {list(SERVER_ENTRY_POINTS)}"
+    )
+
+
+def test_inv8b_no_UNDECLARED_module_starts_the_server():
+    """The companion that makes INV-8 exhaustive rather than a spot check: any other
+    production module calling ``mcp.run()`` is a launcher nobody reviewed, and the
+    gate's boot check does not apply to it."""
+    launchers = sorted(
+        str(p.relative_to(ROOT))
+        for p in _production_py_files()
+        if any(
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "run"
+            and isinstance(n.func.value, ast.Name)
+            and n.func.value.id == "mcp"
+            for n in ast.walk(_parse(p))
+        )
+    )
+    assert launchers == sorted(SERVER_ENTRY_POINTS), (
+        f"modules calling mcp.run() are {launchers}, declared entry points are "
+        f"{sorted(SERVER_ENTRY_POINTS)}. An undeclared launcher is an unreviewed "
+        f"entry point that the boot coverage self-check may not cover."
+    )

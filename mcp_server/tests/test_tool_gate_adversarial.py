@@ -222,6 +222,76 @@ class TestNoPathToExecutionBypassesTheGate:
         assert isinstance(root_entry.mcp, srv.GatedFastMCP)
         assert root_entry.startup_policy_selfcheck is srv.startup_policy_selfcheck
 
+    async def test_the_REAL_PROTOCOL_HANDLER_is_gated_and_records(self, probe):
+        """A THIRD transport, and the only one an orchestrator actually reaches.
+
+        The two transports the existing suite uses are a direct coroutine call and
+        ``FastMCP.call_tool``. Neither proves the wiring: FastMCP registers its
+        protocol handlers in ``__init__`` by binding ``self.call_tool``, and if that
+        binding ever changed — a decorator on the low-level Server, a different
+        method name, a handler that resolves the tool itself — the subclass override
+        would be a method nobody calls, and every test above would still pass.
+
+        So drive ``request_handlers[CallToolRequest]`` directly: the exact callable
+        the MCP protocol layer invokes, for stdio, SSE and streamable-HTTP alike.
+        """
+        from mcp.types import CallToolRequest, CallToolRequestParams
+
+        handler = srv.mcp._mcp_server.request_handlers[CallToolRequest]
+        result = await handler(
+            CallToolRequest(
+                method="tools/call",
+                params=CallToolRequestParams(name="exfiltrate", arguments={}),
+            )
+        )
+
+        rendered = str(result)
+        assert "Policy violation" in rendered
+        assert "exfiltrate" in rendered
+        assert "not in allowlist" in rendered
+
+        rows = probe.rows()
+        assert len(rows) == 1, (
+            f"the protocol handler produced {len(rows)} receipt rows for one refused "
+            f"call. If it is zero, the gate override is a method the protocol layer "
+            f"does not call, and every other test in this file is passing against "
+            f"wiring that does not exist."
+        )
+        assert rows[0]["decision"] == receipts.DECISION_DENIED
+        assert rows[0]["tool"] == "exfiltrate"
+        # And the receipt id the caller was handed is IN the rendered refusal, so a
+        # denied orchestrator has something quotable.
+        assert rows[0]["receipt_id"] in rendered
+
+    async def test_every_MAIN_block_runs_the_boot_selfcheck_before_run(self):
+        """An entry point that starts the server without the coverage self-check ships
+        a build whose registry/advertisement parity was never checked. Both documented
+        entry points (``python -m mcp_server.server`` and the root shim) are asserted
+        here at the source level; floor INV-8 makes it a required CI check.
+        """
+        import ast
+        from pathlib import Path
+
+        root = Path(srv.__file__).resolve().parents[1]
+        for rel in ("mcp_server/server.py", "server.py"):
+            src = (root / rel).read_text()
+            tree = ast.parse(src)
+            main_blocks = [
+                n for n in tree.body
+                if isinstance(n, ast.If)
+                and "__main__" in ast.dump(n.test)
+            ]
+            assert main_blocks, f"{rel} has no __main__ block"
+            body = ast.dump(main_blocks[0])
+            assert "startup_policy_selfcheck" in body, (
+                f"{rel} starts the server without running the boot coverage "
+                f"self-check"
+            )
+            assert body.index("startup_policy_selfcheck") < body.index("'run'"), (
+                f"{rel} calls mcp.run() before the self-check, so an ungoverned "
+                f"advertisement would already be live when the check refused"
+            )
+
     async def test_the_shipped_instance_is_a_GATED_subclass_not_bare_FastMCP(self):
         """A gated subclass nobody instantiates gates nothing."""
         assert isinstance(srv.mcp, srv.GatedFastMCP)
