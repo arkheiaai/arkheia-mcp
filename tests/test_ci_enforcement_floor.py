@@ -246,19 +246,35 @@ class PytestInvocation:
         self.targets: list[str] = []
         self.ignores: list[str] = []
         self.python_files: list[str] = []
+        # -k / -m / --deselect DESELECT tests rather than skip them. This parser
+        # does not model their effect on collection; it records them verbatim so
+        # INV-4's unmodelled-path surface can report them by name instead of the
+        # invariant silently over-claiming coverage.
+        self.raw_filters: list[str] = []
         skip_next = False
+        pending = ""
         for tok in tokens[1:]:  # tokens[0] == "pytest"
             if skip_next:
                 # Value of a separated option, e.g. `-o python_files="..."`.
                 if tok.startswith("python_files="):
                     self.python_files = tok.split("=", 1)[1].split()
+                if pending in ("-k", "-m"):
+                    self.raw_filters.extend([pending, tok])
                 skip_next = False
+                pending = ""
                 continue
             if tok in ("-o", "--override-ini", "-p", "-k", "-m"):
                 skip_next = True
+                pending = tok
                 continue
             if tok.startswith("--ignore="):
                 self.ignores.append(tok.split("=", 1)[1])
+                continue
+            if tok.startswith("--deselect"):
+                self.raw_filters.append(tok)
+                continue
+            if re.match(r"^-[km]=?.+", tok):
+                self.raw_filters.append(tok)
                 continue
             if tok.startswith("-o"):
                 inline = tok[2:]
@@ -1104,8 +1120,60 @@ def test_inv3_positive_control() -> None:
 
 
 # ---------------------------------------------------------------------------
-# INV-4 — a strict xfail must not be nested under a conditional skip
+# INV-4 — a strict xfail must not sit under anything that can skip it
 # ---------------------------------------------------------------------------
+# CODEX FINDING 2 (2026-07-26), fixed here: the first implementation propagated
+# only CLASS and FUNCTION decorators. Probe: a module-level
+# `pytestmark = pytest.mark.skipif(not _api_key, reason=...)` plus a
+# `@pytest.mark.xfail(strict=True)` on a function gave pytest exit 0 / 1 skipped
+# while the guard returned `findings=[]` and `conditional_skip=0` — the whole
+# floor tier stayed green (14 passed) with the evasion sitting in the tree. So
+# the "a check that never runs" invariant missed the commonest way to skip a
+# whole module.
+#
+# SKIP-PROPAGATION PATHS **HANDLED** (each with a positive control below):
+#   (a) function decorator                     @pytest.mark.skipif(...)
+#   (b) class decorator, inherited by methods  @pytest.mark.skipif(...) on class
+#   (c) MODULE-level `pytestmark = <mark>`                    <- Codex finding 2
+#   (d) MODULE-level `pytestmark = [<mark>, ...]` / tuple     <- Codex finding 2
+#   (e) CLASS-body `pytestmark = ...` (same two shapes)
+#   (f) `pytestmark += [...]` and `pytestmark: list = [...]`
+#   (g) unconditional `@pytest.mark.skip` / `pytest.mark.skip(...)`, which also
+#       short-circuits the xfail (bare attribute form included)
+#   (h) `skipif(<always-true literal>)`, e.g. `skipif(True, ...)`
+#   Not flagged, deliberately: `skipif(False, ...)` never skips, and a NON-strict
+#   xfail claims nothing.
+#
+# SKIP-PROPAGATION PATHS **NOT HANDLED**, BY NAME. None is silently ignored;
+# each is surfaced as NOT-OBSERVED by the invariant named against it, so an
+# unenumerated evasion cannot read as absence:
+#   1. `conftest.py` collection hooks — `pytest_collection_modifyitems` /
+#      `pytest_collection_modify*` can attach a skip to any item at runtime.
+#      -> surfaced by `test_inv4_unmodelled_skip_paths_are_surfaced`.
+#   2. `addopts` in pytest.ini / setup.cfg / pyproject.toml / tox.ini carrying
+#      `-k` or `-m`, which DESELECTS rather than skips (an unevaluated xfail
+#      either way).
+#      -> surfaced by `test_no_deselection_filter_hides_tests_from_a_required_context`
+#         (unconditional: deselection is also a hole in INV-3's collection model).
+#   3. `-k` / `-m` / `--deselect` in the workflow's own pytest command.
+#      -> same invariant as (2).
+#   4. A fixture (or module-level code) raising `pytest.skip(...)` — including
+#      `pytest.skip(..., allow_module_level=True)`.
+#   5. `pytest.importorskip(...)`.
+#   6. Dynamic marks: `item.add_marker(...)` / `request.node.add_marker(...)`,
+#      and marks built via `getattr(pytest.mark, name)`.
+#   7. Per-parameter marks: `pytest.param(..., marks=pytest.mark.skip)`.
+#      (4)-(7) -> surfaced by `test_inv4_unmodelled_skip_paths_are_surfaced`.
+#   8. `xfail_strict = true` in pytest config, which makes EVERY plain xfail
+#      strict without the token `strict=True` appearing anywhere — so the mark
+#      walk below would under-count strict xfails.
+#      -> surfaced UNCONDITIONALLY by `xfail_strict_config()`, asserted inside
+#         INV-4 itself; the repo's real config is checked, not a synthetic one.
+#   9. `--deselect` in the workflow command (recorded verbatim by
+#      `PytestInvocation.raw_filters`, surfaced with the -k/-m filters).
+#   Genuinely unmodelled and NOT surfaced: an `if:` condition on the workflow job
+#   or step, which can skip a required job's steps at runtime while the check-run
+#   still reports success.
 
 def _dotted(node: ast.AST) -> str:
     if isinstance(node, ast.Attribute):
@@ -1117,101 +1185,182 @@ def _dotted(node: ast.AST) -> str:
     return ""
 
 
-def _is_strict_xfail(dec: ast.AST) -> bool:
-    if not isinstance(dec, ast.Call):
+def _is_strict_xfail(mark: ast.AST) -> bool:
+    if not isinstance(mark, ast.Call):
         return False
-    if not _dotted(dec.func).endswith("mark.xfail"):
+    if not _dotted(mark.func).endswith("mark.xfail"):
         return False
-    for kw in dec.keywords:
+    for kw in mark.keywords:
         if kw.arg == "strict":
             return isinstance(kw.value, ast.Constant) and kw.value.value is True
     return False
 
 
-def _is_conditional_skip(dec: ast.AST) -> bool:
-    """`skipif(<runtime condition>, ...)` — a literal True/False is not runtime."""
-    if not isinstance(dec, ast.Call):
-        return False
-    if not _dotted(dec.func).endswith("mark.skipif"):
-        return False
-    cond = None
-    if dec.args:
-        cond = dec.args[0]
-    else:
-        for kw in dec.keywords:
+def _skip_kind(mark: ast.AST) -> str | None:
+    """
+    Why this mark can stop a strict xfail from ever being evaluated, or None.
+
+    `skipif(False, ...)` returns None: it never skips, so the xfail is still
+    evaluated. `skipif(True, ...)` and a bare/called `skip` DO always skip.
+    """
+    if not isinstance(mark, ast.Call):
+        # Bare attribute form: `@pytest.mark.skip` with no parentheses.
+        return "unconditional skip" if _dotted(mark).endswith("mark.skip") else None
+    dotted = _dotted(mark.func)
+    if dotted.endswith("mark.skip"):
+        return "unconditional skip"
+    if not dotted.endswith("mark.skipif"):
+        return None
+    cond = mark.args[0] if mark.args else None
+    if cond is None:
+        for kw in mark.keywords:
             if kw.arg == "condition":
                 cond = kw.value
     if cond is None:
-        return False
-    return not isinstance(cond, ast.Constant)
+        return None
+    if isinstance(cond, ast.Constant):
+        return "skipif(<always-true literal>)" if cond.value else None
+    return "conditional skipif"
 
 
-def strict_xfail_under_conditional_skip(source: str, label: str) -> tuple[list[str], dict]:
+def _pytestmark_assignments(body: list[ast.stmt]) -> tuple[list[ast.AST], list[str]]:
     """
-    Find every strict xfail whose evaluation a conditional skip can prevent.
+    Marks contributed by `pytestmark = ...` in a module or class body.
 
-    Returns (findings, stats). Class-level marks are inherited by methods, which
-    is exactly how the real defect was shaped: the `skipif` sat on the class and
-    the `strict=True` xfail on the method.
+    Handles `= <mark>`, `= [<mark>, ...]`, `= (<mark>, ...)`, `+= [...]` and the
+    annotated form. Returns ``(marks, unmodelled)``; `unmodelled` names any
+    element this parser cannot classify (e.g. a comprehension or a bare Name),
+    so an opaque pytestmark reads as NOT-OBSERVED rather than as no mark.
     """
-    stats = {"strict_xfail": 0, "conditional_skip": 0}
+    marks: list[ast.AST] = []
+    unmodelled: list[str] = []
+    for node in body:
+        if isinstance(node, ast.Assign):
+            targets, value = node.targets, node.value
+        elif isinstance(node, ast.AugAssign):
+            targets, value = [node.target], node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, value = [node.target], node.value
+        else:
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in targets):
+            continue
+        elts = list(value.elts) if isinstance(value, (ast.List, ast.Tuple)) else [value]
+        for elt in elts:
+            if isinstance(elt, (ast.Call, ast.Attribute)):
+                marks.append(elt)
+            else:
+                unmodelled.append(
+                    f"line {getattr(elt, 'lineno', '?')}: a pytestmark element is "
+                    f"{type(elt).__name__}, not a `pytest.mark.*` reference — this "
+                    f"parser cannot tell whether it is a skip"
+                )
+    return marks, unmodelled
+
+
+def strict_xfail_under_skip(source: str, label: str) -> tuple[list[str], dict]:
+    """
+    Every strict xfail that something in scope can prevent from being evaluated.
+
+    Returns ``(findings, stats)``. Marks are collected from function decorators,
+    class decorators (inherited by methods), and `pytestmark` assignments at
+    module and class scope — the last of which is Codex finding 2. Each finding
+    names the PROVENANCE of the skip, because "there is a skip somewhere above
+    you" is not actionable.
+
+    ``stats["unmodelled"]`` is non-empty when a `pytestmark` element could not be
+    classified; callers must treat that as NOT-OBSERVED, never as clean.
+    """
+    stats = {
+        "strict_xfail": 0,
+        "skip_mark": 0,
+        "module_pytestmark": 0,
+        "class_pytestmark": 0,
+        "functions": 0,
+        "unmodelled": [],
+    }
     findings: list[str] = []
     tree = ast.parse(source)
 
-    def scan(node: ast.AST, inherited: list[ast.AST], owner: str) -> None:
-        for child in getattr(node, "body", []):
+    def count(marks: list[ast.AST]) -> None:
+        stats["strict_xfail"] += sum(1 for m in marks if _is_strict_xfail(m))
+        stats["skip_mark"] += sum(1 for m in marks if _skip_kind(m))
+
+    def scan(node: ast.AST, inherited: list[tuple[ast.AST, str]], owner: str) -> None:
+        body = list(getattr(node, "body", []))
+        pm_marks, pm_unmodelled = _pytestmark_assignments(body)
+        stats["unmodelled"].extend(f"{label}:{u}" for u in pm_unmodelled)
+        if pm_marks:
+            key = "module_pytestmark" if isinstance(node, ast.Module) else "class_pytestmark"
+            stats[key] += len(pm_marks)
+            count(pm_marks)
+        where = "module-level `pytestmark`" if isinstance(node, ast.Module) else (
+            f"class-body `pytestmark` on {owner.rstrip(':')}"
+        )
+        scope = inherited + [(m, where) for m in pm_marks]
+
+        for child in body:
             if isinstance(child, ast.ClassDef):
-                marks = list(child.decorator_list)
-                stats["conditional_skip"] += sum(
-                    1 for d in marks if _is_conditional_skip(d)
+                decs = list(child.decorator_list)
+                count(decs)
+                scan(
+                    child,
+                    scope + [(d, f"decorator on class {owner}{child.name}") for d in decs],
+                    f"{owner}{child.name}::",
                 )
-                stats["strict_xfail"] += sum(1 for d in marks if _is_strict_xfail(d))
-                scan(child, inherited + marks, f"{owner}{child.name}::")
             elif isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 own = list(child.decorator_list)
-                stats["conditional_skip"] += sum(
-                    1 for d in own if _is_conditional_skip(d)
+                count(own)
+                stats["functions"] += 1
+                all_marks = scope + [(d, "decorator on the function") for d in own]
+                if not any(_is_strict_xfail(m) for m, _ in all_marks):
+                    continue
+                skips = [
+                    f"{_skip_kind(m)} via {prov}"
+                    for m, prov in all_marks
+                    if _skip_kind(m)
+                ]
+                if not skips:
+                    continue
+                findings.append(
+                    f"{label}:{child.lineno} {owner}{child.name} carries "
+                    f"xfail(strict=True) while {len(skips)} skip mark(s) apply to "
+                    f"it — {'; '.join(skips)}. A skip short-circuits xfail "
+                    f"evaluation, so the strict tripwire can NEVER fire: it "
+                    f"advertises rigour it cannot deliver, and reads as a passing "
+                    f"rigorous test. Fix: drop strict=True and report the "
+                    f"not-observed state loudly, or remove the skip so the xfail "
+                    f"can actually be evaluated."
                 )
-                stats["strict_xfail"] += sum(1 for d in own if _is_strict_xfail(d))
-                all_marks = inherited + own
-                if any(_is_strict_xfail(d) for d in all_marks) and any(
-                    _is_conditional_skip(d) for d in all_marks
-                ):
-                    findings.append(
-                        f"{label}:{child.lineno} {owner}{child.name} carries "
-                        f"xfail(strict=True) while a conditional skipif applies "
-                        f"to it (on the function or its enclosing class). A skip "
-                        f"short-circuits xfail evaluation, so the strict "
-                        f"tripwire can NEVER fire: it advertises rigour it "
-                        f"cannot deliver, and reads as a passing rigorous test. "
-                        f"Fix: drop strict=True and report the not-observed "
-                        f"state loudly, or remove the skip so the xfail can "
-                        f"actually be evaluated."
-                    )
 
     scan(tree, [], "")
     return findings, stats
 
 
-def test_no_strict_xfail_under_a_conditional_skip() -> None:
+def test_no_strict_xfail_under_a_skip() -> None:
     test_files = _repo_test_files()
     assert test_files, "INV-4 found ZERO test files — the detector measured nothing."
 
     findings: list[str] = []
-    totals = {"strict_xfail": 0, "conditional_skip": 0}
+    unmodelled: list[str] = []
+    totals = {
+        "strict_xfail": 0, "skip_mark": 0, "module_pytestmark": 0,
+        "class_pytestmark": 0, "functions": 0,
+    }
     parsed = 0
     unparsed: list[str] = []
     for rel in test_files:
         path = ROOT / rel
         try:
             src = path.read_text(encoding="utf-8")
-            found, stats = strict_xfail_under_conditional_skip(src, rel)
+            found, stats = strict_xfail_under_skip(src, rel)
         except (SyntaxError, UnicodeDecodeError) as exc:
             # A file we could not read is NOT-OBSERVED, never a pass (floor 9(d)).
             unparsed.append(f"{rel}: {exc}")
             continue
         parsed += 1
         findings.extend(found)
+        unmodelled.extend(stats["unmodelled"])
         for k in totals:
             totals[k] += stats[k]
 
@@ -1225,11 +1374,30 @@ def test_no_strict_xfail_under_a_conditional_skip() -> None:
         f"{len(test_files) - parsed} went unexamined and must be named, not "
         "summarised (floor 9(a))."
     )
+    assert not unmodelled, (
+        "INV-4 NOT OBSERVED — a `pytestmark` element could not be classified, so "
+        "whether a skip applies is unknown and must not be read as 'no skip':\n"
+        "  - " + "\n  - ".join(unmodelled)
+    )
+    # `xfail_strict = true` in config would make this walk under-count strict
+    # xfails, so it invalidates the whole invariant rather than one file.
+    global_strict = xfail_strict_config(_config_texts())
+    assert not global_strict, (
+        "INV-4 NOT OBSERVED — pytest config turns strictness on globally:\n  - "
+        + "\n  - ".join(global_strict)
+    )
+    # Work-done, with units named (floor 9(a)).
+    assert totals["functions"], (
+        f"INV-4 parsed {parsed} test file(s) but found ZERO test functions. The "
+        f"AST walk measured nothing — not a pass."
+    )
     assert not findings, (
         f"strict xfail(s) that can never be evaluated ({parsed} file(s) parsed; "
-        f"{totals['strict_xfail']} strict-xfail mark(s) and "
-        f"{totals['conditional_skip']} conditional-skip mark(s) examined):\n  - "
-        + "\n  - ".join(findings)
+        f"{totals['functions']} function(s), {totals['strict_xfail']} strict-xfail "
+        f"mark(s), {totals['skip_mark']} skip mark(s), "
+        f"{totals['module_pytestmark']} module-level and "
+        f"{totals['class_pytestmark']} class-body pytestmark entr(y/ies) "
+        f"examined):\n  - " + "\n  - ".join(findings)
     )
 
 
@@ -1245,30 +1413,485 @@ def test_inv4_positive_control() -> None:
         "    async def test_verify_returns_real_detection(self):\n"
         "        assert True\n"
     )
-    findings, stats = strict_xfail_under_conditional_skip(bad, "<control>")
+    findings, stats = strict_xfail_under_skip(bad, "<control>")
     assert len(findings) == 1, (
         "INV-4 positive control FAILED: the detector did not flag the exact "
         "pre-fix shape of tests/test_smoke_e2e.py::TestHostedFallback (a "
         "class-level conditional skipif with a method-level strict xfail). A "
         f"detector blind to the original defect proves nothing. Got: {findings}"
     )
-    assert stats == {"strict_xfail": 1, "conditional_skip": 1}, stats
+    assert "conditional skipif via decorator on class TestHostedFallback" in findings[0]
+    assert stats["strict_xfail"] == 1 and stats["skip_mark"] == 1, stats
+    assert stats["module_pytestmark"] == 0 and stats["class_pytestmark"] == 0, stats
+    assert stats["functions"] == 1 and stats["unmodelled"] == [], stats
 
     # NEGATIVE controls — the detector must not cry wolf.
     ok_non_strict = bad.replace("strict=True", "strict=False")
-    assert strict_xfail_under_conditional_skip(ok_non_strict, "<c>")[0] == [], (
+    assert strict_xfail_under_skip(ok_non_strict, "<c>")[0] == [], (
         "INV-4 false positive: a NON-strict xfail under a skip is honest — it "
         "claims nothing — and must not be flagged."
     )
     ok_no_skip = bad.replace(
         "@pytest.mark.skipif(not _api_key, reason='no key')\n", ""
     )
-    assert strict_xfail_under_conditional_skip(ok_no_skip, "<c>")[0] == [], (
+    assert strict_xfail_under_skip(ok_no_skip, "<c>")[0] == [], (
         "INV-4 false positive: a strict xfail with no skip above it CAN be "
         "evaluated and must not be flagged."
     )
     ok_literal = bad.replace("not _api_key", "False")
-    assert strict_xfail_under_conditional_skip(ok_literal, "<c>")[0] == [], (
+    assert strict_xfail_under_skip(ok_literal, "<c>")[0] == [], (
         "INV-4 false positive: `skipif(False, ...)` never skips, so the strict "
         "xfail is still evaluated."
     )
+
+
+def test_inv4_module_level_pytestmark_codex_probe() -> None:
+    """
+    Codex finding 2, frozen as a test.
+
+    The probe module below produced `pytest ... -> exit 0, 1 skipped` (observed:
+    `SKIPPED [1] ...:7: no key`) while the pre-fix guard returned
+    `([], {'strict_xfail': 1, 'conditional_skip': 0})` — a strict tripwire that
+    can never fire, invisible to the invariant whose whole purpose is to catch
+    exactly that.
+    """
+    probe = (
+        "import pytest\n"
+        "\n"
+        "_api_key = None\n"
+        "pytestmark = pytest.mark.skipif(not _api_key, reason='no key')\n"
+        "\n"
+        "\n"
+        "@pytest.mark.xfail(reason='BLOCKED: hosted /v1/detect returns 404', strict=True)\n"
+        "def test_verify_returns_real_detection():\n"
+        "    assert False\n"
+    )
+    findings, stats = strict_xfail_under_skip(probe, "<probe>")
+    assert len(findings) == 1, (
+        "INV-4 missed Codex's probe: a module-level `pytestmark` skipif is the "
+        "commonest way to skip a whole module and must propagate to every test "
+        f"function in it. Got: {findings}"
+    )
+    assert "<probe>:8 test_verify_returns_real_detection" in findings[0], findings
+    assert "conditional skipif via module-level `pytestmark`" in findings[0], findings
+    assert stats["module_pytestmark"] == 1, stats
+    assert stats["strict_xfail"] == 1 and stats["skip_mark"] == 1, stats
+
+    # (d) the LIST form of module-level pytestmark.
+    as_list = probe.replace(
+        "pytestmark = pytest.mark.skipif(not _api_key, reason='no key')",
+        "pytestmark = [pytest.mark.asyncio,\n"
+        "              pytest.mark.skipif(not _api_key, reason='no key')]",
+    )
+    lf, lstats = strict_xfail_under_skip(as_list, "<probe>")
+    assert len(lf) == 1 and "module-level `pytestmark`" in lf[0], lf
+    assert lstats["module_pytestmark"] == 2, lstats
+
+    # (d) tuple form, and (f) the augmented / annotated forms.
+    for variant, why in (
+        ("pytestmark = (pytest.mark.skipif(not _api_key, reason='k'),)", "tuple"),
+        ("pytestmark += [pytest.mark.skipif(not _api_key, reason='k')]", "+="),
+        ("pytestmark: list = [pytest.mark.skipif(not _api_key, reason='k')]", "annotated"),
+    ):
+        src = probe.replace(
+            "pytestmark = pytest.mark.skipif(not _api_key, reason='no key')", variant
+        )
+        assert len(strict_xfail_under_skip(src, "<v>")[0]) == 1, why
+
+    # (e) CLASS-BODY pytestmark — same evasion one level down.
+    class_body = (
+        "import pytest\n"
+        "_api_key = None\n"
+        "class TestHostedFallback:\n"
+        "    pytestmark = [pytest.mark.skipif(not _api_key, reason='no key')]\n"
+        "\n"
+        "    @pytest.mark.xfail(reason='404', strict=True)\n"
+        "    def test_x(self):\n"
+        "        assert False\n"
+    )
+    cf, cstats = strict_xfail_under_skip(class_body, "<cls>")
+    assert len(cf) == 1, cf
+    assert "class-body `pytestmark` on TestHostedFallback" in cf[0], cf
+    assert cstats["class_pytestmark"] == 1 and cstats["module_pytestmark"] == 0, cstats
+
+    # (g) unconditional skip, called and bare, also short-circuits the xfail.
+    for variant in ("pytest.mark.skip(reason='x')", "pytest.mark.skip"):
+        src = probe.replace(
+            "pytest.mark.skipif(not _api_key, reason='no key')", variant
+        )
+        f, _ = strict_xfail_under_skip(src, "<u>")
+        assert len(f) == 1 and "unconditional skip" in f[0], (variant, f)
+
+    # (h) an always-true literal condition always skips.
+    always = probe.replace("not _api_key", "True")
+    af, _ = strict_xfail_under_skip(always, "<a>")
+    assert len(af) == 1 and "always-true literal" in af[0], af
+
+    # NEGATIVE CONTROLS — each must produce NO finding, so the assertions above
+    # are pinned to the defect rather than to a detector that flags everything.
+    never = probe.replace("not _api_key", "False")
+    assert strict_xfail_under_skip(never, "<n>")[0] == [], (
+        "module-level `skipif(False)` never skips."
+    )
+    non_strict = probe.replace("strict=True", "strict=False")
+    assert strict_xfail_under_skip(non_strict, "<n>")[0] == [], (
+        "a non-strict xfail under a module-level skip claims nothing."
+    )
+    no_mark = probe.replace(
+        "pytestmark = pytest.mark.skipif(not _api_key, reason='no key')\n", ""
+    )
+    assert strict_xfail_under_skip(no_mark, "<n>")[0] == [], (
+        "no skip in scope means the strict xfail can be evaluated."
+    )
+    other_var = probe.replace("pytestmark =", "not_pytestmark =")
+    assert strict_xfail_under_skip(other_var, "<n>")[0] == [], (
+        "only the magic name `pytestmark` propagates; a differently-named module "
+        "variable holding a mark does nothing and must not be flagged."
+    )
+
+    # NOT-OBSERVED control — an opaque pytestmark element must be reported, not
+    # silently read as 'no skip'.
+    opaque = probe.replace(
+        "pytestmark = pytest.mark.skipif(not _api_key, reason='no key')",
+        "pytestmark = [m for m in _marks]",
+    )
+    _, ostats = strict_xfail_under_skip(opaque, "<o>")
+    assert len(ostats["unmodelled"]) == 1, ostats
+    assert "ListComp" in ostats["unmodelled"][0], ostats
+
+
+# ---------------------------------------------------------------------------
+# Companion surfaces — the evasions INV-3 / INV-4 do NOT model, named out loud
+# ---------------------------------------------------------------------------
+# Detection is AST-based, not textual. This file's own control fixtures contain
+# `pytest.skip(`, `add_marker(`, `pytest.param(marks=...)` etc. inside STRING
+# literals; a regex over source text flags them and the check becomes
+# permanently red for the wrong reason (observed while building this). Real code
+# only, therefore.
+
+_DESELECT_OPT = re.compile(r"(?:^|\s)(?:-[km](?:\s|=)|--deselect)")
+
+# Config files whose contents can deselect or skip tests in EVERY module.
+GLOBAL_SKIP_SURFACES = (
+    "conftest.py", "pytest.ini", "setup.cfg", "pyproject.toml", "tox.ini",
+)
+
+
+def deselection_filters(
+    config_texts: dict[str, str], workflow_commands: dict[str, str]
+) -> list[str]:
+    """
+    Every `-k` / `-m` / `--deselect` that can remove tests from a required run.
+
+    `PytestInvocation.collects()` models targets, `--ignore` and `python_files`
+    only. It does NOT model deselection, so a required job could collect a file
+    and then deselect every test in it while INV-3 still called the file covered.
+    Unconditional: this is a live hole in INV-3's model whether or not any strict
+    xfail exists, so it is surfaced as NOT-OBSERVED rather than assumed absent.
+    """
+    out: list[str] = []
+    for rel, text in sorted(config_texts.items()):
+        for m in re.finditer(r"^\s*addopts\s*=\s*(.+)$", text, re.M):
+            if _DESELECT_OPT.search(" " + m.group(1)):
+                out.append(
+                    f"{rel} addopts carries a deselection filter "
+                    f"(-k/-m/--deselect): {m.group(1).strip()!r}. INV-3's collection "
+                    f"model does not know about deselection, so it would still "
+                    f"report the deselected files as covered."
+                )
+    for label, cmd in sorted(workflow_commands.items()):
+        if _DESELECT_OPT.search(" " + cmd):
+            out.append(
+                f"{label} runs pytest with a deselection filter "
+                f"(-k/-m/--deselect): {cmd.strip()!r}. INV-3 would still credit the "
+                f"files it names as covered."
+            )
+    return out
+
+
+def xfail_strict_config(config_texts: dict[str, str]) -> list[str]:
+    """
+    `xfail_strict = true` anywhere in pytest config makes EVERY xfail strict.
+
+    INV-4 identifies a strict xfail by an explicit `strict=True` keyword. If the
+    config turns strictness on globally, that identification under-counts and the
+    invariant would report clean while strict tripwires sit under skips. Reported
+    as NOT-OBSERVED rather than silently tolerated.
+    """
+    out: list[str] = []
+    rx = re.compile(r"^\s*xfail_strict\s*[=:]\s*(\S+)", re.M)
+    for rel, text in sorted(config_texts.items()):
+        for m in rx.finditer(text):
+            if m.group(1).strip("\"' ,").lower() in ("true", "1", "yes", "on"):
+                out.append(
+                    f"{rel} sets xfail_strict={m.group(1)!r}, so EVERY "
+                    f"`@pytest.mark.xfail` is strict. INV-4 detects strictness by "
+                    f"an explicit `strict=True` keyword, so it under-counts under "
+                    f"this setting and cannot certify the tree. Fix: either drop "
+                    f"the global setting, or extend `_is_strict_xfail()` to treat a "
+                    f"bare xfail as strict when it is enabled."
+                )
+    return out
+
+
+def unmodelled_skip_mechanisms(source: str) -> list[str]:
+    """
+    Skip mechanisms present as REAL CODE that INV-4's mark walk cannot see.
+
+    AST-based on purpose (see the note at the top of this section). Returns
+    deduplicated human names; a parse failure is itself reported, never treated
+    as absence.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, UnicodeDecodeError) as exc:
+        return [f"source could not be parsed ({exc}), so its skip paths are unknown"]
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and (
+            node.name.startswith("pytest_collection_modify")
+        ):
+            found.add(
+                f"collection hook `{node.name}` (can attach a skip to any item at "
+                f"collection time)"
+            )
+            continue
+        if not isinstance(node, ast.Call):
+            continue
+        dotted = _dotted(node.func)
+        if dotted.endswith(".add_marker"):
+            found.add("dynamic mark via `add_marker(...)`")
+        elif dotted.endswith("pytest.skip"):
+            found.add("runtime `pytest.skip(...)` (fixture body or module level)")
+        elif dotted.endswith("pytest.importorskip"):
+            found.add("`pytest.importorskip(...)`")
+        elif dotted.endswith("pytest.param") and any(
+            kw.arg == "marks" for kw in node.keywords
+        ):
+            found.add("per-parameter `marks=` on `pytest.param(...)`")
+        elif dotted == "getattr" and node.args and _dotted(node.args[0]) == "pytest.mark":
+            found.add("mark built dynamically via `getattr(pytest.mark, ...)`")
+    return sorted(found)
+
+
+def unmodelled_skip_surfaces(
+    file_sources: dict[str, str], config_sources: dict[str, str]
+) -> tuple[list[str], dict]:
+    """
+    Unmodelled skip mechanisms that could be hiding a strict xfail.
+
+    Returns ``(surfaces, counts)``. Per-file mechanisms are reported only for
+    files that carry a REAL strict-xfail mark (determined by the AST walk, not by
+    the token ``strict=True``), because that is the only situation in which the
+    evasion matters — ordinary use of `importorskip` is not a defect. Config-file
+    mechanisms apply to every module, so they are reported whenever the tree
+    carries a strict xfail anywhere.
+    """
+    with_strict: dict[str, str] = {}
+    for rel, src in file_sources.items():
+        try:
+            if strict_xfail_under_skip(src, rel)[1]["strict_xfail"]:
+                with_strict[rel] = src
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+    counts = {
+        "files": len(file_sources),
+        "files_with_strict_xfail": len(with_strict),
+        # AST-determined, so a `strict=True` living inside a STRING literal (this
+        # file's own control fixtures) is correctly excluded.
+        "strict_xfail_files": sorted(with_strict),
+    }
+    if not with_strict:
+        return [], counts
+    out: list[str] = []
+    for rel, src in sorted(with_strict.items()):
+        for name in unmodelled_skip_mechanisms(src):
+            out.append(f"{rel} carries a strict xfail AND uses {name}")
+    for rel, src in sorted(config_sources.items()):
+        if not rel.endswith(".py"):
+            continue
+        for name in unmodelled_skip_mechanisms(src):
+            out.append(
+                f"{rel} uses {name}; it applies to EVERY module, and strict "
+                f"xfail(s) exist in {sorted(with_strict)}"
+            )
+    return out, counts
+
+
+def _config_texts() -> dict[str, str]:
+    return {
+        name: (ROOT / name).read_text(encoding="utf-8")
+        for name in GLOBAL_SKIP_SURFACES
+        if (ROOT / name).is_file()
+    }
+
+
+def _credited_commands() -> dict[str, str]:
+    required, problems = required_contexts()
+    assert not problems, "NOT OBSERVED:\n  - " + "\n  - ".join(problems)
+    credited, _ = credited_invocations(workflow_texts(), required)
+    assert credited, "no required-context pytest invocation found to inspect."
+    return {
+        f"{wf} ({ctx})": " ".join(
+            ["pytest"] + inv.targets
+            + [f"--ignore={i}" for i in inv.ignores]
+            + inv.raw_filters
+        )
+        for wf, ctx, inv in credited
+    }
+
+
+def test_no_deselection_filter_hides_tests_from_a_required_context() -> None:
+    """
+    INV-3's collection model does not understand `-k` / `-m` / `--deselect`.
+
+    NOT vacuous: evaluated against the repo's real pytest.ini / setup.cfg addopts
+    and the real pytest commands of the REQUIRED contexts.
+    """
+    configs = _config_texts()
+    assert configs, (
+        f"none of {GLOBAL_SKIP_SURFACES} found at the repo root — this check "
+        f"measured nothing, which is not a pass."
+    )
+    commands = _credited_commands()
+    surfaces = deselection_filters(configs, commands)
+    assert not surfaces, (
+        f"deselection filter(s) that INV-3's collection model cannot see "
+        f"({len(configs)} config file(s) and {len(commands)} required pytest "
+        f"command(s) examined):\n  - " + "\n  - ".join(surfaces)
+    )
+
+
+def test_deselection_filter_positive_control() -> None:
+    """The deselection detector must flag each form, and only those forms."""
+    strict_ini = {"pytest.ini": "[pytest]\naddopts = -m 'not slow'\n"}
+    got = deselection_filters(strict_ini, {})
+    assert len(got) == 1 and "addopts carries a deselection filter" in got[0], got
+    for opt in ("-k not_smoke", "-k=not_smoke", "-m 'not slow'", "--deselect tests/x.py"):
+        got = deselection_filters({}, {"wf (unit-tests)": f"pytest tests {opt}"})
+        assert len(got) == 1 and "deselection filter" in got[0], (opt, got)
+    # NEGATIVE controls — the repo's real config and command must not trip it, and
+    # neither may an option that merely starts with the same letters.
+    assert deselection_filters(
+        {"pytest.ini": "[pytest]\naddopts = -p no:cacheprovider\n"},
+        {"wf (unit-tests)": "pytest proxy/tests tests --ignore=x -v --timeout=120"},
+    ) == []
+    assert deselection_filters({}, {"wf": "pytest tests --maxfail=1 --keep-going"}) == []
+    assert deselection_filters(_config_texts(), _credited_commands()) == []
+
+    # xfail_strict detector — same family, same shape of proof.
+    for value in ("true", "True", "1", "yes"):
+        got = xfail_strict_config({"pytest.ini": f"[pytest]\nxfail_strict = {value}\n"})
+        assert len(got) == 1 and "under-counts" in got[0], (value, got)
+    assert xfail_strict_config(
+        {"pyproject.toml": 'xfail_strict = "true"\n'}
+    ) != [], "the TOML spelling must be caught too"
+    for value in ("false", "0", "no"):
+        assert xfail_strict_config(
+            {"pytest.ini": f"[pytest]\nxfail_strict = {value}\n"}
+        ) == [], value
+    assert xfail_strict_config({"pytest.ini": "[pytest]\naddopts = -p no:x\n"}) == []
+    assert xfail_strict_config(_config_texts()) == [], (
+        "the repo's real pytest config must not enable global xfail strictness "
+        "without INV-4 being taught about it."
+    )
+    # And the parser must actually be recording the filters it is asked about.
+    assert PytestInvocation(shlex.split("pytest tests -k not_smoke")).raw_filters == [
+        "-k", "not_smoke",
+    ]
+    assert PytestInvocation(shlex.split("pytest tests -m slow")).raw_filters == [
+        "-m", "slow",
+    ]
+    assert PytestInvocation(
+        shlex.split("pytest tests --deselect tests/x.py::test_y")
+    ).raw_filters == ["--deselect"]
+    assert PytestInvocation(shlex.split("pytest tests -v --timeout=120")).raw_filters == []
+
+
+def test_inv4_unmodelled_skip_paths_are_surfaced() -> None:
+    """
+    The evasions INV-4 does not model must be NAMED, not assumed absent.
+
+    CONDITIONAL and, today, VACUOUS on the real tree: the repo carries ZERO real
+    strict-xfail marks (tests/test_smoke_e2e.py deliberately uses strict=False —
+    see 15cd3a1), so there is nothing for these mechanisms to hide and the check
+    reports nothing. That vacuity is asserted explicitly below rather than left
+    implicit, and non-vacuity is proven by
+    `test_inv4_unmodelled_surface_positive_control`, which drives the same
+    detector with synthetic input for every named mechanism. The moment anyone
+    adds a real `strict=True`, this becomes live for that file.
+    """
+    file_sources = {
+        rel: (ROOT / rel).read_text(encoding="utf-8") for rel in _repo_test_files()
+    }
+    assert file_sources, "no test files discovered — the check measured nothing."
+    surfaces, counts = unmodelled_skip_surfaces(file_sources, _config_texts())
+    assert not surfaces, (
+        f"INV-4 NOT OBSERVED — mechanism(s) that can stop a test from running "
+        f"which INV-4's mark walk cannot see ({counts['files']} test file(s) "
+        f"examined, {counts['files_with_strict_xfail']} carrying a strict xfail). "
+        f"These are enumerated, not hidden; each must be resolved or explicitly "
+        f"modelled:\n  - " + "\n  - ".join(surfaces)
+    )
+    assert counts["files"] == len(_repo_test_files())
+    assert counts["files_with_strict_xfail"] == 0, (
+        f"{counts['files_with_strict_xfail']} test file(s) now carry a real "
+        f"strict-xfail mark. That is allowed, but this invariant's vacuity note "
+        f"is now out of date: re-read it, confirm the per-file surface really did "
+        f"run for those files, and update the count. Files (AST-determined): "
+        f"{counts['strict_xfail_files']}"
+    )
+
+
+def test_inv4_unmodelled_surface_positive_control() -> None:
+    """The unmodelled-path detector must flag each named evasion (proves it works)."""
+    strict = "import pytest\n@pytest.mark.xfail(strict=True)\ndef test_a(): pass\n"
+    no_strict = "import pytest\ndef test_a(): pass\n"
+
+    # No REAL strict xfail anywhere => nothing to hide => silent, by design.
+    quiet, counts = unmodelled_skip_surfaces(
+        {"tests/t.py": no_strict + "def f():\n    pytest.skip('x')\n"},
+        {"conftest.py": "def pytest_collection_modifyitems(items):\n    pass\n"},
+    )
+    assert quiet == [] and counts["files_with_strict_xfail"] == 0, (quiet, counts)
+
+    # A strict xfail written only INSIDE A STRING must not count as a real mark —
+    # this file's own control fixtures are exactly that shape, and a textual check
+    # made this invariant permanently red for the wrong reason.
+    in_string, s_counts = unmodelled_skip_surfaces(
+        {"tests/t.py": "SRC = '@pytest.mark.xfail(strict=True)'\nimport pytest\n"
+                       "def f():\n    pytest.skip('x')\n"},
+        {},
+    )
+    assert in_string == [] and s_counts["files_with_strict_xfail"] == 0, in_string
+
+    # conftest hook, applying to every module.
+    hook, hcounts = unmodelled_skip_surfaces(
+        {"tests/t.py": strict},
+        {"conftest.py": "def pytest_collection_modifyitems(items):\n    pass\n"},
+    )
+    assert hcounts["files_with_strict_xfail"] == 1, hcounts
+    assert len(hook) == 1 and "pytest_collection_modifyitems" in hook[0], hook
+    assert "applies to EVERY module" in hook[0], hook
+
+    # Per-file mechanisms, each flagged by name.
+    for snippet, needle in (
+        ("def fx():\n    pytest.skip('nope')\n", "runtime `pytest.skip"),
+        ("np = pytest.importorskip('numpy')\n", "importorskip"),
+        ("def h(item):\n    item.add_marker(pytest.mark.skip)\n", "add_marker"),
+        ("@pytest.mark.parametrize('x', [pytest.param(1, marks=pytest.mark.skip)])\n"
+         "def test_b(x): pass\n", "per-parameter `marks=`"),
+        ("m = getattr(pytest.mark, 'skip')\n", "getattr(pytest.mark"),
+    ):
+        got, gc = unmodelled_skip_surfaces({"tests/t.py": strict + snippet}, {})
+        assert gc["files_with_strict_xfail"] == 1, (snippet, gc)
+        assert len(got) == 1 and needle in got[0], (snippet, got)
+
+    # NEGATIVE control — a clean file with a strict xfail is not flagged.
+    assert unmodelled_skip_surfaces({"tests/t.py": strict}, {})[0] == []
+    # NEGATIVE control — `add_marker` on something that is not a mark call, and a
+    # `getattr` unrelated to pytest.mark, must not be flagged.
+    assert unmodelled_skip_mechanisms("x = getattr(os.path, 'join')\n") == []
+    # NOT-OBSERVED control — an unparseable source is reported, never silent.
+    broken = unmodelled_skip_mechanisms("def (:\n")
+    assert len(broken) == 1 and "could not be parsed" in broken[0], broken
