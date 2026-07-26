@@ -118,6 +118,57 @@ async def lifespan(app: FastAPI):
                 "set key or provide decryption_key"
             )
 
+    # 1c. Binary integrity self-check for the compiled detection modules.
+    #
+    # proxy/license/integrity.py documents itself as "At startup, verifies that
+    # compiled detection modules (.so/.pyd) have not been tampered with" — but
+    # verify_integrity() had ZERO production call sites, so no startup ever
+    # verified anything and the advertised tamper-evidence was inert. This is the
+    # live call site. It mirrors the verify_chain() self-check below.
+    #
+    # scripts/build_release.py writes an `integrity_manifest.json` into each
+    # compiled-module directory, so the dirs to check are discovered by looking
+    # for that manifest rather than by duplicating COMPILED_MODULES here (which
+    # would silently drift when the build's module list changes).
+    #
+    # Fail-open, consistent with verify_chain() below and with the proxy's
+    # fail-open detection contract: an integrity check must never block startup.
+    # But it must never be SILENT either — a source checkout has no manifest, and
+    # that state is reported as NOT-VERIFIED rather than logged as a pass
+    # (DONE.md floor invariant 9(d): an outcome that produced no observation must
+    # not be counted as a success).
+    try:
+        from proxy.license.integrity import MANIFEST_FILE, verify_integrity
+
+        proxy_pkg_dir = Path(__file__).resolve().parent
+        manifest_dirs = sorted({p.parent for p in proxy_pkg_dir.rglob(MANIFEST_FILE)})
+        if not manifest_dirs:
+            logger.info(
+                "Binary integrity NOT VERIFIED: no %s found under %s — running "
+                "from source (no compiled modules to verify). This is expected "
+                "for a source deployment and is NOT an integrity pass.",
+                MANIFEST_FILE, proxy_pkg_dir,
+            )
+        else:
+            for module_dir in manifest_dirs:
+                verify_integrity(module_dir)
+            logger.info(
+                "Binary integrity check passed for %d compiled-module director"
+                "%s: %s",
+                len(manifest_dirs),
+                "y" if len(manifest_dirs) == 1 else "ies",
+                ", ".join(str(d) for d in manifest_dirs),
+            )
+    except Exception as exc:  # fail-open: never block startup on the self-check
+        # TamperDetected lands here too. Loud, because a real tamper signal must
+        # be visible even though it does not halt the proxy.
+        logger.error(
+            "Binary integrity self-check FAILED — compiled detection modules may "
+            "have been modified: %s. Continuing (fail-open), but this must be "
+            "investigated.",
+            exc,
+        )
+
     # 2. Detection engine
     engine = DetectionEngine(profile_router)
 

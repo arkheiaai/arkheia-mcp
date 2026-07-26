@@ -42,6 +42,17 @@ PROD_ROOT_FILES = ("server.py",)
 # used only for an actionable failure message. Add mechanisms here as they land.
 TAMPER_VERIFY_MECHANISMS = {
     "verify_chain": "proxy/audit/writer.py",
+    # Added 2026-07-26. Same defect, second instance: `verify_integrity` is the
+    # binary-integrity check for the compiled detection modules (.so/.pyd) —
+    # `scripts/build_release.py` writes an `integrity_manifest.json` next to each
+    # compiled module at build time, and NOTHING in production ever verified it.
+    # Its only callers were three tests. A tamper check with no production call
+    # site means the shipped binaries were never actually verified: the
+    # "tamper-evident" property advertised in proxy/license/integrity.py's module
+    # docstring ("At startup, verifies that compiled detection modules have not
+    # been tampered with") was simply not happening at startup. GREEN fix wires
+    # it into the proxy lifespan alongside verify_chain (proxy/main.py).
+    "verify_integrity": "proxy/license/integrity.py",
 }
 
 
