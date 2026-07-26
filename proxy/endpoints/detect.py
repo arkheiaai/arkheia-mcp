@@ -301,6 +301,14 @@ def _audit_record(response: VerifyResponse, req: VerifyRequest, action: str) -> 
         "risk_level": response.risk_level,
         "confidence": response.confidence,
         "features_triggered": response.features_triggered,
+        # Screening transparency in the FORENSIC record too. An audit row that
+        # says "LOW" for a verdict which scored nothing, or which was scored by
+        # another model's profile, is a record of a screening that did not
+        # happen -- and the audit log is the compliance artefact. Structural
+        # metadata only: no prompt or response text, per this log's contract.
+        "evidence_depth_limited": response.evidence_depth_limited,
+        "detection_method": response.detection_method,
+        "profile_model_id": response.profile_model_id,
         "prompt_hash": hashlib.sha256(req.prompt.encode()).hexdigest(),
         "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
         "response_length": len(req.response),

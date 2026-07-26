@@ -395,3 +395,86 @@ def test_local_path_declares_its_provenance(client: TestClient) -> None:
     """The hosted mapping stamps source='hosted'; local must stamp its own."""
     _http, body = _verify(client, MODEL_FULLY_SCORED)
     assert body["source"] == "local"
+
+
+# ---------------------------------------------------------------------------
+# 6. The OPERATOR surface — the audit record must not be blinder than the
+#    response. An audit trail recording a bare "LOW" for a verdict that scored
+#    nothing is a forensic record of a screening that did not happen.
+# ---------------------------------------------------------------------------
+
+class _RecordingAudit:
+    """Captures exactly what detect.py hands the audit layer."""
+
+    def __init__(self) -> None:
+        self.records: list[dict] = []
+
+    async def write(self, record: dict) -> None:
+        self.records.append(record)
+
+
+@pytest.fixture
+def audited(real_router: ProfileRouter):
+    app = FastAPI()
+    app.include_router(detect_router)
+    app.state.engine = DetectionEngine(real_router)
+    audit = _RecordingAudit()
+    app.state.audit_writer = audit
+    app.state.settings = None
+    return TestClient(app), audit
+
+
+@pytest.mark.parametrize(
+    "model_id,expected_limited,expected_method,expected_profile",
+    [
+        (MODEL_FULLY_SCORED, False, "profile_multi_feature", MODEL_FULLY_SCORED),
+        (MODEL_GATE_SUPPRESSED, True, "tool_surface_suppressed", MODEL_GATE_SUPPRESSED),
+        (MODEL_SUBSTITUTED, True, "profile_multi_feature", PROFILE_OF_SUBSTITUTED),
+        (MODEL_UNPROFILED, True, None, None),
+    ],
+)
+def test_audit_record_carries_the_screening_context(
+    audited, model_id, expected_limited, expected_method, expected_profile
+) -> None:
+    """
+    The audit log is the compliance artefact and the operator's after-the-fact
+    view. It recorded risk_level / confidence / features_triggered and NOT
+    whether anything was measured or which profile measured it — so a
+    suppressed non-verdict and a fully-scored verdict were the same audit row.
+
+    Parametrised so the four rows are mutually distinguishing: any
+    implementation that hardcoded one of these values fails at least two rows.
+    """
+    client, audit = audited
+    _verify(client, model_id)
+
+    assert len(audit.records) == 1, (
+        f"expected exactly one audit record, got {len(audit.records)} — with zero "
+        "records every assertion below would pass vacuously"
+    )
+    rec = audit.records[0]
+
+    assert rec["model_id"] == model_id
+    assert rec["evidence_depth_limited"] is expected_limited
+    assert rec["detection_method"] == expected_method
+    assert rec["profile_model_id"] == expected_profile
+
+
+def test_audit_record_and_response_cannot_disagree(audited) -> None:
+    """
+    The response and the audit row are two independent decision sites reading
+    the same verdict; where that happens they eventually disagree. Asserted as
+    equality on the transparency fields rather than as two separate expected
+    values, so drift in either one fails.
+    """
+    client, audit = audited
+    for model_id in (MODEL_FULLY_SCORED, MODEL_GATE_SUPPRESSED, MODEL_UNPROFILED):
+        audit.records.clear()
+        _http, body = _verify(client, model_id)
+        rec = audit.records[0]
+        for field in ("risk_level", "confidence", "evidence_depth_limited",
+                      "detection_method", "profile_model_id"):
+            assert rec[field] == body[field], (
+                f"audit row and response disagree on {field!r} for {model_id}: "
+                f"{rec[field]!r} vs {body[field]!r}"
+            )
