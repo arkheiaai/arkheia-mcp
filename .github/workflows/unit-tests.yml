@@ -48,10 +48,20 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
+        # Install EVERY distribution's declared requirements file, and nothing
+        # else that runtime code imports. Previously this installed only the root
+        # + mcp_server files and then `pip install cryptography` on its own line —
+        # so proxy's own requirements file was never exercised by CI and the
+        # crypto suites passed on an ad-hoc install. That is precisely the masking
+        # that let the undeclared `cryptography` import survive: a green run said
+        # nothing about what the built image would contain. If a runtime import is
+        # missing, the fix is the requirements file, never a line here.
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r mcp_server/requirements.txt
+          pip install -r proxy/requirements.txt
+          pip install -r registry_server/requirements.txt
           # NO ad-hoc installs. cryptography / python-dotenv / respx /
           # pytest-timeout are now DECLARED in requirements.txt. Installing them
           # here instead meant CI green did not prove the declared manifest could

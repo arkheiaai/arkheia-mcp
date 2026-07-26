@@ -43,14 +43,6 @@ pyyaml>=6.0
 # Async file I/O
 aiofiles>=23.0
 
-# Crypto -- AES-256-GCM encrypt/decrypt for profiles.
-# `proxy/crypto/profile_crypto.py` imports `cryptography` DIRECTLY. It used to be
-# satisfied TRANSITIVELY (verified 2026-07-26 in a venv built from this file
-# alone) through `mcp==1.28.1 -> pyjwt[crypto] -> cryptography`, at a lower floor
-# than proxy/requirements.txt. Declared explicitly so the CVE pin is real and so
-# an upstream dropping `[crypto]` cannot silently break the proxy.
-cryptography>=48.0.1  # CVE-2026-39892 (buffer overflow) + CVE-2026-26007 (EC key validation) + GHSA-537c-gmf6-5ccf (bundled OpenSSL, high; fixed 48.0.1) fixes -- mirrors proxy/requirements.txt
-
 # `pydantic-settings` can bring in dotenv support. Production modules must not
 # call `load_dotenv` or search cwd `.env` files; this direct pin keeps the CVE
 # floor explicit rather than leaving it to a transitive dependency.
