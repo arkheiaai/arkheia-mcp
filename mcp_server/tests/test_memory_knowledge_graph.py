@@ -217,6 +217,26 @@ class TestStoreIsOwnerPrivate:
         assert (db.stat().st_mode & 0o777) == 0o600
         assert (db.parent.stat().st_mode & 0o777) == 0o700
 
+    def test_the_connection_path_tightens_the_directory_on_its_own(self, db):
+        """
+        `_get_conn` must assert the directory mode ITSELF, not rely on something else in
+        the call doing it.
+
+        Found by the mutation harness, not by review: once receipts landed, `_emit_receipt`
+        also re-asserted the directory mode, so deleting `_get_conn`'s own
+        `_enforce_mode(parent, _DIR_MODE)` left every store-driven test green. A second
+        code path doing the right thing is not the same as this path doing it — an import
+        site that opens a connection without emitting a receipt would have inherited a
+        world-readable directory. So this drives `_get_conn` alone, with no receipt
+        anywhere in the call.
+        """
+        memory_mod._get_conn().close()
+        os.chmod(db.parent, 0o755)
+
+        memory_mod._get_conn().close()
+
+        assert (db.parent.stat().st_mode & 0o777) == 0o700
+
     @pytest.mark.asyncio
     async def test_an_unenforceable_mode_is_reported_not_swallowed(self, db, monkeypatch, caplog):
         """
@@ -243,8 +263,20 @@ class TestStoreIsOwnerPrivate:
         assert result["observations_added"] == 1
 
         warnings = [r for r in caplog.records if r.levelname == "WARNING"]
-        assert len(warnings) == 2  # once for the directory, once for the file
         assert all("filesystem permissions" in r.getMessage() for r in warnings)
+
+        # Asserted as the SET OF TARGETS, not as a count. A bare `len(warnings) == 2` is the
+        # count-guard shape this sweep keeps finding: it says nothing about WHICH artifacts
+        # were covered, and it broke — correctly — the moment a third protected artifact
+        # appeared. Every file this module asserts a mode on must be named here, so a future
+        # artifact that is created and never chmod'ed fails this test rather than sliding
+        # under a number that still happens to match.
+        protected = {db.parent, db, db.parent / memory_mod.RECEIPT_LOG_NAME}
+        warned_about = {
+            Path(str(r.args[1]) if r.args else "")
+            for r in warnings
+        }
+        assert warned_about == protected
 
 
 # ---------------------------------------------------------------------------

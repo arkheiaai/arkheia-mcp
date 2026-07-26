@@ -351,6 +351,11 @@ async def memory_store(name: str, entity_type: str, observations: list[str]) -> 
         entity_type:         Entity type
         observations_added:  Number of new observations added this call
         total_observations:  Total observations stored for this entity
+        receipt_id:          Id of the decision receipt recording this change
+        receipt:             "recorded" — the receipt is on disk and can be quoted; or
+                             "unrecorded" — the change was made but could NOT be
+                             evidenced. The store never fails over a receipt, so this
+                             field is the only way to tell the two apart.
     """
     check("memory_store")
     return await store_entity(name=name, entity_type=entity_type, observations=observations)
@@ -381,7 +386,9 @@ async def memory_retrieve(query: str, entity_type: str | None = None, limit: int
                      entity_id, name, entity_type, created_at,
                      observations: [{"content": ..., "created_at": ...}],
                      relations: [{"relation_type": ..., "to_entity": ...}]
-        total:     Total count of matches (before limit)
+        total:      Total count of matches (before limit)
+        receipt_id: Id of the decision receipt recording this retrieval
+        receipt:    "recorded" | "unrecorded" — see memory_store
     """
     check("memory_retrieve")
     # The bound is enforced ONCE, in retrieve_entities (_validate_limit), because that is
@@ -430,7 +437,9 @@ async def memory_relate(
 
     Raises:
         ValueError: if an endpoint names no stored entity, or names more than one and
-                    no corresponding *_entity_type was given to disambiguate it.
+                    no corresponding *_entity_type was given to disambiguate it. The
+                    refusal is itself receipted, and the message ends with
+                    "[receipt <id>: recorded|unrecorded]" so it can be quoted.
 
     Returns:
         rel_id:         UUID of the stored relation
@@ -439,6 +448,8 @@ async def memory_relate(
         to_entity:      Target entity name
         from_entity_id: Resolved source entity_id — the key the edge is stored under
         to_entity_id:   Resolved target entity_id
+        receipt_id:     Id of the decision receipt recording this relation
+        receipt:        "recorded" | "unrecorded" — see memory_store
     """
     check("memory_relate")
     return await store_relation(

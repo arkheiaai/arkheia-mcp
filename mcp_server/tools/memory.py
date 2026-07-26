@@ -46,6 +46,26 @@ NO tenant or principal column on any table and `retrieve_entities` returns any n
 so if this store is ever put behind a shared transport (HTTP/SSE, a hosted multi-tenant server) the
 filesystem stops being a boundary and this decision MUST be revisited — with per-principal scoping,
 not with redaction, which would not help there either.
+
+RECEIPTS — every call leaves a durable record, beside the graph it describes.
+All three tools are governed actions: two of them MUTATE state that outlives the session, and the
+third discloses it. Each one now emits a decision receipt through the estate's audit rail
+(`mcp_server.receipts` -> `proxy.audit.writer`: JSONL, redaction, tamper-evident hash chain), and
+returns the `receipt_id` to the caller so the tool result, the log row and the DB row form one
+chain. The REFUSALS are receipted too — an unknown or ambiguous relation endpoint is the control
+that stops dangling and mis-attributed edges, and a refusal nobody can see later is
+indistinguishable from a call that was never made.
+
+Two properties of the receipt are consequences of the decisions above, not incidental:
+  * The log lives NEXT TO THE DB (`memory-receipts.jsonl` in the same 0700 directory, itself 0600),
+    because the confidentiality boundary of this store is the filesystem. A receipt about a private
+    graph written to a package-relative or shared path — which is what the other services on this
+    rail default to — would re-open the very hole the DB path fix closed.
+  * It records IDENTIFIERS, COUNTS AND FINGERPRINTS, never the authored text. Observation content
+    is deliberately unscrubbed HERE (see ACCESS CONTROL above); the audit rail redacts everything it
+    writes, so copying observations into a receipt would subject them to precisely the silent lossy
+    rewrite that ruling rejects — and would make the receipt log a second, differently-retained copy
+    of the graph. Attribution is carried by entity_id/rel_id, the actual primary keys.
 """
 
 from __future__ import annotations
@@ -56,6 +76,8 @@ import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
+
+from mcp_server import receipts
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +107,101 @@ def _db_path() -> str:
             "splits the knowledge graph across every process that uses a different cwd."
         )
     return str(path)
+
+
+#: Receipt log filename, resolved beside the graph it describes.
+RECEIPT_LOG_NAME = "memory-receipts.jsonl"
+
+
+def _receipt_log_path() -> str:
+    """
+    Resolve the decision-receipt log. ALWAYS absolute, and by default beside the DB.
+
+    Defaulting to the DB's own directory is the whole point, not a convenience: that
+    directory is the one this module asserts to 0700, and the receipt describes a store
+    whose only confidentiality control is that boundary. The sibling services on this
+    audit rail default to a package-relative path (the repo root, and under the npm
+    install a shared node_modules tree) — for this store that would be the defect
+    `_db_path` was rewritten to prevent, one file across.
+
+    It also means an operator or a test that redirects MEMORY_DB_PATH redirects the
+    receipts with it: one graph, one receipt log, no way to end up evidencing graph A in
+    the log belonging to graph B.
+
+    MEMORY_RECEIPT_LOG overrides it, under the same absolute-or-refuse rule as
+    MEMORY_DB_PATH and for the same reason.
+    """
+    raw = os.environ.get("MEMORY_RECEIPT_LOG")
+    if raw:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            raise ValueError(
+                f"MEMORY_RECEIPT_LOG must be an absolute path (or start with '~'); got {raw!r}. "
+                "A relative path resolves against the current working directory, which splits "
+                "the evidence for one graph across every process that uses a different cwd."
+            )
+        return str(path)
+    return str(Path(_db_path()).parent / RECEIPT_LOG_NAME)
+
+
+async def _emit_receipt(tool: str, decision: str, **fields) -> tuple[str, str]:
+    """
+    Emit one decision receipt. Returns (receipt_id, status).
+
+    NEVER RAISES, whatever happens — the caller has already committed its mutation or is
+    about to raise its refusal, and neither outcome may be changed by the evidence path.
+    NEVER SILENT either: a failure is logged at error level here and reported to the
+    caller as `receipt: "unrecorded"`, so an agent acting on the result can see that the
+    change it just made is not evidenced, rather than assuming it is.
+    """
+    receipt_id = receipts.new_receipt_id()
+    ok = False
+    try:
+        log_path = Path(_receipt_log_path())
+        log_path.parent.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
+        _enforce_mode(log_path.parent, _DIR_MODE)
+        # Create the file at 0600 BEFORE the writer opens it. Letting the writer create it
+        # would leave it at the process umask (measured 0644 for the DB, which is the
+        # defect this branch fixed) for the window before any chmod — and the receipt
+        # carries fingerprints and ids for a store whose only control is this boundary.
+        log_path.touch(exist_ok=True)
+        _enforce_mode(log_path, _FILE_MODE)
+
+        record = receipts.build_record(
+            receipt_id=receipt_id,
+            tool=tool,
+            decision=decision,
+            graph=_db_path(),
+            **fields,
+        )
+        ok = await receipts.emit(log_path, record)
+    except Exception:
+        logger.error(
+            "memory: receipt path FAILED for tool=%s decision=%s receipt_id=%s — the "
+            "operation stands but is UNRECORDED",
+            tool, decision, receipt_id, exc_info=True,
+        )
+        ok = False
+    return receipt_id, receipts.STATUS_RECORDED if ok else receipts.STATUS_UNRECORDED
+
+
+async def _receipt_refusal(tool: str, exc: ValueError, **fields) -> None:
+    """
+    Receipt a refusal and re-raise it, with the receipt id appended to the message.
+
+    The message is the only channel this tool has back to the caller (the registry auth
+    gate uses an `X-Arkheia-Receipt` header for the same purpose), so a refused agent can
+    quote the id and an operator can find the exact row. The original message is left
+    intact as the prefix — the exception object, its type and its traceback are unchanged.
+    """
+    reason = getattr(exc, "receipt_reason", "invalid_request")
+    extra = dict(getattr(exc, "receipt_fields", {}))
+    extra.update(fields)
+    receipt_id, status = await _emit_receipt(
+        tool, receipts.DECISION_REFUSED, reason=reason, **extra
+    )
+    if exc.args:
+        exc.args = (f"{exc.args[0]} [receipt {receipt_id}: {status}]",) + exc.args[1:]
 
 
 def _get_conn() -> sqlite3.Connection:
@@ -139,6 +256,21 @@ def _like_escape(value: str) -> str:
 MAX_RETRIEVE_LIMIT = 50
 
 
+def _refusal(message: str, *, reason: str, **fields) -> ValueError:
+    """
+    Build a refusal carrying the structured facts its receipt needs.
+
+    A plain ValueError would force the receipt to be reconstructed from the message text
+    at the catch site, which drifts the moment the wording changes. The exception TYPE is
+    unchanged — callers (and every existing test) still see a ValueError — the extra
+    attributes are only read by `_receipt_refusal`.
+    """
+    exc = ValueError(message)
+    exc.receipt_reason = reason
+    exc.receipt_fields = fields
+    return exc
+
+
 def _validate_limit(limit: int) -> int:
     """
     Bound `limit` on BOTH sides, and reject invalid input instead of coercing it.
@@ -161,15 +293,19 @@ def _validate_limit(limit: int) -> int:
     not a request the contract can answer at all, so it is refused.
     """
     if isinstance(limit, bool) or not isinstance(limit, int):
-        raise ValueError(
+        raise _refusal(
             f"memory_retrieve: limit must be an int between 1 and {MAX_RETRIEVE_LIMIT}, "
-            f"got {limit!r} ({type(limit).__name__})"
+            f"got {limit!r} ({type(limit).__name__})",
+            reason="invalid_limit_type",
+            limit_requested=repr(limit),
         )
     if limit < 1:
-        raise ValueError(
+        raise _refusal(
             f"memory_retrieve: limit must be >= 1 (max {MAX_RETRIEVE_LIMIT}), got {limit}. "
             "A negative limit was previously passed straight to a list slice, where "
-            "rows[:-1] returns every row but the last — 59 rows against a cap of 50."
+            "rows[:-1] returns every row but the last — 59 rows against a cap of 50.",
+            reason="limit_below_one",
+            limit_requested=repr(limit),
         )
     return min(limit, MAX_RETRIEVE_LIMIT)
 
@@ -293,11 +429,16 @@ def _resolve_endpoint(
 
     if not ids:
         qualifier = f" of type {entity_type!r}" if entity_type else ""
-        raise ValueError(
+        raise _refusal(
             f"memory_relate: no such entity — {label}={name!r}{qualifier}. "
             "Store both endpoints with memory_store before relating them; "
             "storing the relation anyway would create a dangling edge that "
-            "memory_retrieve reports as a real relation."
+            "memory_retrieve reports as a real relation.",
+            reason="unknown_endpoint",
+            endpoint=label,
+            endpoint_name_fingerprint=receipts.fingerprint(name),
+            endpoint_entity_type=entity_type,
+            candidates=0,
         )
 
     if len(ids) > 1:
@@ -308,11 +449,16 @@ def _resolve_endpoint(
                 (name,),
             ).fetchall()
         ]
-        raise ValueError(
+        raise _refusal(
             f"memory_relate: ambiguous entity — {label}={name!r} matches "
             f"{len(ids)} entities of types {sorted(set(types))!r}. A name is not an "
             f"identity. Disambiguate with {label}_type=<entity_type>; relating to a "
-            "guessed one would report the edge as a fact about the wrong entity."
+            "guessed one would report the edge as a fact about the wrong entity.",
+            reason="ambiguous_endpoint",
+            endpoint=label,
+            endpoint_name_fingerprint=receipts.fingerprint(name),
+            endpoint_entity_type=entity_type,
+            candidates=len(ids),
         )
 
     return ids[0]
@@ -332,6 +478,8 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
         entity_type:         Entity type
         observations_added:  Number of new observations added this call
         total_observations:  Total observations stored for this entity
+        receipt_id:          Id of the decision receipt for this call
+        receipt:             "recorded" | "unrecorded" — whether that receipt reached disk
     """
     conn = _get_conn()
     try:
@@ -346,7 +494,9 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
 
         if row:
             entity_id = row["entity_id"]
+            created = False
         else:
+            created = True
             entity_id = str(uuid.uuid4())
             conn.execute(
                 "INSERT INTO entities (entity_id, name, entity_type, created_at) VALUES (?, ?, ?, ?)",
@@ -364,6 +514,7 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
         }
 
         added = 0
+        added_fingerprints: list[str] = []
         for content in observations:
             if content not in existing:
                 conn.execute(
@@ -372,6 +523,7 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
                 )
                 existing.add(content)
                 added += 1
+                added_fingerprints.append(receipts.fingerprint(content))
 
         conn.commit()
 
@@ -380,7 +532,7 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
             (entity_id,),
         ).fetchone()["n"]
 
-        return {
+        result = {
             "entity_id": entity_id,
             "name": name,
             "entity_type": entity_type,
@@ -389,6 +541,24 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
         }
     finally:
         conn.close()
+
+    # AFTER the commit, and outside the connection: the receipt evidences a change that
+    # has actually happened, and a receipt failure can neither roll it back nor block it.
+    receipt_id, status = await _emit_receipt(
+        "memory_store",
+        receipts.DECISION_RECORDED,
+        entity_id=entity_id,
+        entity_type=entity_type,
+        entity_created=created,
+        name_fingerprint=receipts.fingerprint(name),
+        observations_submitted=len(observations),
+        observations_added=added,
+        observation_fingerprints=added_fingerprints,
+        total_observations=total,
+    )
+    result["receipt_id"] = receipt_id
+    result["receipt"] = status
+    return result
 
 
 async def retrieve_entities(
@@ -407,10 +577,20 @@ async def retrieve_entities(
     and searching for "%" cannot return the entire graph.
 
     Returns:
-        entities:  List of matching entity dicts
-        total:     Count of matches before limit
+        entities:    List of matching entity dicts
+        total:       Count of matches before limit
+        receipt_id:  Id of the decision receipt for this call
+        receipt:     "recorded" | "unrecorded" — whether that receipt reached disk
     """
-    limit = _validate_limit(limit)
+    limit_requested = repr(limit)
+    try:
+        limit = _validate_limit(limit)
+    except ValueError as exc:
+        # A refused read is a decision this tool made and must be evidenced, not just
+        # raised. Without it, "the agent never searched" and "the agent searched and was
+        # refused" leave the same trace: none.
+        await _receipt_refusal("memory_retrieve", exc)
+        raise
 
     conn = _get_conn()
     try:
@@ -462,9 +642,27 @@ async def retrieve_entities(
                 ],
             })
 
-        return {"entities": entities, "total": total}
+        result = {"entities": entities, "total": total}
     finally:
         conn.close()
+
+    receipt_id, status = await _emit_receipt(
+        "memory_retrieve",
+        receipts.DECISION_RECORDED,
+        query_fingerprint=receipts.fingerprint(query),
+        entity_type=entity_type,
+        limit_requested=limit_requested,
+        limit_applied=limit,
+        matched=total,
+        returned=len(entities),
+        # WHICH rows were disclosed, by primary key. A retrieval is the disclosure of a
+        # store that has no principal scoping, so "what was read" is the fact worth
+        # keeping; the ids resolve against the graph and reveal nothing without it.
+        entity_ids=[e["entity_id"] for e in entities],
+    )
+    result["receipt_id"] = receipt_id
+    result["receipt"] = status
+    return result
 
 
 async def store_relation(
@@ -505,29 +703,60 @@ async def store_relation(
     Returns:
         rel_id, from_entity, relation_type, to_entity,
         from_entity_id, to_entity_id — the resolved identities the edge is keyed by
+        receipt_id — id of the decision receipt for this call
+        receipt     — "recorded" | "unrecorded", whether that receipt reached disk
     """
     conn = _get_conn()
+    refusal: ValueError | None = None
     try:
         _init_schema(conn)
 
-        from_id = _resolve_endpoint(conn, "from_entity", from_entity, from_entity_type)
-        to_id = _resolve_endpoint(conn, "to_entity", to_entity, to_entity_type)
-
-        rel_id = str(uuid.uuid4())
-        now = datetime.utcnow().isoformat()
-        conn.execute(
-            "INSERT INTO relations (rel_id, from_entity, relation_type, to_entity, created_at, from_entity_id, to_entity_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (rel_id, from_entity, relation_type, to_entity, now, from_id, to_id),
-        )
-        conn.commit()
-        return {
-            "rel_id": rel_id,
-            "from_entity": from_entity,
-            "relation_type": relation_type,
-            "to_entity": to_entity,
-            "from_entity_id": from_id,
-            "to_entity_id": to_id,
-        }
+        try:
+            from_id = _resolve_endpoint(conn, "from_entity", from_entity, from_entity_type)
+            to_id = _resolve_endpoint(conn, "to_entity", to_entity, to_entity_type)
+        except ValueError as exc:
+            # Held, not receipted here: the emit is async and the refusal must be
+            # evidenced with the connection already closed, so nothing about the receipt
+            # path can hold a transaction open on the graph.
+            refusal = exc
+        else:
+            rel_id = str(uuid.uuid4())
+            now = datetime.utcnow().isoformat()
+            conn.execute(
+                "INSERT INTO relations (rel_id, from_entity, relation_type, to_entity, created_at, from_entity_id, to_entity_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (rel_id, from_entity, relation_type, to_entity, now, from_id, to_id),
+            )
+            conn.commit()
+            result = {
+                "rel_id": rel_id,
+                "from_entity": from_entity,
+                "relation_type": relation_type,
+                "to_entity": to_entity,
+                "from_entity_id": from_id,
+                "to_entity_id": to_id,
+            }
     finally:
         conn.close()
+
+    if refusal is not None:
+        # The refusal IS the control that stops a dangling or mis-attributed edge. It is
+        # the outcome most worth evidencing, and the one that previously left no trace.
+        await _receipt_refusal("memory_relate", refusal, relation_type=relation_type)
+        raise refusal
+
+    receipt_id, status = await _emit_receipt(
+        "memory_relate",
+        receipts.DECISION_RECORDED,
+        rel_id=rel_id,
+        relation_type=relation_type,
+        from_entity_id=from_id,
+        to_entity_id=to_id,
+        from_name_fingerprint=receipts.fingerprint(from_entity),
+        to_name_fingerprint=receipts.fingerprint(to_entity),
+        from_entity_type=from_entity_type,
+        to_entity_type=to_entity_type,
+    )
+    result["receipt_id"] = receipt_id
+    result["receipt"] = status
+    return result
