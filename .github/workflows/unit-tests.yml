@@ -28,6 +28,19 @@ jobs:
         with:
           python-version: '3.12'
 
+      # This job collects `tests/` with the default `python_files`, so it also runs
+      # `tests/test_packed_artifact_floor.py`, which produces the REAL published
+      # artifact with `npm pack`. Pinned here as well as in floor-invariants.yml
+      # rather than inherited from the runner image: the floor FAILS when npm is
+      # absent (a skipped artifact check is indistinguishable from a passing one),
+      # so an image change must not be able to turn this job red for a reason that
+      # has nothing to do with the code.
+      - name: Set up Node (the packed-artifact floor runs a real `npm pack`)
+        # Pin: actions/setup-node v4.1.0
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af  # v4.1.0
+        with:
+          node-version: '20'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
