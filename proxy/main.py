@@ -131,43 +131,88 @@ async def lifespan(app: FastAPI):
     # for that manifest rather than by duplicating COMPILED_MODULES here (which
     # would silently drift when the build's module list changes).
     #
-    # Fail-open, consistent with verify_chain() below and with the proxy's
-    # fail-open detection contract: an integrity check must never block startup.
-    # But it must never be SILENT either — a source checkout has no manifest, and
-    # that state is reported as NOT-VERIFIED rather than logged as a pass
-    # (DONE.md floor invariant 9(d): an outcome that produced no observation must
-    # not be counted as a success).
+    # FAIL-OPEN / FAIL-CLOSED SPLIT (Codex finding 4, ruled 2026-07-26).
+    # This block used to catch every exception, TamperDetected included, and
+    # continue — so a tampered detection engine produced "error log plus service
+    # ready". Those are two different states and must not be collapsed:
+    #
+    #   ABSENT / UNVERIFIABLE  = absence of evidence. A source checkout has no
+    #       manifest; a module might be unreadable. FAIL OPEN: log, continue, and
+    #       publish the unverified state on app.state.integrity so /admin/health
+    #       shows it. Silence would be the real defect (DONE.md floor invariant
+    #       9(d): an outcome that produced no observation is not a success).
+    #
+    #   TamperDetected         = EVIDENCE. Hash mismatch, a manifest module missing
+    #       from disk, or a manifest that exists and cannot be parsed. DO NOT
+    #       START. A tampered detection engine that reports LOW is worse than no
+    #       detection at all, because it is trusted: every downstream verdict,
+    #       audit record and governance receipt would carry that engine's
+    #       authority. Halting is a deliberate availability trade — see the
+    #       failure mode named in the PR body.
+    integrity_reports = []
     try:
-        from proxy.license.integrity import MANIFEST_FILE, verify_integrity
+        from proxy.license.integrity import TamperDetected, verify_all
 
-        proxy_pkg_dir = Path(__file__).resolve().parent
-        manifest_dirs = sorted({p.parent for p in proxy_pkg_dir.rglob(MANIFEST_FILE)})
-        if not manifest_dirs:
-            logger.info(
-                "Binary integrity NOT VERIFIED: no %s found under %s — running "
-                "from source (no compiled modules to verify). This is expected "
-                "for a source deployment and is NOT an integrity pass.",
-                MANIFEST_FILE, proxy_pkg_dir,
-            )
-        else:
-            for module_dir in manifest_dirs:
-                verify_integrity(module_dir)
-            logger.info(
-                "Binary integrity check passed for %d compiled-module director"
-                "%s: %s",
-                len(manifest_dirs),
-                "y" if len(manifest_dirs) == 1 else "ies",
-                ", ".join(str(d) for d in manifest_dirs),
-            )
-    except Exception as exc:  # fail-open: never block startup on the self-check
-        # TamperDetected lands here too. Loud, because a real tamper signal must
-        # be visible even though it does not halt the proxy.
-        logger.error(
-            "Binary integrity self-check FAILED — compiled detection modules may "
-            "have been modified: %s. Continuing (fail-open), but this must be "
-            "investigated.",
+        integrity_reports = verify_all()
+    except TamperDetected as exc:
+        logger.critical(
+            "[FATAL] BINARY INTEGRITY TAMPER DETECTED — refusing to start: %s. "
+            "This is a POSITIVE finding, not a failed check: a compiled detection "
+            "module does not match its build-time hash (or its manifest is "
+            "unreadable). A tampered detection engine would be TRUSTED, so the "
+            "proxy must not serve traffic. Restore the verified artifact from the "
+            "release build, or remove the integrity manifest only if you are "
+            "deliberately running unverified from source.",
             exc,
         )
+        app.state.integrity = {
+            "status": "TAMPERED",
+            "verified": False,
+            "startup_blocked": True,
+            "detail": str(exc),
+        }
+        raise
+    except Exception as exc:  # fail-open: an UNVERIFIABLE environment may boot
+        logger.error(
+            "Binary integrity self-check could not be completed: %s. Continuing "
+            "(fail-open) because this is an absence of evidence, not a tamper "
+            "finding — but the modules are NOT verified and that is published on "
+            "/admin/health.",
+            exc,
+        )
+        app.state.integrity = {
+            "status": "UNVERIFIABLE",
+            "verified": False,
+            "startup_blocked": False,
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    else:
+        verified = all(r.verified for r in integrity_reports)
+        app.state.integrity = {
+            "status": "VERIFIED" if verified else integrity_reports[0].status,
+            "verified": verified,
+            "startup_blocked": False,
+            "directories": [r.module_dir for r in integrity_reports],
+            "modules_checked": sum(r.modules_checked for r in integrity_reports),
+            "detail": "; ".join(r.detail for r in integrity_reports),
+        }
+        if verified:
+            logger.info(
+                "Binary integrity VERIFIED: %d module(s) across %d director%s (%s)",
+                app.state.integrity["modules_checked"],
+                len(integrity_reports),
+                "y" if len(integrity_reports) == 1 else "ies",
+                "; ".join(r.module_dir for r in integrity_reports),
+            )
+        else:
+            # WARNING, not INFO: "not verified" must not read like a pass. It is
+            # the normal state for a source deployment, which is why it does not
+            # block startup — but it is published, not swallowed.
+            logger.warning(
+                "Binary integrity NOT VERIFIED (%s) — continuing fail-open: %s",
+                app.state.integrity["status"],
+                app.state.integrity["detail"],
+            )
 
     # 2. Detection engine
     engine = DetectionEngine(profile_router)
