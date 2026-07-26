@@ -42,6 +42,7 @@ import pytest
 
 from mcp_server import server as srv
 from mcp_server.tool_registry import (
+    _POLICIES,
     REGISTRY,
     Permission,
     PolicyViolation,
@@ -89,13 +90,21 @@ def _isolate_memory_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def registry_sandbox():
-    """Mutate REGISTRY inside a test without leaking into other tests."""
-    original = dict(REGISTRY)
+    """Mutate the registry inside a test without leaking into other tests.
+
+    Yields the PRIVATE ``_POLICIES`` dict, not ``REGISTRY``. ``REGISTRY`` is now a
+    ``MappingProxyType`` over it — see the source comment on ``_POLICIES`` — so
+    ``REGISTRY["x"] = ...`` raises TypeError. That is the point of the change: the
+    only writable handle is the private one, and it is deliberately awkward to
+    reach. The tests reach for it because a policy gate has to be tested against
+    policies that are not the shipped nine; production code has no reason to.
+    """
+    original = dict(_POLICIES)
     try:
-        yield REGISTRY
+        yield _POLICIES
     finally:
-        REGISTRY.clear()
-        REGISTRY.update(original)
+        _POLICIES.clear()
+        _POLICIES.update(original)
 
 
 # ---------------------------------------------------------------------------
@@ -420,9 +429,17 @@ class TestAdvertisedToolNamesTwoTransports:
         )
 
     async def test_a_name_not_advertised_is_refused_by_both_transports(self):
-        """The negative under both transports. Transport B refuses via FastMCP's
-        own tool table — which is the evidence that REGISTRY is a SHADOW allowlist:
-        the framework refuses before check() is ever consulted."""
+        """The negative under both transports.
+
+        ANCHOR REPAIRED 2026-07-26. This docstring used to say transport B refuses
+        "via FastMCP's own tool table ... the framework refuses before check() is
+        ever consulted", and that was true when it was written. It is now FALSE:
+        ``GatedFastMCP.call_tool`` runs the receipted gate BEFORE the framework
+        resolves the name, so the refusal is the gate's own and it is recorded. The
+        assertion below is tightened to that stronger fact rather than left agreeing
+        with either behaviour — a test that passes against both the old and the new
+        semantics is not pinning the change.
+        """
         advertised = {t.name for t in await srv.mcp.list_tools()}
         rogue = "exfiltrate_secrets"
         assert rogue not in advertised
@@ -430,9 +447,14 @@ class TestAdvertisedToolNamesTwoTransports:
         with pytest.raises(PolicyViolation):
             check(rogue)
 
-        with pytest.raises(Exception) as exc:
+        with pytest.raises(PolicyViolation) as exc:
             await srv.mcp.call_tool(rogue, {})
         assert rogue in str(exc.value)
+        assert exc.value.tool_name == rogue
+        # The gate refused, not the framework's tool table: a ToolError would not
+        # be a PolicyViolation and would carry no deny code and no receipt.
+        assert exc.value.code == "not_registered"
+        assert exc.value.receipt_status == "recorded"
 
 
 # ---------------------------------------------------------------------------

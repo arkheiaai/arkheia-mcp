@@ -402,7 +402,6 @@ def _prepare_receipt_dir(path: Path) -> None:
 async def _emit_gate_receipt(
     *,
     tool_name: object,
-    decision: str,
     policy: ToolPolicy | None,
     human_confirmed: bool,
     violation: PolicyViolation | None,
@@ -417,11 +416,19 @@ async def _emit_gate_receipt(
     — every failure path logs at error level naming the receipt id, and the status
     it returns is surfaced to the caller.
 
-    NOTE the deliberate shape, which is the point of this function. The whole path
-    is guarded, so the decision cannot be blocked by a receipt fault; but a
-    ``build_record`` rejection does NOT collapse into a log line and no row. It is
-    re-emitted as ``DECISION_UNREPRESENTABLE`` carrying the offending value, so the
-    fault lands IN the evidence stream where a query for gate decisions will find
+    THE VERDICT HAS ONE SOURCE: ``violation is None``. This function is not handed a
+    decision string to write down, because then the string and the exception could
+    disagree and the record would be the one that lied. It derives the verdict from
+    the object that IS the verdict, and writes a literal constant on each branch.
+    That is also what makes ``tests/test_tool_gate_floor.py`` INV-6 able to check
+    this statically — the invariant demands a named DECISION_* constant at every
+    ``build_record`` site precisely because a variable cannot be checked, and it
+    caught this function passing one when it was first written.
+
+    The whole path is guarded, so the decision cannot be blocked by a receipt fault;
+    but a ``build_record`` rejection does NOT collapse into a log line and no row. It
+    is re-emitted as ``DECISION_UNREPRESENTABLE`` carrying the offending value, so
+    the fault lands IN the evidence stream where a query for gate decisions will find
     it. Fail-open on the receipt, and still no silent hole.
     """
     receipt_id = receipts.new_receipt_id()
@@ -432,9 +439,9 @@ async def _emit_gate_receipt(
         _prepare_receipt_dir(resolved)
     except Exception as exc:
         logger.error(
-            "tool-gate receipt path FAILED (%s): tool=%r decision=%s receipt_id=%s "
+            "tool-gate receipt path FAILED (%s): tool=%r denied=%s receipt_id=%s "
             "— this decision is UNRECORDED",
-            exc, tool_name, decision, receipt_id, exc_info=True,
+            exc, tool_name, violation is not None, receipt_id, exc_info=True,
         )
         return receipt_id, receipts.STATUS_UNRECORDED
 
@@ -462,18 +469,35 @@ async def _emit_gate_receipt(
     tool_label = tool_name if isinstance(tool_name, str) else repr(tool_name)
 
     try:
-        record = receipts.build_record(
-            receipt_id=receipt_id,
-            tool=tool_label,
-            decision=decision,
-            event_type=GATE_EVENT_TYPE,
-            **fields,
-        )
+        # Two branches, two LITERAL constants. See the docstring: the verdict has one
+        # source, and a constant at the call site is what a static check can verify.
+        if violation is None:
+            record = receipts.build_record(
+                receipt_id=receipt_id,
+                tool=tool_label,
+                decision=receipts.DECISION_ALLOWED,
+                event_type=GATE_EVENT_TYPE,
+                **fields,
+            )
+        else:
+            record = receipts.build_record(
+                receipt_id=receipt_id,
+                tool=tool_label,
+                decision=receipts.DECISION_DENIED,
+                event_type=GATE_EVENT_TYPE,
+                **fields,
+            )
     except Exception as exc:
+        # Defensive, and deliberately NOT a bare log. Reached only if the record
+        # cannot be constructed for some reason OTHER than the decision word (which
+        # INV-6 makes impossible): an unserialisable field, a rail signature change.
+        # Whatever the cause, the decision still gets a row — in the third honest
+        # bucket, never laundered into allow or deny.
         logger.error(
-            "tool-gate receipt could not be BUILT for decision=%r (%s): tool=%r "
-            "receipt_id=%s — recording it as %s so it is not lost",
-            decision, exc, tool_name, receipt_id, receipts.DECISION_UNREPRESENTABLE,
+            "tool-gate receipt could not be BUILT (%s): tool=%r denied=%s "
+            "receipt_id=%s — recording it as %s so the decision is not lost",
+            exc, tool_name, violation is not None, receipt_id,
+            receipts.DECISION_UNREPRESENTABLE,
         )
         try:
             record = receipts.build_record(
@@ -481,15 +505,17 @@ async def _emit_gate_receipt(
                 tool=tool_label,
                 decision=receipts.DECISION_UNREPRESENTABLE,
                 event_type=GATE_EVENT_TYPE,
-                unrepresentable_decision=repr(decision),
+                intended_decision=(
+                    receipts.DECISION_ALLOWED if violation is None
+                    else receipts.DECISION_DENIED
+                ),
                 receipt_fault=f"{type(exc).__name__}: {exc}",
-                **fields,
             )
         except Exception as exc2:  # pragma: no cover — defensive last resort
             logger.error(
-                "tool-gate receipt FALLBACK also failed (%s): tool=%r decision=%r "
+                "tool-gate receipt FALLBACK also failed (%s): tool=%r denied=%s "
                 "receipt_id=%s — this decision is UNRECORDED",
-                exc2, tool_name, decision, receipt_id,
+                exc2, tool_name, violation is not None, receipt_id,
             )
             return receipt_id, receipts.STATUS_UNRECORDED
 
@@ -497,14 +523,86 @@ async def _emit_gate_receipt(
         ok = await receipts.emit(resolved, record)
     except Exception as exc:  # pragma: no cover — receipts.emit is itself guarded
         logger.error(
-            "tool-gate receipt FAILED to write (%s): tool=%r decision=%s "
+            "tool-gate receipt FAILED to write (%s): tool=%r denied=%s "
             "receipt_id=%s — this decision is UNRECORDED",
-            exc, tool_name, decision, receipt_id, exc_info=True,
+            exc, tool_name, violation is not None, receipt_id, exc_info=True,
         )
         ok = False
 
     return receipt_id, (
         receipts.STATUS_RECORDED if ok else receipts.STATUS_UNRECORDED
+    )
+
+
+@dataclass(frozen=True)
+class GateDecision:
+    """
+    One gate decision, and the receipt that recorded it.
+
+    The ALLOW side needs this as much as the deny side. ``check_receipted`` returns a
+    ``ToolPolicy``, so there is nowhere to hang the id of the row that recorded the
+    allow — and a record nobody can look up by the id its caller was handed is not
+    attributable evidence, it is just a row that happens to be near the right
+    timestamp. ``decide()`` returns the id for both verdicts.
+    """
+    tool_name: str
+    allowed: bool
+    policy: ToolPolicy | None
+    violation: PolicyViolation | None
+    receipt_id: str
+    receipt_status: str
+
+
+async def decide(
+    tool_name: str,
+    *,
+    human_confirmed: bool = False,
+    call_site: str = "dispatch",
+    argument_keys: Iterable[str] | None = None,
+    log_path: str | Path | None = None,
+) -> GateDecision:
+    """
+    Make the gate's allow/deny decision AND record it. Returns; never raises.
+
+    The total form of the gate: both verdicts come back as data, with the receipt id
+    and whether that receipt reached disk. ``check_receipted()`` is the raising
+    convenience over this, for call sites that want the deny to abort them.
+    """
+    violation: PolicyViolation | None = None
+    policy: ToolPolicy | None = None
+    try:
+        policy = check(tool_name, human_confirmed=human_confirmed)
+    except PolicyViolation as exc:
+        violation = exc
+
+    receipt_id, status = await _emit_gate_receipt(
+        tool_name=tool_name,
+        policy=policy,
+        human_confirmed=human_confirmed,
+        violation=violation,
+        call_site=call_site,
+        argument_keys=argument_keys,
+        log_path=log_path,
+    )
+
+    if violation is not None:
+        violation.receipt_id = receipt_id
+        violation.receipt_status = status
+        # Put the receipt id IN THE MESSAGE as well as on the exception. The MCP
+        # framework serialises a handler exception down to its string, so an
+        # attribute the orchestrator never sees is not recourse — the denied caller
+        # needs something quotable at the point of refusal.
+        violation.args = (
+            f"{violation.args[0]} [receipt {receipt_id}: {status}]",
+        ) + violation.args[1:]
+
+    return GateDecision(
+        tool_name=tool_name if isinstance(tool_name, str) else repr(tool_name),
+        allowed=violation is None,
+        policy=policy,
+        violation=violation,
+        receipt_id=receipt_id,
+        receipt_status=status,
     )
 
 
@@ -531,33 +629,17 @@ async def check_receipted(
         The receipt is written BEFORE the refusal is re-raised, so there is no
         ordering in which the caller learns of a denial the log has not seen.
     """
-    violation: PolicyViolation | None = None
-    policy: ToolPolicy | None = None
-    try:
-        policy = check(tool_name, human_confirmed=human_confirmed)
-        decision = receipts.DECISION_ALLOWED
-    except PolicyViolation as exc:
-        violation = exc
-        decision = receipts.DECISION_DENIED
-
-    receipt_id, status = await _emit_gate_receipt(
-        tool_name=tool_name,
-        decision=decision,
-        policy=policy,
+    decision = await decide(
+        tool_name,
         human_confirmed=human_confirmed,
-        violation=violation,
         call_site=call_site,
         argument_keys=argument_keys,
         log_path=log_path,
     )
-
-    if violation is not None:
-        violation.receipt_id = receipt_id
-        violation.receipt_status = status
-        raise violation
-
-    assert policy is not None  # allow branch: check() returned a policy
-    return policy
+    if decision.violation is not None:
+        raise decision.violation
+    assert decision.policy is not None  # allow branch: check() returned a policy
+    return decision.policy
 
 
 def assert_registry_covers(advertised: Iterable[str]) -> None:

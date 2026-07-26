@@ -26,14 +26,17 @@ Transport: stdio (default — Claude Code / Claude Desktop)
 
 import os
 import logging
+from typing import Any
 
 import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from mcp_server.proxy_client import ProxyClient
 from mcp_server.tool_registry import (
+    REGISTRY,
     assert_registry_covers,
     check,
+    check_receipted,
     PolicyViolation,
 )
 from mcp_server.tools.providers import call_grok, call_gemini, call_ollama, call_together
@@ -46,7 +49,92 @@ ARKHEIA_PROXY_URL = os.environ.get("ARKHEIA_PROXY_URL", "http://localhost:8098")
 ARKHEIA_HOSTED_URL = os.environ.get("ARKHEIA_HOSTED_URL", "https://arkheia-proxy-production.up.railway.app")
 ARKHEIA_API_KEY = os.environ.get("ARKHEIA_API_KEY")
 
-mcp   = FastMCP("arkheia-trust")
+class GatedFastMCP(FastMCP):
+    """
+    FastMCP with the tool-registry gate at the DISPATCH chokepoint.
+
+    WHY THIS EXISTS — the per-body check is not a gate on its own
+    ------------------------------------------------------------
+    ``check()`` as the first statement of every tool body is defence in depth, and
+    it is only as complete as the set of bodies that remembered to call it. Every
+    way of reaching execution WITHOUT passing the gate was a way past it:
+
+      * a new ``@mcp.tool`` whose author forgets the call (the static floor
+        invariant INV-1 catches this at review time, but only for functions written
+        in ``mcp_server/server.py`` and only for names it can parse);
+      * a tool registered AFTER boot — ``mcp.add_tool(fn, name="anything")`` — which
+        is advertised by ``tools/list``, dispatchable by ``tools/call``, and
+        completely invisible to ``startup_policy_selfcheck()``, because that ran at
+        boot and never runs again;
+      * the same function registered under a second, unpoliced NAME
+        (``mcp.add_tool(memory_store, name="mem_write")``): the body's
+        ``check("memory_store")`` passes happily while the name the orchestrator
+        actually invoked was never policed at all.
+
+    Overriding ``call_tool`` closes the class rather than the instances: FastMCP
+    binds ``self.call_tool`` as the protocol handler in ``__init__``, so EVERY
+    ``tools/call`` — for any name, registered whenever, by any means — passes the
+    receipted gate before the framework resolves the tool. An unknown name is now a
+    *recorded* default-deny instead of a bare framework ``ToolError`` that left no
+    trace of the attempt.
+
+    ``list_tools`` is the matching half. Advertising a tool no policy covers is how
+    an orchestrator is invited to call it, so an ungoverned name is withheld from
+    the advertisement — and, because withholding it silently would be its own
+    fail-silent hole, logged at error level naming the tool. The pair is fail-closed
+    on both surfaces: not advertised, and denied if called anyway.
+
+    THE ONE THING THIS DOES NOT COVER, stated rather than implied: a direct
+    in-process call of a decorated coroutine (``await srv.memory_store(...)``)
+    does not go through ``call_tool``, so it is gated only by the body's own
+    ``check()`` and leaves no receipt. That path is not reachable by an
+    orchestrator — it is our own library use — and the body check is proved to
+    reach the identical verdict by the differential test in
+    ``mcp_server/tests/test_tool_gate_adversarial.py``.
+    """
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]):
+        # The gate, at the only point every orchestrator-driven call must pass.
+        # A deny raises PolicyViolation — recorded first, then re-raised — so the
+        # framework never resolves, and never runs, an unpoliced tool.
+        await check_receipted(
+            name,
+            call_site="dispatch",
+            # Names only. Argument VALUES carry prompts and observation text and
+            # have no place in a policy receipt.
+            argument_keys=list(arguments) if isinstance(arguments, dict) else None,
+        )
+        return await super().call_tool(name, arguments)
+
+    async def list_tools_ungated(self):
+        """
+        The RAW advertisement, before the ungoverned-tool filter.
+
+        ``startup_policy_selfcheck`` must read this and not ``list_tools``: the
+        filter's whole job is to make an ungoverned tool disappear from the
+        advertisement, and a coverage check fed the filtered set would compare the
+        registry against a list the registry had just been used to build. It would
+        agree with itself for exactly the drift it exists to catch.
+        """
+        return await FastMCP.list_tools(self)
+
+    async def list_tools(self):
+        advertised = await FastMCP.list_tools(self)
+        governed = [t for t in advertised if t.name in REGISTRY]
+        ungoverned = sorted(t.name for t in advertised if t.name not in REGISTRY)
+        if ungoverned:
+            logger.error(
+                "tool-registry gate: WITHHOLDING %d ungoverned tool(s) from "
+                "tools/list: %s. Each is registered with the MCP framework but has "
+                "no ToolPolicy, so it is not advertised — and any call to it will be "
+                "denied. This is a fail-closed response to a registration that "
+                "should not exist; fix the registration or add a policy.",
+                len(ungoverned), ungoverned,
+            )
+        return governed
+
+
+mcp   = GatedFastMCP("arkheia-trust")
 proxy = ProxyClient(
     base_url=ARKHEIA_PROXY_URL,
     hosted_url=ARKHEIA_HOSTED_URL,
@@ -137,6 +225,32 @@ async def arkheia_audit_log(session_id: str | None = None, limit: int = 50) -> d
 # Provider wrappers — single source of truth for all inference
 # ---------------------------------------------------------------------------
 
+def _policy_refusal(e: PolicyViolation) -> dict:
+    """
+    The refusal payload the four provider tools return instead of raising.
+
+    The shape is inherited (``risk_level: UNKNOWN`` renders a POLICY refusal as
+    DETECTION uncertainty, which conflates two different things and is pinned as an
+    inconsistency in ``TestRefusalContract`` rather than endorsed). What is added
+    here is the recourse: which branch denied, what would clear it, and the id of
+    the row that recorded the refusal.
+
+    ``receipt_id: None`` / ``receipt: "unrecorded"`` is the honest answer for a
+    direct in-process call, where the body's own ``check()`` denied and no receipt
+    was written. It is NOT filled with a plausible-looking value, because "there is
+    no receipt" and "there is a receipt you have not looked up" must not read the
+    same to the caller.
+    """
+    return {
+        "error": str(e),
+        "risk_level": "UNKNOWN",
+        "policy_denied": True,
+        "deny_code": e.code,
+        "remedy": e.remedy,
+        "receipt_id": e.receipt_id,
+        "receipt": e.receipt_status or "unrecorded",
+    }
+
 @mcp.tool(annotations=ToolAnnotations(
     title="Call xAI Grok with Fabrication Screening",
     readOnlyHint=True,
@@ -169,7 +283,7 @@ async def run_grok(
     try:
         check("run_grok")
     except PolicyViolation as e:
-        return {"error": str(e), "risk_level": "UNKNOWN"}
+        return _policy_refusal(e)
 
     provider_result = await call_grok(prompt, model)
     risk = await proxy.verify(
@@ -215,7 +329,7 @@ async def run_gemini(
     try:
         check("run_gemini")
     except PolicyViolation as e:
-        return {"error": str(e), "risk_level": "UNKNOWN"}
+        return _policy_refusal(e)
 
     provider_result = await call_gemini(prompt, model)
     risk = await proxy.verify(
@@ -264,7 +378,7 @@ async def run_ollama(
     try:
         check("run_ollama")
     except PolicyViolation as e:
-        return {"error": str(e), "risk_level": "UNKNOWN"}
+        return _policy_refusal(e)
 
     provider_result = await call_ollama(prompt, model)
     risk = await proxy.verify(
@@ -315,7 +429,7 @@ async def run_together(
     try:
         check("run_together")
     except PolicyViolation as e:
-        return {"error": str(e), "risk_level": "UNKNOWN"}
+        return _policy_refusal(e)
 
     provider_result = await call_together(prompt, model)
     risk = await proxy.verify(
@@ -436,8 +550,13 @@ def startup_policy_selfcheck() -> None:
     CI; this is the runtime backstop, and it is the check that still holds once
     REGISTRY is loaded from a signed/remote policy store (the documented
     enterprise upgrade hook), where a static parse cannot see the contents.
+
+    Reads ``list_tools_ungated`` deliberately — see that method. Feeding this the
+    FILTERED advertisement would make it compare the registry against a list the
+    registry had just filtered, so it would report clean for precisely the drift it
+    exists to catch.
     """
-    advertised = [t.name for t in anyio.run(mcp.list_tools)]
+    advertised = [t.name for t in anyio.run(mcp.list_tools_ungated)]
     assert_registry_covers(advertised)
     logger.info(
         "tool-registry policy self-check OK: %d advertised tools, all covered",
