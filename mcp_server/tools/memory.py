@@ -9,7 +9,43 @@ Schema:
   observations — obs_id, entity_id, content, created_at
   relations    — rel_id, from_entity, relation_type, to_entity, created_at
 
-DB path: MEMORY_DB_PATH env var, default C:/arkheia-mcp/data/memory.db
+DB path: MEMORY_DB_PATH env var, default ~/.arkheia/mcp/memory.db (per-user, absolute).
+
+WHY THE DEFAULT MUST BE ABSOLUTE AND USER-PRIVATE — do not "simplify" this back.
+The previous default was the literal string "C:/arkheia-mcp/data/memory.db". On Windows that is
+an absolute path; on POSIX "C:" is an ordinary directory NAME, so the path is RELATIVE and every
+process resolved it against its own current working directory. Nothing errored — each caller got
+a private, empty graph at <cwd>/C:/arkheia-mcp/data/memory.db and a store followed by a retrieve
+from another cwd returned nothing, which is indistinguishable from "not stored yet". This repo
+ships THREE different working directories for the same server (README/npm-wrapper README say
+cwd `~/.arkheia/mcp`, AGENTS.md says `~/.arkheia-mcp`, npm-wrapper/bin/arkheia-mcp.js spawns with
+`cwd: PYTHON_DIR` inside the package install tree), so which graph you got depended on which
+install doc you followed.
+
+The store's confidentiality boundary is the FILESYSTEM (see ACCESS CONTROL below), which makes the
+location a security property, not a convenience: under the npm install PYTHON_DIR is inside the
+global node_modules tree (e.g. /opt/homebrew/lib/node_modules), so the relative default put a
+private knowledge graph in a shared, world-readable directory.
+
+ACCESS CONTROL, not scrubbing — the deliberate choice for observation content.
+Observation text is written to sqlite verbatim; there is no secret-redaction pass equivalent to
+proxy/audit/redactor.py, and that asymmetry with the audit log is intentional:
+  * An audit record is CAPTURED traffic that exists to be read by a principal who did not write it,
+    so its reader cannot be restricted and redaction is the only available control.
+  * A memory observation is AUTHORED — a statement an agent deliberately chose to persist — and it
+    is retrieved by the same principal that wrote it, from the same local stdio server. Redaction
+    here is lossy, irreversible and SILENT: it would mutilate a fact the agent meant to keep while
+    returning no indication that it had done so, which is the silent-degradation failure the
+    loud-failure invariant exists to forbid.
+So the control is the OS boundary — and it is now ASSERTED rather than assumed: the directory is
+created 0700 and the database file is chmod'ed 0600. Previously both inherited the umask (measured:
+dir 0755, file 0644 — world-readable).
+
+PRECONDITION on that choice: this holds only while the store is single-tenant and local. There is
+NO tenant or principal column on any table and `retrieve_entities` returns any name-matching row,
+so if this store is ever put behind a shared transport (HTTP/SSE, a hosted multi-tenant server) the
+filesystem stops being a boundary and this decision MUST be revisited — with per-principal scoping,
+not with redaction, which would not help there either.
 """
 
 from __future__ import annotations
@@ -20,21 +56,63 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+# Directory holding the knowledge graph: owner-only. The DB file itself: owner-only.
+_DIR_MODE = 0o700
+_FILE_MODE = 0o600
 
-# ---------------------------------------------------------------------------
-# DB setup
-# ---------------------------------------------------------------------------
+DEFAULT_DB_PATH = "~/.arkheia/mcp/memory.db"
+
 
 def _db_path() -> str:
-    return os.environ.get("MEMORY_DB_PATH", "C:/arkheia-mcp/data/memory.db")
+    """
+    Resolve the knowledge-graph DB path. ALWAYS absolute.
+
+    A relative path forks the graph per working directory with no error, so this
+    function never returns one. `~` is expanded; a relative MEMORY_DB_PATH is
+    REFUSED LOUDLY rather than silently resolved against whatever cwd the server
+    happened to be spawned in — a silent fork is the defect being fixed, and a
+    caller who supplies one would inherit it.
+    """
+    raw = os.environ.get("MEMORY_DB_PATH") or DEFAULT_DB_PATH
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise ValueError(
+            f"MEMORY_DB_PATH must be an absolute path (or start with '~'); got {raw!r}. "
+            "A relative path resolves against the current working directory, which silently "
+            "splits the knowledge graph across every process that uses a different cwd."
+        )
+    return str(path)
 
 
 def _get_conn() -> sqlite3.Connection:
     path = _db_path()
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    parent = Path(path).parent
+    parent.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
+    # mkdir's mode is masked by the umask and is a no-op when the dir already
+    # exists, so assert the mode explicitly rather than hoping for it.
+    try:
+        parent.chmod(_DIR_MODE)
+    except OSError:
+        pass  # non-POSIX or foreign-owned dir: connect anyway, do not break memory
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    try:
+        os.chmod(path, _FILE_MODE)
+    except OSError:
+        pass
     return conn
+
+
+def _like_escape(value: str) -> str:
+    """
+    Escape SQL LIKE metacharacters so a caller's search string is matched literally.
+
+    Without this, `_` matches any single character and `%` matches anything, so
+    memory_retrieve(query="%") returned the WHOLE graph and a search for an
+    underscore-bearing name (e.g. "auth_middleware bug") over-matched. Paired with
+    an explicit ESCAPE '\\' clause at every call site.
+    """
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
@@ -148,6 +226,10 @@ async def retrieve_entities(
 
     Returns each entity with all its observations and outgoing relations.
 
+    `query` is matched as a LITERAL substring: LIKE's own wildcards (`%`, `_`) are
+    escaped, so searching for "auth_middleware" cannot also match "authXmiddleware"
+    and searching for "%" cannot return the entire graph.
+
     Returns:
         entities:  List of matching entity dicts
         total:     Count of matches before limit
@@ -155,16 +237,16 @@ async def retrieve_entities(
     conn = _get_conn()
     try:
         _init_schema(conn)
-        pattern = f"%{query}%"
+        pattern = f"%{_like_escape(query)}%"
 
         if entity_type:
             rows = conn.execute(
-                "SELECT * FROM entities WHERE name LIKE ? AND entity_type = ?",
+                "SELECT * FROM entities WHERE name LIKE ? ESCAPE '\\' AND entity_type = ?",
                 (pattern, entity_type),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM entities WHERE name LIKE ?",
+                "SELECT * FROM entities WHERE name LIKE ? ESCAPE '\\'",
                 (pattern,),
             ).fetchall()
 
@@ -209,6 +291,16 @@ async def store_relation(from_entity: str, relation_type: str, to_entity: str) -
     """
     Store a directional named relationship between two entities (referenced by name).
 
+    Both endpoints MUST already exist as entities — the published tool contract
+    (mcp_server/server.py, memory_relate) has always said so, and until now nothing
+    enforced it. An unenforced endpoint produced a DANGLING EDGE: the relation was
+    stored, returned a rel_id, and then surfaced through memory_retrieve as a real
+    relation pointing at an entity that does not exist. A typo in a name was
+    indistinguishable from a fact. Refusing is loud; a dangling edge is silent.
+
+    Raises:
+        ValueError: if either endpoint does not name an existing entity.
+
     Returns:
         rel_id:        UUID of the stored relation
         from_entity:   Source entity name
@@ -218,6 +310,27 @@ async def store_relation(from_entity: str, relation_type: str, to_entity: str) -
     conn = _get_conn()
     try:
         _init_schema(conn)
+
+        missing = [
+            label
+            for label, name in (("from_entity", from_entity), ("to_entity", to_entity))
+            if conn.execute(
+                "SELECT 1 FROM entities WHERE name = ? LIMIT 1", (name,)
+            ).fetchone()
+            is None
+        ]
+        if missing:
+            named = ", ".join(
+                f"{label}={dict(from_entity=from_entity, to_entity=to_entity)[label]!r}"
+                for label in missing
+            )
+            raise ValueError(
+                f"memory_relate: no such entity — {named}. "
+                "Store both endpoints with memory_store before relating them; "
+                "storing the relation anyway would create a dangling edge that "
+                "memory_retrieve reports as a real relation."
+            )
+
         rel_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
         conn.execute(
