@@ -41,6 +41,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from proxy.audit.writer import AuditWriter
 from proxy.detection.engine import DetectionEngine, DetectionResult
 from proxy.main import create_app
 
@@ -105,7 +106,20 @@ class _Harness:
                 # Override ONLY the engine. app.state.audit_writer stays the real
                 # AuditWriter built by the lifespan.
                 app.state.engine = None if drop_engine else self._engine
-                assert isinstance(app.state.audit_writer, object)
+                # The load-bearing claim of this whole file: the writer is REAL,
+                # not a mock, and it is pointed at the file we are about to read.
+                # (An earlier draft asserted `isinstance(..., object)` here, which
+                # is true of every value in Python — a permissive assertion that
+                # checked nothing. Named because it is the defect class of the day.)
+                writer = app.state.audit_writer
+                assert type(writer) is AuditWriter, (
+                    f"audit writer is {type(writer).__name__}, not the real AuditWriter — "
+                    f"a mocked writer proves nothing about what reaches disk."
+                )
+                assert writer.log_path == self.log_path, (
+                    f"the real writer is pointed at {writer.log_path}, but this test reads "
+                    f"{self.log_path} — the assertions would run against the wrong file."
+                )
                 for payload in payloads:
                     resp = client.post("/detect/verify", json=payload)
                     assert resp.status_code == 200, resp.text
@@ -294,7 +308,7 @@ def test_audit_read_surface_serves_only_redacted_values(harness):
     }])
     assert _body(secret) not in content, "credential on disk — precondition failed."
 
-    from proxy.audit.writer import AuditWriter
+
     reader = AuditWriter(str(harness.log_path))
     out = reader.read_recent(limit=10)
 
