@@ -472,7 +472,10 @@ def test_router_with_a_WRONG_key_decrypts_nothing_and_says_so(tmp_path, master_k
     for n in ("a-model", "b-model", "c-model"):
         (d / f"{n}.yaml").write_text(yaml.dump({"model": n}))
 
-    with caplog.at_level(logging.ERROR):
+    # Capture at INFO, not ERROR: capturing only ERROR records makes the
+    # "no clean success wording" assertion vacuous, because a summary downgraded
+    # back to INFO would simply not be captured.
+    with caplog.at_level(logging.INFO, logger="proxy.router.profile_router"):
         r = ProfileRouter(str(d), decryption_key=secrets.token_bytes(32))
 
     assert r.loaded_count == 3  # the misleading number, pinned so it cannot drift
@@ -488,12 +491,20 @@ def test_router_with_a_WRONG_key_decrypts_nothing_and_says_so(tmp_path, master_k
     assert "encrypted 0/2 decrypted" in summary
     assert "gpt-4o.yaml.enc" in summary and "grok-4.yaml.enc" in summary
 
-    # 9(b): the wording is gated on work done. A failure is logged at ERROR.
+    # 9(b): the wording is gated on work done. Assert over EVERY record, not just
+    # the ERROR ones — scoping the negative assertion to ERROR records let a
+    # mutation that merely downgraded the summary back to a clean INFO line
+    # survive (M16, caught by tools/mutate_f20_profile_crypto.py).
+    every = [r_.getMessage() for r_ in caplog.records]
     errors = [r_.getMessage() for r_ in caplog.records if r_.levelno >= logging.ERROR]
     assert any("AUTHENTICATION FAILED" in m for m in errors)
-    assert not any("valid profiles" in m for m in errors), (
+    assert not any("valid profiles" in m for m in every), (
         "the old clean-looking success wording is back"
     )
+    # The summary itself must be emitted at ERROR and must name the failed files.
+    summaries = [m for m in errors if "encrypted 0/2 decrypted" in m]
+    assert len(summaries) == 1, f"expected one ERROR summary, got {summaries}"
+    assert "gpt-4o.yaml.enc" in summaries[0] and "grok-4.yaml.enc" in summaries[0]
 
 
 def test_router_names_the_files_it_could_not_even_attempt(tmp_path, master_key):
@@ -575,3 +586,175 @@ def test_plaintext_yaml_bypasses_the_entire_crypto_path(tmp_path, master_key):
     assert r.last_load_report.plaintext_loaded == 1
     # ...and the encrypted one is unaffected, so the two paths are independent.
     assert r.get("gpt-4o") is not None
+
+
+# ===========================================================================
+# 5. The hosted key-fetch route — which had NO tests at all
+# ===========================================================================
+#
+# Found by mutation, not by reading: M10 ("accept a key of any length from the
+# hosted endpoint") and M14 ("restore silent discarding of non-base64
+# characters") both SURVIVED the suite as first written, because nothing
+# anywhere exercised `_fetch_from_hosted`. The length check and the
+# `validate=True` were unproven code.
+
+import base64  # noqa: E402  (grouped with the section it serves)
+
+import httpx  # noqa: E402
+import respx  # noqa: E402
+
+HOSTED = "https://hosted.invalid"
+KEY_URL = f"{HOSTED}/v1/profile-key"
+
+
+def _loader(tmp_path: Path, api_key: str = "ak_live_test") -> _IsolatedLoader:
+    loader = _IsolatedLoader(HOSTED, api_key)
+    loader.CACHE_DIR = tmp_path / ".arkheia"
+    loader.CACHE_FILE = loader.CACHE_DIR / "profile_key.cache"
+    return loader
+
+
+@respx.mock
+async def test_hosted_200_with_a_valid_key_is_accepted_and_cached(tmp_path):
+    """Positive control for every rejection test below."""
+    key = secrets.token_bytes(32)
+    respx.post(KEY_URL).mock(
+        return_value=httpx.Response(200, json={"profile_key": base64.b64encode(key).decode()})
+    )
+    loader = _loader(tmp_path)
+    assert await loader.fetch_key() == key
+    assert loader.last_source == "hosted"
+    assert loader.has_key is True
+    assert loader.current_key == key
+    assert loader._load_cache() == key  # it was written through to the cache
+
+
+@pytest.mark.parametrize("nbytes", [0, 1, 16, 31, 33, 64])
+@respx.mock
+async def test_hosted_key_of_the_WRONG_LENGTH_is_refused(tmp_path, nbytes):
+    """M10. A short key would otherwise be hashed into a well-formed AES key."""
+    respx.post(KEY_URL).mock(
+        return_value=httpx.Response(
+            200, json={"profile_key": base64.b64encode(bytes(nbytes)).decode()}
+        )
+    )
+    loader = _loader(tmp_path)
+    assert await loader._fetch_from_hosted() is None
+    assert await loader.fetch_key() is None
+    assert loader.last_source == "none"
+    assert loader.has_key is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "not base64 at all!!",
+        "AAAA AAAA",          # embedded whitespace
+        "====",
+        "",
+    ],
+)
+@respx.mock
+async def test_hosted_key_that_is_not_valid_base64_is_refused(tmp_path, payload):
+    """M14. Without validate=True, b64decode silently DROPS stray characters."""
+    respx.post(KEY_URL).mock(return_value=httpx.Response(200, json={"profile_key": payload}))
+    loader = _loader(tmp_path)
+    assert await loader._fetch_from_hosted() is None
+
+
+@respx.mock
+async def test_a_MANGLED_key_blob_is_refused_rather_than_silently_repaired(tmp_path):
+    """The sharp form of M14, stated as what it actually is.
+
+    ``b64decode`` without ``validate=True`` DISCARDS every character outside the
+    base64 alphabet, so a corrupted payload is silently repaired into a
+    well-formed 32-byte key and accepted. The response is then not the response
+    the endpoint sent, and nothing anywhere records that. With ``validate=True``
+    it is refused.
+
+    The fixture below is checked in both directions in the test itself, so it
+    cannot quietly stop demonstrating the hazard.
+    """
+    key = secrets.token_bytes(32)
+    b64 = base64.b64encode(key).decode()
+    mangled = b64[:20] + "!" + b64[20:]
+
+    # The hazard, demonstrated: the lenient decode "succeeds".
+    assert base64.b64decode(mangled) == key
+    with pytest.raises(Exception):
+        base64.b64decode(mangled, validate=True)
+
+    respx.post(KEY_URL).mock(return_value=httpx.Response(200, json={"profile_key": mangled}))
+    assert await _loader(tmp_path)._fetch_from_hosted() is None
+
+    # Positive control: the same key, cleanly encoded, IS accepted.
+    respx.post(KEY_URL).mock(return_value=httpx.Response(200, json={"profile_key": b64}))
+    assert await _loader(tmp_path)._fetch_from_hosted() == key
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 429, 500, 502, 503])
+@respx.mock
+async def test_a_non_200_from_the_hosted_endpoint_yields_no_key(tmp_path, status):
+    respx.post(KEY_URL).mock(return_value=httpx.Response(status, json={}))
+    assert await _loader(tmp_path)._fetch_from_hosted() is None
+
+
+@respx.mock
+async def test_a_200_with_no_profile_key_field_yields_no_key(tmp_path):
+    respx.post(KEY_URL).mock(return_value=httpx.Response(200, json={"expires_at": "2030-01-01"}))
+    assert await _loader(tmp_path)._fetch_from_hosted() is None
+
+
+@respx.mock
+async def test_a_transport_error_yields_no_key_and_does_not_propagate(tmp_path):
+    respx.post(KEY_URL).mock(side_effect=httpx.ConnectError("refused"))
+    assert await _loader(tmp_path)._fetch_from_hosted() is None
+
+
+async def test_no_api_key_means_no_hosted_fetch_is_attempted(tmp_path):
+    """Absence assertion paired with a positive control: with respx active and
+    NO route registered, any outbound request would raise. None is made."""
+    with respx.mock:
+        assert await _loader(tmp_path, api_key="")._fetch_from_hosted() is None
+
+
+@respx.mock
+async def test_fetch_key_falls_back_to_the_cache_then_to_None(tmp_path):
+    """The full chain, in order, with each step observed.
+
+    The cache fallback is deliberately NOT silent: a key that the hosted endpoint
+    did not re-authorise may have been revoked, so the source is recorded.
+    """
+    key = secrets.token_bytes(32)
+    loader = _loader(tmp_path)
+    loader._save_cache(key)
+
+    respx.post(KEY_URL).mock(return_value=httpx.Response(503, json={}))
+    assert await loader.fetch_key() == key
+    assert loader.last_source == "cache"
+
+    loader.CACHE_FILE.unlink()
+    loader2 = _loader(tmp_path)
+    assert await loader2.fetch_key() is None
+    assert loader2.last_source == "none"
+    assert loader2.has_key is False
+
+
+@respx.mock
+async def test_no_log_line_from_a_key_fetch_contains_key_material(tmp_path, caplog):
+    """What leaks on success and on failure."""
+    key = secrets.token_bytes(32)
+    respx.post(KEY_URL).mock(
+        return_value=httpx.Response(200, json={"profile_key": base64.b64encode(key).decode()})
+    )
+    loader = _loader(tmp_path, api_key="ak_live_SUPERSECRET")
+    with caplog.at_level(logging.DEBUG):
+        assert await loader.fetch_key() == key
+
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert key.hex() not in blob
+    assert base64.b64encode(key).decode() not in blob
+    assert "ak_live_SUPERSECRET" not in blob
+    # Positive control: the fingerprint IS there, so the assertions above are not
+    # passing over an empty capture.
+    assert key_fingerprint(key) in blob
