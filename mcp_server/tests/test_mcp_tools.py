@@ -390,10 +390,33 @@ class TestMemoryTools:
 
     @pytest.mark.asyncio
     async def test_retrieve_limit_capped_at_50(self):
-        """memory_retrieve: limit is capped at 50 in server.py."""
+        """
+        memory_retrieve: limit is capped at 50 in server.py.
+
+        PERMISSIVE ASSERTION REPLACED (2026-07-26). This test previously read:
+
+            result = await mcp_server_module.memory_retrieve(query="anything", limit=9999)
+            assert "entities" in result
+            assert "total" in result
+
+        against an EMPTY graph. Both assertions hold for any implementation that returns
+        a dict with those two keys — including one with no cap at all — so the cap it is
+        named for was never observed, and no mutation of the cap could have failed it.
+        It was nevertheless cited as the covering evidence for this flow's `floor` and
+        `enforced` axes. It now stores 55 entities and pins the returned count exactly:
+        uncapped returns 55, capped returns 50.
+
+        The wider version of this invariant, plus the limit/total split, lives in
+        mcp_server/tests/test_memory_knowledge_graph.py::TestRetrieveLimit.
+        """
         from mcp_server import server as mcp_server_module
 
-        # Just verify it doesn't raise and returns a dict
-        result = await mcp_server_module.memory_retrieve(query="anything", limit=9999)
-        assert "entities" in result
-        assert "total" in result
+        for i in range(55):
+            await mcp_server_module.memory_store(
+                name=f"Node {i:03d}", entity_type="node", observations=[f"obs {i}"]
+            )
+
+        result = await mcp_server_module.memory_retrieve(query="Node", limit=9999)
+
+        assert len(result["entities"]) == 50
+        assert result["total"] == 55

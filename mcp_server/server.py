@@ -398,13 +398,19 @@ async def memory_relate(from_entity: str, relation_type: str, to_entity: str) ->
     """
     Store a named relationship between two entities in the knowledge graph.
 
-    Both entities must already exist (use memory_store first).
+    Both entities must already exist (use memory_store first) — this is ENFORCED:
+    an unknown endpoint raises ValueError naming which side was not found. It used
+    to be advisory, so a mistyped name stored a dangling edge that memory_retrieve
+    then reported back as a real relation.
     Relations are directional: from_entity --[relation_type]--> to_entity
 
     Args:
         from_entity:   Name of the source entity
         relation_type: Relationship label (e.g. "reports_to", "blocks", "owns", "assigned_to")
         to_entity:     Name of the target entity
+
+    Raises:
+        ValueError: if from_entity or to_entity does not name a stored entity.
 
     Returns:
         rel_id:        UUID of the stored relation
