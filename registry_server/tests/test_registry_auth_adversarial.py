@@ -793,20 +793,74 @@ def test_auth_still_refuses_when_application_startup_never_ran(env, profile_dir)
 # that implementation detail (and on hash randomisation being enabled).
 # ---------------------------------------------------------------------------
 
-def test_key_comparison_is_constant_time_by_construction():
+def _key_is_valid_ast():
+    """The AST of `_key_is_valid`'s EXECUTABLE body, docstring stripped.
+
+    Text matching is not good enough here and this is not hypothetical: the
+    first version of this test asserted `"secrets.compare_digest" in source`,
+    and a mutation that replaced the whole body with `return candidate in
+    valid_keys` SURVIVED — because the phrase was still there in the
+    docstring. A comment satisfying an invariant is this repo's most
+    frequently observed defect shape; the check has to look at code.
+    """
+    import ast
     import inspect
+
     from registry_server import auth as auth_mod
 
-    src = inspect.getsource(auth_mod)
-    assert "secrets.compare_digest" in src, (
-        "key comparison does not use secrets.compare_digest; a plain equality or "
-        "`in set` compare makes timing safety an implementation detail of CPython"
+    tree = ast.parse(inspect.getsource(auth_mod))
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_key_is_valid"
     )
-    fn_src = inspect.getsource(auth_mod._key_is_valid)
-    assert "return True" not in fn_src, (
-        "_key_is_valid short-circuits on the first match; an early return leaks the "
-        "matching key's position among the configured keys (measured: ~12ns)"
+    body = list(fn.body)
+    if (body and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str)):
+        body = body[1:]          # drop the docstring
+    assert body, "_key_is_valid has no executable body"
+    return fn, body
+
+
+def test_key_comparison_is_constant_time_by_construction():
+    """
+    A wall-clock timing assertion is flaky in CI, so what is enforced is the
+    STRUCTURE that makes timing safety hold regardless of interpreter
+    details. Both halves are checked against the AST, not the source text.
+    """
+    import ast
+
+    _fn, body = _key_is_valid_ast()
+
+    calls = [
+        n for stmt in body for n in ast.walk(stmt)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute) and n.func.attr == "compare_digest"
+        and isinstance(n.func.value, ast.Name) and n.func.value.id == "secrets"
+    ]
+    assert calls, (
+        "_key_is_valid does not CALL secrets.compare_digest anywhere in its "
+        "executable body (a mention in the docstring does not count). A plain "
+        "equality or `in set` compare makes timing safety an implementation "
+        "detail of CPython's hashing rather than a property of this code."
     )
+
+    loops = [n for stmt in body for n in ast.walk(stmt) if isinstance(n, (ast.For, ast.While))]
+    assert loops, "_key_is_valid no longer iterates the configured keys"
+    for loop in loops:
+        for node in ast.walk(loop):
+            if isinstance(node, ast.Return) and not (
+                isinstance(node.value, ast.Constant) and node.value.value is False
+            ):
+                raise AssertionError(
+                    "_key_is_valid returns from inside the comparison loop; an early "
+                    "return short-circuits on the first match and leaks the matching "
+                    "key's position among the configured keys (measured: ~12ns)."
+                )
+        assert any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "compare_digest"
+            for n in ast.walk(loop)
+        ), "the loop over configured keys does not compare with compare_digest"
 
 
 def test_key_comparison_decides_correctly_for_every_position(env, profile_dir):
