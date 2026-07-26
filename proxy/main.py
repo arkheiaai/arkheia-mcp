@@ -149,6 +149,46 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # fail-open: never block startup on the self-check
         logger.warning("Audit hash-chain startup self-check skipped: %s", exc)
 
+    # 3b. Binary integrity verification — RECEIPTED.
+    #
+    # proxy/license/integrity.py has always documented itself as running "at
+    # startup". It never did: nothing in this repo called verify_integrity
+    # outside its own unit tests, so the tamper check for the compiled
+    # .so/.pyd detection modules did not run in any deployed process, and no
+    # verdict — pass or fail — was ever recorded anywhere.
+    #
+    # It runs here, after the audit writer is up, precisely so the verdict can
+    # be written to the tamper-evident rail. Fail-closed on an adverse finding:
+    # a proxy whose detection binaries do not match their build-time digests
+    # must not serve, and the receipt is already on disk by the time this
+    # raises. A source checkout has no manifest -> verdict `unverifiable`,
+    # which is receipted (never reported as `verified`) and does not block boot.
+    from proxy.license.integrity import (
+        TamperDetected,
+        runtime_module_dirs,
+        verify_and_receipt,
+    )
+
+    for module_dir in runtime_module_dirs():
+        try:
+            integrity = await verify_and_receipt(module_dir, audit_writer)
+        except TamperDetected as exc:
+            logger.critical(
+                "[FATAL] Binary integrity verification FAILED for %s: %s. "
+                "Refusing to start. The verdict is recorded in the audit log (%s).",
+                module_dir, exc, settings.audit.log_path,
+            )
+            await audit_writer.stop()
+            raise
+        logger.info(
+            "Integrity %s: %s (%d/%d modules) receipt=%s",
+            module_dir.name,
+            integrity["verdict"],
+            integrity["modules_matched"],
+            integrity["modules_expected"],
+            integrity["receipt_id"],
+        )
+
     # 4. Registry client (only if API key configured)
     registry_client = RegistryClient(
         base_url=settings.registry.url,

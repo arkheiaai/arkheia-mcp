@@ -204,15 +204,24 @@ def test_the_verifier_consumes_exactly_this_record(module_dir):
 # 2. The false receipt: a manifest that certifies nothing.
 # ---------------------------------------------------------------------------
 
-def test_an_empty_manifest_would_be_a_record_of_a_check_that_did_not_happen(tmp_path):
+def test_an_empty_manifest_is_a_record_of_a_check_that_did_not_happen(tmp_path):
     """
-    Characterise the underlying behaviour that makes the refusal necessary, so
-    the reason for the refusal is evidence in the suite rather than a claim in a
-    commit message.
+    REWRITTEN, exactly as this test instructed its successor to do.
 
-    This asserts what the LIBRARY does, and is expected to keep passing until
-    ``proxy/license/integrity.py`` is fixed (PR #15 territory — its new
-    ``IntegrityReport`` still returns VERIFIED with ``modules_checked=0`` here).
+    It was a characterisation test: it asserted that ``verify_integrity`` returned
+    True for a manifest that certifies nothing, and carried the message *"behaviour
+    changed — if verify_integrity now refuses an empty manifest, this
+    characterisation test has served its purpose and should be rewritten as the
+    assertion that it refuses"*. The runtime half of F18 fixed the library, so it
+    is that assertion now.
+
+    Why the library had to change and not just the build: the manifest sits next
+    to the artifacts it certifies, so an attacker with write access to one has
+    write access to the other. Truncating it to ``{}`` made the pre-fix verifier
+    iterate zero entries, log "Integrity check passed: 0 modules verified" and
+    return True — a bypass of the whole mechanism, not merely a weak build. Step 3
+    refusing to *ship* an empty manifest (next test) does not help against a
+    manifest emptied after shipping.
     """
     empty_dir = tmp_path / "no_binaries"
     empty_dir.mkdir()
@@ -220,12 +229,9 @@ def test_an_empty_manifest_would_be_a_record_of_a_check_that_did_not_happen(tmp_
     manifest = generate_manifest(empty_dir, empty_dir / MANIFEST_FILE)
     assert manifest == {}, "test setup: the directory must contain no artifacts"
 
-    # A manifest that EXISTS and lists nothing verifies as intact.
-    assert verify_integrity(empty_dir) is True, (
-        "behaviour changed — if verify_integrity now refuses an empty manifest, "
-        "this characterisation test has served its purpose and should be "
-        "rewritten as the assertion that it refuses"
-    )
+    # A manifest that EXISTS and lists nothing is now refused, not passed.
+    with pytest.raises(TamperDetected, match="lists no modules"):
+        verify_integrity(empty_dir)
 
 
 def test_step_3_refuses_to_ship_a_manifest_that_certifies_nothing(tmp_path):
