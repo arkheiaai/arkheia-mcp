@@ -11,7 +11,10 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 
-ARKHEIA_PROXY_URL = os.getenv("ARKHEIA_PROXY_URL", "http://localhost:8099")
+# `.rstrip("/")`: an operator-written base URL commonly carries a trailing slash,
+# and httpx does not fold the resulting `//detect/verify`. Same class of defect as
+# the governance-push misroute — see proxy/detection_adapter.py.
+ARKHEIA_PROXY_URL = os.getenv("ARKHEIA_PROXY_URL", "http://localhost:8099").rstrip("/")
 
 mcp = FastMCP("arkheia-trust")
 
