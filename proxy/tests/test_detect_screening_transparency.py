@@ -357,23 +357,30 @@ def test_local_field_set_covers_what_the_hosted_path_promises(client: TestClient
 
     source = inspect.getsource(ProxyClient._verify_hosted)
     tree = ast.parse(source.strip())
-    hosted_keys = {
-        k.value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Dict)
-        for k in node.keys
-        if isinstance(k, ast.Constant) and isinstance(k.value, str)
-    }
-    # `source` is the hosted path's own marker for provenance; the local path
-    # carries its own value, asserted separately below.
-    hosted_keys.discard("model")   # request payload key, not a response field
-    hosted_keys.discard("prompt")
-    hosted_keys.discard("response")
+
+    # Only the dict the SUCCESS path RETURNS — not the request payload and not the
+    # request headers, which are also dict literals in that function.
+    hosted_keys: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+            hosted_keys |= {
+                k.value
+                for k in node.value.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)
+            }
 
     assert hosted_keys, (
-        "Parsed ZERO response keys out of ProxyClient._verify_hosted — this "
-        "differential would then be comparing against nothing."
+        "Parsed ZERO returned response keys out of ProxyClient._verify_hosted — "
+        "this differential would then be comparing against nothing."
     )
+    # Guard the parse itself: if it silently started matching the request payload
+    # or headers instead of the response mapping, this differential would be
+    # asserting the wrong contract.
+    assert {"risk_level", "evidence_depth_limited", "detection_method", "source"} <= hosted_keys, (
+        "The hosted mapping no longer returns the fields this differential exists "
+        f"to compare. Parsed: {sorted(hosted_keys)}"
+    )
+    assert "X-Arkheia-Key" not in hosted_keys, "parsed the request headers, not the response"
 
     _http, body = _verify(client, MODEL_FULLY_SCORED)
     missing = sorted(hosted_keys - set(body))
