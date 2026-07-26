@@ -33,6 +33,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest
 
+      # `tests/test_packed_artifact_floor.py` produces the REAL published artifact
+      # (`npm pack`) and reads the tarball, because the defect it was earned by was
+      # invisible to every check that read the build script instead. That needs npm.
+      # Pinned rather than relying on whatever the runner image happens to ship, and
+      # >=18 to match npm-wrapper/package.json `engines.node`. If npm is missing the
+      # floor FAILS rather than skips — a skipped artifact check is indistinguishable
+      # from a passing one.
+      - name: Set up Node (the packed-artifact floor runs a real `npm pack`)
+        # Pin: actions/setup-node v4.1.0
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af  # v4.1.0
+        with:
+          node-version: '20'
+
+      - name: Confirm the artifact toolchain is present
+        # Names the units of work before the floor runs. A floor tier that lost npm
+        # would otherwise fail with a confusing import-time error rather than a
+        # legible "the toolchain is missing" line.
+        run: |
+          node --version
+          npm --version
+
       - name: Run floor invariants
         # Override python_files so ONLY floor tests are collected; a bare pytest
         # must never try to import dependency-heavy suites. Empty collection
