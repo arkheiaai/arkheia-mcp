@@ -136,6 +136,44 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+MAX_RETRIEVE_LIMIT = 50
+
+
+def _validate_limit(limit: int) -> int:
+    """
+    Bound `limit` on BOTH sides, and reject invalid input instead of coercing it.
+
+    The cap used to be `min(limit, 50)` in the server wrapper alone — a ONE-SIDED bound.
+    It clamped the top and let everything below through to a bare `rows[:limit]`, where
+    Python's slice semantics reinterpret a negative: rows[:-1] is not "one row", it is
+    "every row but the last". Measured: 60 stored entities, limit=-1, 59 returned against
+    a documented maximum of 50.
+
+    limit=0 is refused too. It is not a cap violation, but it slices to [] and so is
+    indistinguishable from "nothing matched" — the silent-degradation shape.
+
+    Note `bool` is a subclass of `int`, so it is excluded explicitly: limit=True would
+    otherwise sail through as limit=1.
+
+    ASYMMETRY, deliberate: an OVER-LARGE limit is clamped to the cap rather than refused,
+    because "max 50" is the published contract (server.py memory_retrieve) — asking for
+    more than the maximum is a request the contract already answers. A limit below 1 is
+    not a request the contract can answer at all, so it is refused.
+    """
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValueError(
+            f"memory_retrieve: limit must be an int between 1 and {MAX_RETRIEVE_LIMIT}, "
+            f"got {limit!r} ({type(limit).__name__})"
+        )
+    if limit < 1:
+        raise ValueError(
+            f"memory_retrieve: limit must be >= 1 (max {MAX_RETRIEVE_LIMIT}), got {limit}. "
+            "A negative limit was previously passed straight to a list slice, where "
+            "rows[:-1] returns every row but the last — 59 rows against a cap of 50."
+        )
+    return min(limit, MAX_RETRIEVE_LIMIT)
+
+
 def _init_schema(conn: sqlite3.Connection) -> None:
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS entities (
@@ -160,7 +198,124 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             created_at    TEXT NOT NULL
         );
     """)
+
+    # --- identity columns (added after the name-as-key defect) ----------------
+    # from_entity/to_entity are retained as the DISPLAY labels the agent typed; the
+    # *_entity_id columns are the actual foreign keys. See _migrate_relations_to_ids.
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(relations)")}
+    for column in ("from_entity_id", "to_entity_id"):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE relations ADD COLUMN {column} TEXT")
+
     conn.commit()
+    _migrate_relations_to_ids(conn)
+
+
+def _migrate_relations_to_ids(conn: sqlite3.Connection) -> None:
+    """
+    Back-fill entity_ids onto relations that were stored when the NAME was the key.
+
+    WHAT CAN AND CANNOT BE RECOVERED. A legacy row recorded only a name, so it can be
+    resolved only if that name identifies exactly one entity today:
+
+      * exactly one match on both endpoints -> back-filled; the edge is now identity-keyed
+        and behaves as if it had always been.
+      * name matches SEVERAL entities -> genuinely ambiguous and NOT recoverable. The
+        information needed to disambiguate was never written down. Guessing would
+        re-introduce the defect, so the row keeps NULL ids.
+      * name matches NO entity -> a dangling edge from before relate enforced its
+        endpoints (INV-4).
+
+    Unresolvable rows are RETAINED, never silently deleted, and never silently attached:
+    because retrieve now joins on from_entity_id, a NULL-id row is attached to nobody,
+    where before it was attached to EVERY namesake. That is the honest outcome — an edge
+    whose subject was never recorded is not evidence about any particular entity — but it
+    means such an edge stops being reported, so the count is logged at WARNING rather than
+    passing in silence.
+    """
+    rows = conn.execute(
+        "SELECT rel_id, from_entity, to_entity FROM relations WHERE from_entity_id IS NULL OR to_entity_id IS NULL"
+    ).fetchall()
+    if not rows:
+        return
+
+    unresolved = 0
+    for row in rows:
+        from_ids = _entity_ids_for_name(conn, row["from_entity"])
+        to_ids = _entity_ids_for_name(conn, row["to_entity"])
+        if len(from_ids) == 1 and len(to_ids) == 1:
+            conn.execute(
+                "UPDATE relations SET from_entity_id = ?, to_entity_id = ? WHERE rel_id = ?",
+                (from_ids[0], to_ids[0], row["rel_id"]),
+            )
+        else:
+            unresolved += 1
+    conn.commit()
+
+    if unresolved:
+        logger.warning(
+            "memory: %d legacy relation(s) could not be migrated to entity ids — the "
+            "endpoint name is ambiguous or missing, so the edge's subject was never "
+            "recorded. Rows are retained but are no longer attached to any entity "
+            "(previously they were attached to every namesake). Re-create them with "
+            "memory_relate to restore them.",
+            unresolved,
+        )
+
+
+def _entity_ids_for_name(conn: sqlite3.Connection, name: str, entity_type: str | None = None) -> list[str]:
+    """All entity_ids carrying `name` (optionally narrowed by type). Order is stable."""
+    if entity_type:
+        rows = conn.execute(
+            "SELECT entity_id FROM entities WHERE name = ? AND entity_type = ? ORDER BY created_at, entity_id",
+            (name, entity_type),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT entity_id FROM entities WHERE name = ? ORDER BY created_at, entity_id",
+            (name,),
+        ).fetchall()
+    return [r["entity_id"] for r in rows]
+
+
+def _resolve_endpoint(
+    conn: sqlite3.Connection, label: str, name: str, entity_type: str | None
+) -> str:
+    """
+    Resolve one relation endpoint to a single entity_id, or refuse.
+
+    A name is not an identity: the store deliberately allows "Mercury" the person and
+    "Mercury" the project to coexist. When a name is ambiguous there is no correct
+    answer, so this refuses and names the candidates instead of taking whichever row
+    sqlite happened to return first.
+    """
+    ids = _entity_ids_for_name(conn, name, entity_type)
+
+    if not ids:
+        qualifier = f" of type {entity_type!r}" if entity_type else ""
+        raise ValueError(
+            f"memory_relate: no such entity — {label}={name!r}{qualifier}. "
+            "Store both endpoints with memory_store before relating them; "
+            "storing the relation anyway would create a dangling edge that "
+            "memory_retrieve reports as a real relation."
+        )
+
+    if len(ids) > 1:
+        types = [
+            r["entity_type"]
+            for r in conn.execute(
+                "SELECT entity_type FROM entities WHERE name = ? ORDER BY created_at, entity_id",
+                (name,),
+            ).fetchall()
+        ]
+        raise ValueError(
+            f"memory_relate: ambiguous entity — {label}={name!r} matches "
+            f"{len(ids)} entities of types {sorted(set(types))!r}. A name is not an "
+            f"identity. Disambiguate with {label}_type=<entity_type>; relating to a "
+            "guessed one would report the edge as a fact about the wrong entity."
+        )
+
+    return ids[0]
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +410,8 @@ async def retrieve_entities(
         entities:  List of matching entity dicts
         total:     Count of matches before limit
     """
+    limit = _validate_limit(limit)
+
     conn = _get_conn()
     try:
         _init_schema(conn)
@@ -283,9 +440,11 @@ async def retrieve_entities(
                 (eid,),
             ).fetchall()
 
+            # Join on IDENTITY, not on the display name. Joining on row["name"] gave
+            # every namesake the same edges (see store_relation).
             rel_rows = conn.execute(
-                "SELECT relation_type, to_entity FROM relations WHERE from_entity = ? ORDER BY created_at",
-                (row["name"],),
+                "SELECT relation_type, to_entity FROM relations WHERE from_entity_id = ? ORDER BY created_at",
+                (eid,),
             ).fetchall()
 
             entities.append({
@@ -308,9 +467,15 @@ async def retrieve_entities(
         conn.close()
 
 
-async def store_relation(from_entity: str, relation_type: str, to_entity: str) -> dict:
+async def store_relation(
+    from_entity: str,
+    relation_type: str,
+    to_entity: str,
+    from_entity_type: str | None = None,
+    to_entity_type: str | None = None,
+) -> dict:
     """
-    Store a directional named relationship between two entities (referenced by name).
+    Store a directional named relationship between two entities.
 
     Both endpoints MUST already exist as entities — the published tool contract
     (mcp_server/server.py, memory_relate) has always said so, and until now nothing
@@ -319,44 +484,41 @@ async def store_relation(from_entity: str, relation_type: str, to_entity: str) -
     relation pointing at an entity that does not exist. A typo in a name was
     indistinguishable from a fact. Refusing is loud; a dangling edge is silent.
 
+    A NAME IS NOT AN IDENTITY. Endpoints are given by name because that is what an agent
+    knows, but they are RESOLVED to entity_id and the edge is stored against the id.
+    Previously the name itself was the key, and retrieve re-joined on it, so a single
+    "Mercury works_at Acme" was reported as a fact about BOTH the person named Mercury
+    and the project named Mercury. Duplicate names are legitimate and are still allowed;
+    what is no longer allowed is silently guessing which one was meant.
+
+    Args:
+        from_entity:      Name of the source entity
+        relation_type:    Relation label
+        to_entity:        Name of the target entity
+        from_entity_type: Optional entity_type narrowing an ambiguous `from_entity`
+        to_entity_type:   Optional entity_type narrowing an ambiguous `to_entity`
+
     Raises:
-        ValueError: if either endpoint does not name an existing entity.
+        ValueError: if an endpoint names no existing entity, or names more than one and
+                    no *_entity_type was supplied to disambiguate it.
 
     Returns:
-        rel_id:        UUID of the stored relation
-        from_entity:   Source entity name
-        relation_type: Relation label
-        to_entity:     Target entity name
+        rel_id, from_entity, relation_type, to_entity,
+        from_entity_id, to_entity_id — the resolved identities the edge is keyed by
     """
     conn = _get_conn()
     try:
         _init_schema(conn)
 
-        missing = [
-            label
-            for label, name in (("from_entity", from_entity), ("to_entity", to_entity))
-            if conn.execute(
-                "SELECT 1 FROM entities WHERE name = ? LIMIT 1", (name,)
-            ).fetchone()
-            is None
-        ]
-        if missing:
-            named = ", ".join(
-                f"{label}={dict(from_entity=from_entity, to_entity=to_entity)[label]!r}"
-                for label in missing
-            )
-            raise ValueError(
-                f"memory_relate: no such entity — {named}. "
-                "Store both endpoints with memory_store before relating them; "
-                "storing the relation anyway would create a dangling edge that "
-                "memory_retrieve reports as a real relation."
-            )
+        from_id = _resolve_endpoint(conn, "from_entity", from_entity, from_entity_type)
+        to_id = _resolve_endpoint(conn, "to_entity", to_entity, to_entity_type)
 
         rel_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
         conn.execute(
-            "INSERT INTO relations (rel_id, from_entity, relation_type, to_entity, created_at) VALUES (?, ?, ?, ?, ?)",
-            (rel_id, from_entity, relation_type, to_entity, now),
+            "INSERT INTO relations (rel_id, from_entity, relation_type, to_entity, created_at, from_entity_id, to_entity_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (rel_id, from_entity, relation_type, to_entity, now, from_id, to_id),
         )
         conn.commit()
         return {
@@ -364,6 +526,8 @@ async def store_relation(from_entity: str, relation_type: str, to_entity: str) -
             "from_entity": from_entity,
             "relation_type": relation_type,
             "to_entity": to_entity,
+            "from_entity_id": from_id,
+            "to_entity_id": to_id,
         }
     finally:
         conn.close()

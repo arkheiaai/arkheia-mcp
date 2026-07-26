@@ -373,7 +373,8 @@ async def memory_retrieve(query: str, entity_type: str | None = None, limit: int
     Args:
         query:        Search string — matches entity names (case-insensitive LIKE)
         entity_type:  Optional filter — only return entities of this type
-        limit:        Max entities to return (default 10, max 50)
+        limit:        Max entities to return (default 10, max 50). Must be >= 1;
+                      a limit below 1 raises ValueError rather than being coerced.
 
     Returns:
         entities:  List of matching entities, each with:
@@ -383,7 +384,11 @@ async def memory_retrieve(query: str, entity_type: str | None = None, limit: int
         total:     Total count of matches (before limit)
     """
     check("memory_retrieve")
-    limit = min(limit, 50)
+    # The bound is enforced ONCE, in retrieve_entities (_validate_limit), because that is
+    # where the slicing happens. `min(limit, 50)` here was a one-sided bound: it clamped
+    # the top and passed negatives straight through to rows[:limit], where rows[:-1]
+    # returned 59 of 60 rows against a documented cap of 50. Clamping in the wrapper only
+    # would also have left the defect reachable from any other import site.
     return await retrieve_entities(query=query, entity_type=entity_type, limit=limit)
 
 
@@ -394,7 +399,13 @@ async def memory_retrieve(query: str, entity_type: str | None = None, limit: int
     idempotentHint=True,
     openWorldHint=False,
 ))
-async def memory_relate(from_entity: str, relation_type: str, to_entity: str) -> dict:
+async def memory_relate(
+    from_entity: str,
+    relation_type: str,
+    to_entity: str,
+    from_entity_type: str | None = None,
+    to_entity_type: str | None = None,
+) -> dict:
     """
     Store a named relationship between two entities in the knowledge graph.
 
@@ -404,22 +415,39 @@ async def memory_relate(from_entity: str, relation_type: str, to_entity: str) ->
     then reported back as a real relation.
     Relations are directional: from_entity --[relation_type]--> to_entity
 
+    Endpoints are named for convenience but the edge is keyed by ENTITY ID. Because
+    two entities may share a name (a person and a project both called "Mercury"), a
+    name that matches more than one entity is AMBIGUOUS and is refused — pass
+    from_entity_type / to_entity_type to say which one you meant. Previously the name
+    itself was the key, so one stored edge was reported as a fact about every namesake.
+
     Args:
-        from_entity:   Name of the source entity
-        relation_type: Relationship label (e.g. "reports_to", "blocks", "owns", "assigned_to")
-        to_entity:     Name of the target entity
+        from_entity:      Name of the source entity
+        relation_type:    Relationship label (e.g. "reports_to", "blocks", "owns")
+        to_entity:        Name of the target entity
+        from_entity_type: Optional — entity_type disambiguating a non-unique from_entity
+        to_entity_type:   Optional — entity_type disambiguating a non-unique to_entity
 
     Raises:
-        ValueError: if from_entity or to_entity does not name a stored entity.
+        ValueError: if an endpoint names no stored entity, or names more than one and
+                    no corresponding *_entity_type was given to disambiguate it.
 
     Returns:
-        rel_id:        UUID of the stored relation
-        from_entity:   Source entity name
-        relation_type: Relation type
-        to_entity:     Target entity name
+        rel_id:         UUID of the stored relation
+        from_entity:    Source entity name
+        relation_type:  Relation type
+        to_entity:      Target entity name
+        from_entity_id: Resolved source entity_id — the key the edge is stored under
+        to_entity_id:   Resolved target entity_id
     """
     check("memory_relate")
-    return await store_relation(from_entity=from_entity, relation_type=relation_type, to_entity=to_entity)
+    return await store_relation(
+        from_entity=from_entity,
+        relation_type=relation_type,
+        to_entity=to_entity,
+        from_entity_type=from_entity_type,
+        to_entity_type=to_entity_type,
+    )
 
 
 if __name__ == "__main__":

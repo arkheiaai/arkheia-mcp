@@ -366,15 +366,24 @@ class TestRelateRefusesDanglingEdges:
             conn.close()
 
     @pytest.mark.asyncio
-    async def test_a_dangling_edge_planted_directly_is_still_reported(self, db):
+    async def test_a_dangling_edge_planted_directly_is_no_longer_reported(self, db):
         """
-        Honest scope marker, asserted rather than described. Enforcement is at the WRITE
-        path only; rows already on disk from before this fix (or written by any other
-        client of the sqlite file) are still returned by memory_retrieve. This test pins
-        that known limitation so it cannot be mistaken for coverage, and fails loudly if
-        someone later adds read-side filtering without updating the flow's ledger entry.
+        SUPERSEDES `test_a_dangling_edge_planted_directly_is_still_reported`, which pinned
+        the write-path-only limitation and was written to "fail loudly if someone later
+        adds read-side filtering". Read-side filtering has now been added — retrieve joins
+        relations on from_entity_id — so that test failed by design and this replaces it.
+
+        A legacy row carrying only names is migrated to ids when both names resolve
+        uniquely (see _migrate_relations_to_ids). "Ghost Corp" resolves to NO entity, so
+        this edge cannot be migrated, stays NULL-keyed, and is attached to nobody.
+
+        Both halves are pinned, so this cannot pass by returning nothing at all: the
+        dangling edge is absent AND a genuine edge on the same entity is present.
         """
         await store_entity("Jane Smith", "person", ["Sales lead"])
+        await store_entity("Real Corp", "company", ["employer"])
+        await store_relation("Jane Smith", "works_at", "Real Corp")
+
         conn = _get_conn()
         try:
             conn.execute(
@@ -387,9 +396,86 @@ class TestRelateRefusesDanglingEdges:
 
         result = await retrieve_entities("Jane Smith")
 
+        # POSITIVE CONTROL + absence, in one assertion: exactly the real edge, and the
+        # planted one nowhere in it.
         assert result["entities"][0]["relations"] == [
-            {"relation_type": "works_at", "to_entity": "Ghost Corp"}
+            {"relation_type": "works_at", "to_entity": "Real Corp"}
         ]
+
+    @pytest.mark.asyncio
+    async def test_a_legacy_name_keyed_edge_is_migrated_when_the_names_are_unique(self, db):
+        """
+        The other half of the migration contract: a pre-existing name-keyed row whose
+        endpoints BOTH resolve to exactly one entity is back-filled and keeps working.
+        Without this, "dangling edges disappear" could be satisfied by dropping every
+        legacy edge, silently discarding real history.
+        """
+        await store_entity("Jane Smith", "person", ["Sales lead"])
+        await store_entity("Real Corp", "company", ["employer"])
+
+        conn = _get_conn()
+        try:
+            conn.execute(
+                "INSERT INTO relations (rel_id, from_entity, relation_type, to_entity, created_at)"
+                " VALUES ('legacy', 'Jane Smith', 'works_at', 'Real Corp', '2026-01-01')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = await retrieve_entities("Jane Smith")
+        assert result["entities"][0]["relations"] == [
+            {"relation_type": "works_at", "to_entity": "Real Corp"}
+        ]
+
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT from_entity_id, to_entity_id FROM relations WHERE rel_id = 'legacy'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row["from_entity_id"] is not None
+        assert row["to_entity_id"] is not None
+
+    @pytest.mark.asyncio
+    async def test_an_ambiguous_legacy_edge_is_retained_but_attached_to_nobody(self, db):
+        """
+        The genuinely unrecoverable case, stated honestly. A legacy edge from "Mercury"
+        when two Mercuries exist cannot be assigned to either — the information needed was
+        never recorded. It must NOT be attached to both (the original defect) and must NOT
+        be deleted (silent data loss). It is retained with NULL ids and attached to nobody.
+        """
+        await store_entity("Mercury", "person", ["god"])
+        await store_entity("Mercury", "project", ["project"])
+        await store_entity("Acme", "company", ["employer"])
+
+        conn = _get_conn()
+        try:
+            conn.execute(
+                "INSERT INTO relations (rel_id, from_entity, relation_type, to_entity, created_at)"
+                " VALUES ('ambig', 'Mercury', 'works_at', 'Acme', '2026-01-01')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = await retrieve_entities("Mercury", limit=10)
+        assert len(result["entities"]) == 2
+        for entity in result["entities"]:
+            assert entity["relations"] == []
+
+        # Retained, not deleted.
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT from_entity_id, to_entity_id FROM relations WHERE rel_id = 'ambig'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None
+        assert row["from_entity_id"] is None
+        assert row["to_entity_id"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -519,3 +605,211 @@ class TestObservationsAreStoredVerbatim:
         src = (_REPO_ROOT / "mcp_server" / "tools" / "memory.py").read_text()
         assert "from proxy.audit.redactor import" not in src
         assert not hasattr(memory_mod, "redact")
+
+
+# ---------------------------------------------------------------------------
+# INV-6 — the limit cap is bounded on BOTH sides (Codex finding A)
+# ---------------------------------------------------------------------------
+
+class TestLimitIsBoundedBothWays:
+    """
+    `min(limit, 50)` is a ONE-SIDED bound. It clamps the top and lets everything below
+    through, including negatives, which Python's slice semantics then reinterpret:
+    rows[:-1] is not "one row", it is "all rows but the last".
+
+    Same defect family as the `-lt` count guards this sweep keeps finding — the guard is
+    real, it is just only half a guard.
+    """
+
+    @pytest.mark.asyncio
+    async def test_negative_limit_does_not_return_more_than_the_cap(self, db):
+        """
+        Codex finding A, reproduced at the reported shape: 60 rows, limit=-1.
+        Observed on the unfixed path: 59 entities returned (rows[:-1]) against a
+        documented maximum of 50.
+        """
+        from mcp_server import server as mcp_server_module
+
+        for i in range(60):
+            await store_entity(f"Node {i:03d}", "node", [f"obs {i}"])
+
+        with pytest.raises(ValueError) as exc:
+            await mcp_server_module.memory_retrieve(query="Node", limit=-1)
+
+        assert "limit" in str(exc.value).lower()
+
+    @pytest.mark.asyncio
+    async def test_zero_limit_is_refused_rather_than_silently_emptying(self, db):
+        """
+        limit=0 slices to []. That is not a cap violation, but it is indistinguishable
+        from "nothing matched" — the silent-degradation shape. Refuse it explicitly.
+
+        Positive control in the same test: the identical query at a valid limit returns
+        the rows, so the refusal above is about the limit and not about an empty store.
+        """
+        from mcp_server import server as mcp_server_module
+
+        for i in range(5):
+            await store_entity(f"Node {i:03d}", "node", [f"obs {i}"])
+
+        with pytest.raises(ValueError):
+            await mcp_server_module.memory_retrieve(query="Node", limit=0)
+
+        control = await mcp_server_module.memory_retrieve(query="Node", limit=10)
+        assert len(control["entities"]) == 5
+        assert control["total"] == 5
+
+    @pytest.mark.asyncio
+    async def test_non_integer_limit_is_refused_not_coerced(self, db):
+        """
+        Reject invalid input explicitly rather than coercing silently. A bool is an int
+        subclass in Python, so `limit=True` would otherwise slip through as limit=1 and
+        return exactly one row while looking like a flag the caller set by mistake.
+        """
+        from mcp_server import server as mcp_server_module
+
+        await store_entity("Node 001", "node", ["obs"])
+
+        for bad in ("10", 3.5, True, None):
+            with pytest.raises(ValueError):
+                await mcp_server_module.memory_retrieve(query="Node", limit=bad)
+
+    @pytest.mark.asyncio
+    async def test_the_lower_level_function_also_refuses_a_negative_limit(self, db):
+        """
+        The wrapper is not the only caller of retrieve_entities. Clamping only in
+        server.py would leave the defect reachable by any other import site, so the
+        bound is asserted at the function that actually does the slicing.
+        """
+        for i in range(60):
+            await store_entity(f"Node {i:03d}", "node", [f"obs {i}"])
+
+        with pytest.raises(ValueError):
+            await retrieve_entities("Node", limit=-1)
+
+        control = await retrieve_entities("Node", limit=10)
+        assert len(control["entities"]) == 10
+        assert control["total"] == 60
+
+
+# ---------------------------------------------------------------------------
+# INV-7 — a relation is keyed by IDENTITY, not by display name (Codex finding B)
+# ---------------------------------------------------------------------------
+
+class TestRelationsAreKeyedByIdentity:
+    """
+    A NAME IS NOT AN IDENTITY. entity_id is already the primary key of `entities`, and
+    `observations` correctly references it — but `relations` stored the NAME on both
+    endpoints, and retrieve re-joined on `row["name"]`. Two entities may legitimately
+    share a name (a person and a project both called Mercury), so one stored edge was
+    reported as a fact about BOTH of them.
+
+    Third appearance of this defect shape today: a truncated clause slug, a `setdefault`
+    on a shared job name, and now an entity name used as a foreign key.
+
+    The store deliberately permits duplicate names — "Mercury" the person and "Mercury"
+    the project are different things that share a label, and forbidding that would be the
+    wrong fix. So an ambiguous reference is REFUSED loudly at write time rather than
+    silently resolved to whichever row sqlite returned first.
+    """
+
+    @pytest.mark.asyncio
+    async def test_relation_attaches_to_only_the_named_entity_not_its_namesake(self, db):
+        """
+        Codex finding B at the reported shape. The relation is created against the
+        PERSON (disambiguated by type); the PROJECT must not acquire it.
+
+        Both directions are pinned: the person's relation list is exactly the one edge,
+        and the project's is exactly empty. Asserting only `!= []` on the person would
+        pass while the bleed continued.
+        """
+        person = await store_entity("Mercury", "person", ["the Roman god"])
+        project = await store_entity("Mercury", "project", ["the internal project"])
+        await store_entity("Acme", "company", ["employer"])
+
+        assert person["entity_id"] != project["entity_id"]
+
+        await store_relation(
+            "Mercury", "works_at", "Acme", from_entity_type="person"
+        )
+
+        result = await retrieve_entities("Mercury", limit=10)
+        by_type = {e["entity_type"]: e for e in result["entities"]}
+
+        assert by_type["person"]["relations"] == [
+            {"relation_type": "works_at", "to_entity": "Acme"}
+        ]
+        assert by_type["project"]["relations"] == []
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_endpoint_is_refused_rather_than_guessed(self, db):
+        """
+        With two entities named Mercury and no disambiguator, there is no correct answer.
+        Picking one silently is the defect; refusing names the problem to the agent.
+
+        Positive control: the same call against an UNAMBIGUOUS name succeeds, so the
+        refusal is about ambiguity and not about relate being broken outright.
+        """
+        await store_entity("Mercury", "person", ["god"])
+        await store_entity("Mercury", "project", ["project"])
+        await store_entity("Acme", "company", ["employer"])
+
+        with pytest.raises(ValueError) as exc:
+            await store_relation("Mercury", "works_at", "Acme")
+
+        msg = str(exc.value).lower()
+        assert "ambiguous" in msg
+        assert "mercury" in msg
+
+        await store_entity("Venus", "person", ["unique name"])
+        rel = await store_relation("Venus", "works_at", "Acme")
+        assert rel["from_entity"] == "Venus"
+
+    @pytest.mark.asyncio
+    async def test_relations_are_stored_against_entity_ids_on_disk(self, db):
+        """
+        Structural proof at the storage layer, not just through the read path: the
+        relations row must carry the endpoint entity_ids. A read-path-only fix would
+        leave the identity defect latent for any other consumer of the table.
+        """
+        person = await store_entity("Mercury", "person", ["god"])
+        acme = await store_entity("Acme", "company", ["employer"])
+        await store_relation("Mercury", "works_at", "Acme", from_entity_type="person")
+
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT from_entity_id, to_entity_id FROM relations"
+            ).fetchone()
+        finally:
+            conn.close()
+
+        assert row["from_entity_id"] == person["entity_id"]
+        assert row["to_entity_id"] == acme["entity_id"]
+
+    @pytest.mark.asyncio
+    async def test_same_name_different_type_each_keeps_its_own_edges(self, db):
+        """
+        The general case, not just the empty-vs-one case: give BOTH namesakes a distinct
+        relation and prove neither sees the other's. If retrieve still joined on name,
+        each would report both edges.
+        """
+        await store_entity("Mercury", "person", ["god"])
+        await store_entity("Mercury", "project", ["project"])
+        await store_entity("Acme", "company", ["employer"])
+        await store_entity("Roadmap", "document", ["plan"])
+
+        await store_relation("Mercury", "works_at", "Acme", from_entity_type="person")
+        await store_relation(
+            "Mercury", "documented_in", "Roadmap", from_entity_type="project"
+        )
+
+        result = await retrieve_entities("Mercury", limit=10)
+        by_type = {e["entity_type"]: e for e in result["entities"]}
+
+        assert by_type["person"]["relations"] == [
+            {"relation_type": "works_at", "to_entity": "Acme"}
+        ]
+        assert by_type["project"]["relations"] == [
+            {"relation_type": "documented_in", "to_entity": "Roadmap"}
+        ]

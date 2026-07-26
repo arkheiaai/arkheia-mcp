@@ -13,8 +13,10 @@ re-run it in well under a minute to find out whether their change is actually co
 
     python tools/mutate_f5_memory_graph.py
 
-Last full run (2026-07-26, branch sweep/mcp-memory-knowledge-graph): baseline 40 passed / 0 failed;
-27 mutants, 27 KILLED by their own expected assertion, 0 KILLED-BY-OTHER, 0 SURVIVED, 0 NOT-OBSERVED.
+Last full run (2026-07-26, branch sweep/mcp-memory-knowledge-graph): baseline 50 passed / 0 failed;
+36 mutants, 36 KILLED by their own expected assertion, 0 KILLED-BY-OTHER, 0 SURVIVED, 0 NOT-OBSERVED.
+(Previous run: baseline 40 passed, 27 mutants. The 9 added mutants M26-M34 cover the two Codex
+findings on PR #19 — the one-sided `limit` bound and the name-as-identity relation key.)
 
 TWO OF THE HARNESS'S OWN DEFECTS, found by running it — quoted because a kill rate means nothing
 without them. The first pass reported 2 SURVIVED and both were the instrument, not the coverage:
@@ -22,7 +24,10 @@ M20 was a mutant that changed no behaviour (it added a no-op line instead of act
 write before the refusal), and M22 was never loaded at all (see _purge_bytecode). A later pass
 reported 3 NOT-OBSERVED after `_get_conn` was refactored and three anchors stopped matching — that
 one is the discipline working as intended: the anchors were stale, the mutants never applied, and
-the harness said so instead of counting three unexamined guards as clean.
+the harness said so instead of counting three unexamined guards as clean. It happened a THIRD time
+when store_relation's inline `missing = [...]` block became `_resolve_endpoint`: M17-M20 all went
+NOT-OBSERVED at once. Had the harness folded NOT-OBSERVED into KILLED, that refactor would have
+silently retired four guards on the dangling-edge contract while still reporting a 100% kill rate.
 
 THREE BUCKETS ONLY, and the third is never folded into the others:
     KILLED        — the mutant was applied AND the run observed >=1 assertion failure.
@@ -39,10 +44,13 @@ WHAT THIS CAMPAIGN HAS NO MUTANT FOR (not-observed, therefore NOT clean):
   1. CONCURRENCY. Two servers writing the same sqlite file simultaneously. Now that the path
      is a single shared absolute default, concurrent writers are MORE likely than before, and
      nothing here opens two connections at once. No WAL pragma, no busy_timeout, no test.
-  2. The name-keyed relations schema. `relations` stores endpoint NAMES while `entities` are
-     keyed by (name, entity_type), so two entities sharing a name but not a type share every
-     edge. Fixing it is a schema migration against live data and is out of scope for this unit;
-     no mutant, and the defect is recorded in the PR body instead.
+  2. [RESOLVED 2026-07-26 — no longer an exclusion] The name-keyed relations schema. This entry
+     used to read "out of scope for this unit; no mutant, and the defect is recorded in the PR
+     body instead." Codex found it on PR #19 and it is now fixed: `relations` carries
+     from_entity_id/to_entity_id, retrieve joins on identity, ambiguous endpoints are refused,
+     and legacy rows are migrated where their names resolve uniquely. Covered by M30-M34.
+     Kept visible rather than deleted, because "recorded in the PR body instead" is exactly how
+     a known defect becomes permanent — the note is the audit trail for why it did not.
   3. Migration of graphs already written to the old relative location. Nothing detects or
      merges a `<cwd>/C:/arkheia-mcp/data/memory.db` left by the defective build.
   4. The `check()` tool gate in front of these three tools. That belongs to flow F1 and is
@@ -209,47 +217,55 @@ MUTANTS = [
      ["test_escaping_survives_the_entity_type_filter_branch"]),
 
     # ---- INV-4: the relate contract is enforced --------------------------------
+    # NB M17-M20 were re-anchored when store_relation's inline `missing = [...]` block was
+    # replaced by _resolve_endpoint (the name-as-identity fix). The old anchors matched 0
+    # times and the harness reported them NOT-OBSERVED rather than counting four unexamined
+    # guards as clean — that is the instrument working, and re-anchoring is the response.
     ("M17-existence-check-deleted", MEM,
-     '        if missing:',
-     '        if False:',
+     '    if not ids:\n        qualifier =',
+     '    if False:\n        qualifier =',
      "memory_relate accepts any endpoint again, so a typo stores a dangling edge that "
      "memory_retrieve reports back as a real relation",
      ["test_unknown_endpoint_raises_and_names_which_one",
       "test_a_refused_relation_leaves_no_row_behind"]),
 
     ("M18-only-from-entity-checked", MEM,
-     'for label, name in (("from_entity", from_entity), ("to_entity", to_entity))',
-     'for label, name in (("from_entity", from_entity),)',
+     '        to_id = _resolve_endpoint(conn, "to_entity", to_entity, to_entity_type)',
+     '        to_id = (_entity_ids_for_name(conn, to_entity, to_entity_type) or [None])[0]',
      "only the source endpoint is validated; a mistyped TARGET still dangles. Half-enforcement "
      "reads as enforcement in any test that only tries a bad from_entity.",
      ["test_unknown_endpoint_raises_and_names_which_one"]),
 
     ("M19-error-does-not-name-the-side", MEM,
-     '                f"{label}={dict(from_entity=from_entity, to_entity=to_entity)[label]!r}"',
-     '                "unknown"',
+     'f"memory_relate: no such entity \u2014 {label}={name!r}{qualifier}. "',
+     '"memory_relate: no such entity. "',
      "the refusal no longer says which endpoint was wrong, so the agent cannot tell which of "
      "the two names it mistyped",
      ["test_unknown_endpoint_raises_and_names_which_one"]),
 
     ("M20-insert-then-raise", MEM,
-     '        if missing:\n            named = ',
-     '        if missing:\n'
-     '            conn.execute(\n'
-     '                "INSERT INTO relations (rel_id, from_entity, relation_type, to_entity,'
+     '        from_id = _resolve_endpoint(conn, "from_entity", from_entity, from_entity_type)\n'
+     '        to_id = _resolve_endpoint(conn, "to_entity", to_entity, to_entity_type)\n',
+     '        conn.execute(\n'
+     '            "INSERT INTO relations (rel_id, from_entity, relation_type, to_entity,'
      ' created_at) VALUES (?, ?, ?, ?, ?)",\n'
-     '                (str(uuid.uuid4()), from_entity, relation_type, to_entity, "mutant"),\n'
-     '            )\n'
-     '            conn.commit()\n'
-     '            named = ',
+     '            (str(uuid.uuid4()), from_entity, relation_type, to_entity, "mutant"),\n'
+     '        )\n'
+     '        conn.commit()\n'
+     '        from_id = _resolve_endpoint(conn, "from_entity", from_entity, from_entity_type)\n'
+     '        to_id = _resolve_endpoint(conn, "to_entity", to_entity, to_entity_type)\n',
      "the row is written and THEN the refusal is raised — the endpoint check becomes cosmetic "
      "while every pytest.raises assertion still passes. Proves the row-count assertion, not the "
      "raises, is what makes the refusal real.",
      ["test_a_refused_relation_leaves_no_row_behind"]),
 
     # ---- INV-5: the documented limit cap ---------------------------------------
-    ("M21-server-cap-removed", SRV,
-     '    limit = min(limit, 50)',
-     '    limit = limit',
+    # NB the cap moved from server.py's wrapper into memory._validate_limit when the
+    # one-sided-bound defect was fixed, so this anchors on its new home. Anchoring on the
+    # old `limit = min(limit, 50)` in SRV would now silently NOT-OBSERVE.
+    ("M21-upper-cap-removed", MEM,
+     '    return min(limit, MAX_RETRIEVE_LIMIT)',
+     '    return limit',
      "the documented 'max 50' cap is gone. THIS IS THE MUTANT THE SUPERSEDED PERMISSIVE "
      "ASSERTION COULD NOT SEE: `assert 'entities' in result` holds either way.",
      ["test_server_wrapper_caps_limit_at_fifty", "test_retrieve_limit_capped_at_50"]),
@@ -283,6 +299,83 @@ MUTANTS = [
      "the ACCESS-CONTROL ruling is quietly reversed by importing the audit redactor. The pin "
      "exists so that decision cannot drift without a test going red and the ledger being revisited.",
      ["test_no_redactor_is_imported_by_the_memory_module"]),
+
+    # ---- INV-6: the limit is bounded on BOTH sides (Codex finding A) -----------
+    ("M26-lower-bound-deleted", MEM,
+     '    if limit < 1:\n        raise ValueError(',
+     '    if False:\n        raise ValueError(',
+     "restores the exact one-sided bound Codex found: limit=-1 reaches rows[:-1] and returns "
+     "59 of 60 rows against a documented cap of 50",
+     ["test_negative_limit_does_not_return_more_than_the_cap",
+      "test_zero_limit_is_refused_rather_than_silently_emptying",
+      "test_the_lower_level_function_also_refuses_a_negative_limit"]),
+
+    ("M27-negative-silently-coerced-instead-of-refused", MEM,
+     '    if limit < 1:\n        raise ValueError(',
+     '    if limit < 1:\n        limit = 1\n    if False:\n        raise ValueError(',
+     "the cap is no longer bypassed, but an invalid limit is silently COERCED to 1 instead of "
+     "refused. Distinguishes 'clamped' from 'rejected explicitly' — a bare count assertion "
+     "(<= 50) would pass against this.",
+     ["test_negative_limit_does_not_return_more_than_the_cap",
+      "test_zero_limit_is_refused_rather_than_silently_emptying"]),
+
+    ("M28-bool-slips-through-as-int", MEM,
+     '    if isinstance(limit, bool) or not isinstance(limit, int):',
+     '    if not isinstance(limit, int):',
+     "bool is an int subclass, so limit=True is accepted as limit=1 — a caller's mistyped flag "
+     "silently returns exactly one row",
+     ["test_non_integer_limit_is_refused_not_coerced"]),
+
+    ("M29-validation-not-called-by-the-lower-level-function", MEM,
+     '    limit = _validate_limit(limit)',
+     '    pass  # validation skipped',
+     "the bound exists but retrieve_entities never invokes it, so every import site other than "
+     "the server wrapper is unguarded again",
+     ["test_negative_limit_does_not_return_more_than_the_cap",
+      "test_the_lower_level_function_also_refuses_a_negative_limit",
+      "test_server_wrapper_caps_limit_at_fifty"]),
+
+    # ---- INV-7: relations keyed by identity, not by name (Codex finding B) -----
+    ("M30-retrieve-joins-on-name-again", MEM,
+     '                "SELECT relation_type, to_entity FROM relations WHERE from_entity_id = ? ORDER BY created_at",\n'
+     '                (eid,),',
+     '                "SELECT relation_type, to_entity FROM relations WHERE from_entity = ? ORDER BY created_at",\n'
+     '                (row["name"],),',
+     "the exact defect Codex found: the read path re-joins on the display NAME, so one stored "
+     "edge is reported as a fact about every entity sharing that name",
+     ["test_relation_attaches_to_only_the_named_entity_not_its_namesake",
+      "test_same_name_different_type_each_keeps_its_own_edges",
+      "test_a_dangling_edge_planted_directly_is_no_longer_reported"]),
+
+    ("M31-ambiguous-endpoint-silently-resolved-to-the-first", MEM,
+     '    if len(ids) > 1:',
+     '    if False:',
+     "an ambiguous name is silently resolved to whichever row sqlite returned first, instead of "
+     "being refused — the edge becomes a confident fact about a guessed entity",
+     ["test_ambiguous_endpoint_is_refused_rather_than_guessed"]),
+
+    ("M32-ids-not-written-to-the-relations-row", MEM,
+     '            (rel_id, from_entity, relation_type, to_entity, now, from_id, to_id),',
+     '            (rel_id, from_entity, relation_type, to_entity, now, None, None),',
+     "endpoints resolve and ambiguity is still refused, but the identities are never persisted, "
+     "so every edge is NULL-keyed and attached to nobody. A read-path-only assertion would miss it.",
+     ["test_relations_are_stored_against_entity_ids_on_disk",
+      "test_relation_attaches_to_only_the_named_entity_not_its_namesake",
+      "test_same_name_different_type_each_keeps_its_own_edges"]),
+
+    ("M33-migration-guesses-ambiguous-legacy-edges", MEM,
+     '        if len(from_ids) == 1 and len(to_ids) == 1:',
+     '        if len(from_ids) >= 1 and len(to_ids) >= 1:',
+     "the migration back-fills an AMBIGUOUS legacy edge by taking the first candidate, "
+     "manufacturing a confident identity the original row never recorded",
+     ["test_an_ambiguous_legacy_edge_is_retained_but_attached_to_nobody"]),
+
+    ("M34-migration-drops-what-it-cannot-resolve", MEM,
+     '        else:\n            unresolved += 1',
+     '        else:\n            unresolved += 1\n            conn.execute("DELETE FROM relations WHERE rel_id = ?", (row["rel_id"],))',
+     "unresolvable legacy edges are silently DELETED instead of retained — data loss dressed up "
+     "as a clean migration",
+     ["test_an_ambiguous_legacy_edge_is_retained_but_attached_to_nobody"]),
 ]
 
 
