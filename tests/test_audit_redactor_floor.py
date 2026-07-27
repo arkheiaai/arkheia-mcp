@@ -40,6 +40,7 @@ import ast
 import asyncio
 import base64
 import json
+import os
 import quopri
 import random
 import re
@@ -701,6 +702,220 @@ def test_split_secret_head_is_redacted_known_partial(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Memory store (sqlite) — the real write path for mcp_server.tools.memory
+#
+# This closes the UNREDACTED_GAP named below in DISK_SINKS: memory_store /
+# memory_relate persisted caller-supplied text to sqlite with NO scrub at all
+# — a second, unguarded disk sink alongside the audit log. Same discipline as
+# the JSONL tests above: drive the REAL production functions
+# (`store_entity` / `store_relation`), never call `redact()` directly, then
+# read the sqlite file's raw bytes back off disk — the same view a `grep
+# memory.db` would get. Every forbidden value is a literal this file
+# constructed and therefore knows exactly, never a span derived after the
+# fact from the record (a derived span can be wrong while the secret sits on
+# disk in full).
+# ---------------------------------------------------------------------------
+
+MEMORY_SENTINEL = "arkheia-memory-floor-positive-control"
+
+# Named, not derived: these are the EXACT bytes planted below, and the exact
+# bytes asserted absent from the sqlite file afterwards.
+_MEM_ANTHROPIC_KEY = "sk-ant-api03-" + _rnd(40, seed=501)
+_MEM_DSN_PASSWORD = "Qx7z" + _rnd(24, seed=502)
+_MEM_DSN = f"postgresql://svc_intouch:{_MEM_DSN_PASSWORD}@db.internal.arkheia.ai:5432/appdb"
+_MEM_RAW_SECRET_FOR_ENCODING = "sk-ant-api03-" + _rnd(40, seed=503)
+_MEM_B64_ENCODED = base64.b64encode(_MEM_RAW_SECRET_FOR_ENCODING.encode()).decode()
+_MEM_RELATION_SECRET = "ghp_" + _rnd(36, seed=504)
+
+
+def _drive_memory_write_path(tmp_path: Path, call) -> bytes:
+    """
+    Point MEMORY_DB_PATH at a scratch file, invoke `call` — a zero-arg callable
+    returning the coroutine of a REAL `mcp_server.tools.memory` function — and
+    return the RAW BYTES of the sqlite file it produced.
+
+    `mcp_server.tools.memory` reads `MEMORY_DB_PATH` from the environment at
+    CALL time (`_db_path()` inside `_get_conn()`), not at import time, so the
+    env var is set immediately before the call and restored immediately after
+    — this test must not leak its scratch path into any other test.
+
+    The import is local: this keeps the module out of the floor tier's
+    collection-time surface, matching the pattern used for `AuditWriter` above
+    (imported at module scope only because it is the file's sole subject).
+    """
+    db_path = tmp_path / "memory.db"
+    old = os.environ.get("MEMORY_DB_PATH")
+    os.environ["MEMORY_DB_PATH"] = str(db_path)
+    try:
+        asyncio.run(call())
+    finally:
+        if old is None:
+            os.environ.pop("MEMORY_DB_PATH", None)
+        else:
+            os.environ["MEMORY_DB_PATH"] = old
+
+    assert db_path.exists(), (
+        f"POSITIVE CONTROL FAILED: the production memory write path produced no "
+        f"file at {db_path}. Every 'secret absent' assertion below would pass "
+        f"vacuously."
+    )
+    return db_path.read_bytes()
+
+
+def test_memory_store_does_not_persist_secrets_unredacted(tmp_path):
+    """
+    `memory_store` (mcp_server.tools.memory.store_entity) is the sink named
+    UNREDACTED_GAP in DISK_SINKS below. Plant realistic secret material in the
+    observation text a caller would actually paste — a bare API key, a DSN
+    with an inline password, and an encoded variant of a key — and require
+    NONE of it to survive on disk once the fix lands.
+    """
+    from mcp_server.tools import memory as mem
+
+    observations = [
+        f"{MEMORY_SENTINEL} -- postmortem notes",
+        f"rotate this immediately: {_MEM_ANTHROPIC_KEY}",
+        f"prod DSN, do not share: {_MEM_DSN}",
+        f"config backup (base64): {_MEM_B64_ENCODED}",
+    ]
+    content = _drive_memory_write_path(
+        tmp_path,
+        lambda: mem.store_entity("IncidentReport-501", "incident", observations),
+    )
+
+    # --- POSITIVE CONTROLS: the record really landed, in full ---
+    assert MEMORY_SENTINEL.encode() in content, (
+        "POSITIVE CONTROL FAILED: sentinel text is not in the sqlite file — the "
+        "record was not written, so every 'secret absent' assertion below would "
+        "pass vacuously."
+    )
+    assert b"IncidentReport-501" in content, (
+        "POSITIVE CONTROL FAILED: the (non-secret) entity name did not reach "
+        "disk — this is not the real write path."
+    )
+    assert REDACTION_MARKER.encode() in content, (
+        "POSITIVE CONTROL FAILED: no redaction marker anywhere in the sqlite "
+        "file — the redactor did not run on the memory write path at all."
+    )
+
+    # --- THE ACTUAL CHECK: named forbidden bytes, never derived ---
+    assert _MEM_ANTHROPIC_KEY.encode() not in content, (
+        "an Anthropic API key reached the memory sqlite file unredacted. "
+        "Value deliberately not printed."
+    )
+    assert _MEM_B64_ENCODED.encode() not in content, (
+        "a base64-encoded secret reached the memory sqlite file unredacted. "
+        "Value deliberately not printed."
+    )
+    assert _MEM_RAW_SECRET_FOR_ENCODING.encode() not in content, (
+        "the DECODED form of the base64-encoded secret is present verbatim in "
+        "the memory sqlite file. Value deliberately not printed."
+    )
+    # DSN password, checked HALF BY HALF: a partial (prefix-only or
+    # suffix-only) redaction must not read as a pass.
+    half = len(_MEM_DSN_PASSWORD) // 2
+    first_half, second_half = _MEM_DSN_PASSWORD[:half], _MEM_DSN_PASSWORD[half:]
+    assert first_half.encode() not in content, (
+        "the FIRST half of a DSN inline password reached the memory sqlite "
+        "file unredacted. Value deliberately not printed."
+    )
+    assert second_half.encode() not in content, (
+        "the SECOND half of a DSN inline password reached the memory sqlite "
+        "file unredacted. Value deliberately not printed."
+    )
+    assert _MEM_DSN_PASSWORD.encode() not in content, (
+        "a DSN inline password reached the memory sqlite file unredacted. "
+        "Value deliberately not printed."
+    )
+
+
+def test_memory_relate_does_not_persist_secrets_unredacted(tmp_path):
+    """
+    The sibling write path: `memory_relate` (store_relation) inserts
+    from_entity / relation_type / to_entity directly, with the same
+    `sqlite3.connect()` sink as store_entity. A secret placed in ANY of the
+    three fields must not survive on disk.
+    """
+    from mcp_server.tools import memory as mem
+
+    content = _drive_memory_write_path(
+        tmp_path,
+        lambda: mem.store_relation(
+            from_entity=f"{MEMORY_SENTINEL} -- service-A",
+            relation_type="uses_credential",
+            to_entity=_MEM_RELATION_SECRET,
+        ),
+    )
+
+    assert MEMORY_SENTINEL.encode() in content, (
+        "POSITIVE CONTROL FAILED: sentinel text is not in the sqlite file — the "
+        "record was not written, so 'secret absent' would pass vacuously."
+    )
+    assert b"uses_credential" in content, (
+        "POSITIVE CONTROL FAILED: the (non-secret) relation_type did not reach "
+        "disk — this is not the real write path."
+    )
+    assert REDACTION_MARKER.encode() in content, (
+        "POSITIVE CONTROL FAILED: no redaction marker anywhere in the sqlite "
+        "file — the redactor did not run on the memory_relate write path at all."
+    )
+    assert _MEM_RELATION_SECRET.encode() not in content, (
+        "a GitHub-shaped token placed in `to_entity` reached the memory sqlite "
+        "file unredacted. Value deliberately not printed."
+    )
+
+
+def test_memory_store_functions_call_redact_before_insert():
+    """
+    Ordering invariant, same shape as `test_writer_loop_redacts_before_it_writes`
+    below: `redact()` must precede the first `conn.execute()` inside both
+    `store_entity` and `store_relation`. Correct-but-late redaction writes the
+    secret and scrubs a copy nobody reads.
+    """
+    src = (ROOT / "mcp_server/tools/memory.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+
+    for fn_name in ("store_entity", "store_relation"):
+        fn = next(
+            (n for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and n.name == fn_name),
+            None,
+        )
+        assert fn is not None, (
+            f"mcp_server.tools.memory.{fn_name} not found — the memory write "
+            f"path was renamed or removed and this invariant no longer "
+            f"observes its subject."
+        )
+
+        redact_lines, execute_lines = [], []
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name == "redact":
+                redact_lines.append(node.lineno)
+            elif name == "execute":
+                execute_lines.append(node.lineno)
+
+        assert redact_lines, (
+            f"mcp_server.tools.memory.{fn_name} contains NO call to redact() — "
+            f"the memory write path no longer scrubs secrets before writing to "
+            f"disk."
+        )
+        assert execute_lines, (
+            f"no conn.execute() call found in {fn_name} — this invariant lost "
+            f"its subject and would pass vacuously."
+        )
+        assert min(redact_lines) < min(execute_lines), (
+            f"{fn_name}: redact() at line {min(redact_lines)} does not precede "
+            f"the first conn.execute() at line {min(execute_lines)}: a value "
+            f"can be written to sqlite before it is scrubbed."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Structural invariants — is the redactor on EVERY path that writes to disk?
 #
 # A redactor that is correct but not universally applied is the "wired but
@@ -751,16 +966,21 @@ DISK_SINKS: dict[str, tuple[str, str]] = {
         "deliberate profile-decryption-key cache; holding the key IS the purpose",
     ),
     "mcp_server/tools/memory.py:_get_conn": (
-        "UNREDACTED_GAP",
-        "memory_store persists caller-supplied observation text to sqlite with NO scrub — "
-        "the redactor is not applied on this disk path at all",
+        "REDACTED",
+        "store_entity/store_relation pass every caller-supplied field (entity "
+        "name/type, observation content, relation endpoints/type) through the "
+        "shared redact() before the INSERT that follows; pinned by "
+        "test_memory_store_does_not_persist_secrets_unredacted, "
+        "test_memory_relate_does_not_persist_secrets_unredacted and "
+        "test_memory_store_functions_call_redact_before_insert",
     ),
 }
 
 # The ratchet bound on UNREDACTED_GAP. Reduce it when a gap is closed; it must
-# never rise. Named units, not an aggregate: the one current gap is
-# mcp_server/tools/memory.py:_get_conn.
-MAX_UNREDACTED_GAPS = 1
+# never rise. Zero named units: the one former gap,
+# mcp_server/tools/memory.py:_get_conn, is now REDACTED (see DISK_SINKS
+# above) and no other production disk sink is classified UNREDACTED_GAP.
+MAX_UNREDACTED_GAPS = 0
 
 _WRITE_MODES = ("w", "a", "x", "+")
 
