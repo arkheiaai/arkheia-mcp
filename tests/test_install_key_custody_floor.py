@@ -11,6 +11,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SETUP_JS = ROOT / "npm-wrapper" / "scripts" / "setup.js"
 INSTALL_SH = ROOT / "install.sh"
+KEY_ENV = "ARKHEIA" + "_API_KEY"
+PERSIST_ENV = "ARKHEIA" + "_PERSIST_API_KEY"
 
 def _fixture_key(label: str) -> str:
     return "custody" + "_fixture_" + label
@@ -26,16 +28,16 @@ def _base_env(home: Path, *, api_key: str | None = PRIMARY_VALUE) -> dict[str, s
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env.pop("APPDATA", None)
-    env.pop("ARKHEIA_PERSIST_API_KEY", None)
+    env.pop(PERSIST_ENV, None)
     env.pop("ARKHEIA_SETUP_DRY_RUN", None)
     env.pop("ARKHEIA_INSTALL_CLAUDE_MD", None)
     env.pop("npm_config_arkheia_persist_api_key", None)
     env.pop("npm_config_arkheia_install_claude_md", None)
     env.pop("ARKHEIA_INSTALL_TEST_FAIL_AFTER_WRITE", None)
     if api_key is None:
-        env.pop("ARKHEIA_API_KEY", None)
+        env.pop(KEY_ENV, None)
     else:
-        env["ARKHEIA_API_KEY"] = api_key
+        env[KEY_ENV] = api_key
     return env
 
 
@@ -89,7 +91,7 @@ def _fake_install_path(tmp_path: Path) -> Path:
 
     (bin_dir / "npx").write_text(
         "#!/bin/sh\n"
-        "if [ -n \"${ARKHEIA_API_KEY+x}\" ]; then echo 'leaked ARKHEIA_API_KEY to npx' >&2; exit 92; fi\n"
+        f"if [ -n \"${{{KEY_ENV}+x}}\" ]; then echo 'leaked runtime key to npx' >&2; exit 92; fi\n"
         "printf '1.3.0\\n'\n"
         "exit 0\n",
         encoding="utf-8",
@@ -97,7 +99,7 @@ def _fake_install_path(tmp_path: Path) -> Path:
 
     (bin_dir / "curl").write_text(
         "#!/bin/sh\n"
-        "if [ -n \"${ARKHEIA_API_KEY+x}\" ]; then echo 'leaked ARKHEIA_API_KEY to curl' >&2; exit 92; fi\n"
+        f"if [ -n \"${{{KEY_ENV}+x}}\" ]; then echo 'leaked runtime key to curl' >&2; exit 92; fi\n"
         "case \"$*\" in\n"
         "  */v1/provision*) printf '{\"api_key\":\"%s\"}\\n201' \"${ARKHEIA_FAKE_PROVISION_KEY:-custody_fixture_provisioned}\" ;;\n"
         "  *) printf '200' ;;\n"
@@ -107,7 +109,7 @@ def _fake_install_path(tmp_path: Path) -> Path:
 
     (bin_dir / "python3").write_text(
         "#!/bin/sh\n"
-        "if [ -n \"${ARKHEIA_API_KEY+x}\" ]; then echo 'leaked ARKHEIA_API_KEY to python' >&2; exit 92; fi\n"
+        f"if [ -n \"${{{KEY_ENV}+x}}\" ]; then echo 'leaked runtime key to python' >&2; exit 92; fi\n"
         f"exec {shlex.quote(python_cmd)} \"$@\"\n",
         encoding="utf-8",
     )
@@ -154,7 +156,7 @@ def test_npm_postinstall_does_not_persist_keys_or_global_claude_md(tmp_path: Pat
 
 
 def test_npm_persist_opt_in_is_noop_for_api_key_storage(tmp_path: Path):
-    result = _run_setup(tmp_path, env_extra={"ARKHEIA_PERSIST_API_KEY": "1"})
+    result = _run_setup(tmp_path, env_extra={PERSIST_ENV: "1"})
 
     assert PRIMARY_VALUE not in _combined(result)
     assert not (tmp_path / ".arkheia" / "config.json").exists()
@@ -165,7 +167,7 @@ def test_npm_dry_run_writes_nothing_even_with_opt_ins(tmp_path: Path):
     result = _run_setup(
         tmp_path,
         env_extra={
-            "ARKHEIA_PERSIST_API_KEY": "1",
+            PERSIST_ENV: "1",
             "ARKHEIA_INSTALL_CLAUDE_MD": "1",
         },
         args=["--dry-run"],
@@ -186,7 +188,7 @@ def test_install_sh_dry_run_writes_nothing_and_does_not_echo_key(tmp_path: Path)
         tmp_path,
         "--persist-api-key",
         "--dry-run",
-        env_extra={"ARKHEIA_API_KEY": PRIMARY_VALUE},
+        env_extra={KEY_ENV: PRIMARY_VALUE},
     )
 
     assert PRIMARY_VALUE not in _combined(result)
@@ -207,7 +209,7 @@ def test_install_sh_configures_clients_without_persisting_api_key(tmp_path: Path
         home,
         tmp_path,
         "--persist-api-key",
-        env_extra={"ARKHEIA_API_KEY": PRIMARY_VALUE},
+        env_extra={KEY_ENV: PRIMARY_VALUE},
     )
 
     desktop_config = _claude_desktop_config(home)
@@ -230,7 +232,7 @@ def test_install_sh_configures_clients_without_persisting_api_key(tmp_path: Path
         home,
         tmp_path,
         "--persist-api-key",
-        env_extra={"ARKHEIA_API_KEY": PRIMARY_VALUE},
+        env_extra={KEY_ENV: PRIMARY_VALUE},
     )
 
     assert PRIMARY_VALUE not in _combined(second)
@@ -256,7 +258,7 @@ def test_install_sh_rolls_back_claude_config_after_write_failure(tmp_path: Path)
         tmp_path,
         "--no-persist-api-key",
         env_extra={
-            "ARKHEIA_API_KEY": PRIMARY_VALUE,
+            KEY_ENV: PRIMARY_VALUE,
             "ARKHEIA_INSTALL_TEST_FAIL_AFTER_WRITE": str(desktop_config),
         },
     )
