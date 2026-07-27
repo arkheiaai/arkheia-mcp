@@ -30,13 +30,31 @@ cannot be handed to the rail at the instant it is taken. It is journalled here �
 stamped with ``decided_at`` at the true moment of decision — and flushed as soon
 as the caller is back in async context. Every record therefore carries:
 
+    decision_id           which decision this row describes
     decided_at            when the decision was actually taken
+    decided_at_source     whether that timestamp is the decision or the write
     receipt_enqueued_at   when it was handed to the rail
     receipt_deferred_ms   the gap, in milliseconds, as a number
 
 so a reader can see the deferral rather than being told it did not happen. A
 record written late and *labelled* late is honest; a record written late and
 presented as timely is the thing this codebase exists to refuse.
+
+IDENTITY IS STAMPED ON THE PATH, NOT BY THE CALLER
+--------------------------------------------------
+The first version of this module stamped ``decision_id``/``decided_at`` only in
+``DecisionJournal.record``. ``proxy/main.py`` has four posture branches that
+emit **directly** — they never touch a journal — so in production every one of
+them wrote a hash-chained row with no decision identity and
+``receipt_deferred_ms: null``: the deferral mechanism existed and the production
+path never reached it. Codex reproduced this on PR #34, inside the branch built
+to fix it, and the covering test could not see it because it asserted row
+existence, outcome and count.
+
+``stamp_decision`` now runs inside ``emit`` — the single door to the rail — so a
+fifth branch cannot get it wrong whether it journals, emits directly, uses a
+builder or hands over an inline dict. ``tests/test_f20_profile_key_floor.py``
+INV-9/INV-10 fail the build if a record reaches a writer by any other route.
 
 ``receipt_status`` is ``"enqueued"``, never ``"recorded"``
 ---------------------------------------------------------
@@ -154,6 +172,20 @@ RISK_LEVEL = "GOVERNANCE"
 RECEIPT_ENQUEUED = "enqueued"
 RECEIPT_UNAVAILABLE = "unavailable"
 
+#: Where a record's ``decided_at`` came from. A timestamp with no provenance
+#: claims to be the moment of decision while possibly being the moment of
+#: writing, and those are different facts.
+DECIDED_AT_JOURNALLED = "journalled_at_decision"
+DECIDED_AT_AT_EMIT = "stamped_at_emit"
+#: The record arrived already carrying a ``decided_at`` that nobody labelled.
+#: Its own bucket, never folded into either of the two above (DONE.md v1.19
+#: clause (d): an outcome that observed nothing is not a success).
+DECIDED_AT_UNLABELLED = "decided_at_unlabelled"
+
+DECIDED_AT_SOURCES = frozenset({
+    DECIDED_AT_JOURNALLED, DECIDED_AT_AT_EMIT, DECIDED_AT_UNLABELLED,
+})
+
 
 # ---------------------------------------------------------------------------
 # Non-reversible identifiers
@@ -262,6 +294,51 @@ def _uuid_label(value: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Decision identity — minted in ONE place, on the ONE path to the rail
+# ---------------------------------------------------------------------------
+
+def stamp_decision(record: dict, *, source: str) -> dict:
+    """
+    Give a record the identity of the decision it describes: ``decision_id``,
+    ``decided_at``, and the provenance of that timestamp. Returns a new dict and
+    never mutates the caller's.
+
+    WHY THIS IS A FUNCTION AND NOT FOUR CALL SITES
+    ----------------------------------------------
+    ``DecisionJournal.record`` used to be the only code that stamped a record, so
+    every branch that emitted **directly** — and ``proxy/main.py`` has four —
+    wrote a hash-chained row with no ``decision_id``, no ``decided_at`` and
+    ``receipt_deferred_ms: null``. That is worse than no row: it looks like
+    evidence, it counts, and it cannot be tied to the decision it describes.
+    (Reproduced by Codex on PR #34, inside the very branch built to fix it.)
+
+    Adding a fifth call site would have fixed the four branches that exist and
+    nothing about the fifth. So the guarantee is placed on the **chokepoint**:
+    ``emit()`` is the only door to the rail (``tests/test_f20_profile_key_floor.py``
+    INV-9/INV-10 fail the build if a record reaches a writer any other way), and
+    ``emit()`` stamps. A future branch may journal or emit directly, may build its
+    record with a builder or as an inline dict — the row lands stamped either way,
+    because the stamping is on the path rather than in the caller.
+
+    ``source`` says which. A record stamped by the journal carries the true moment
+    of decision; one stamped at emit was decided and handed over in the same
+    breath. A record that arrives with a ``decided_at`` nobody labelled is marked
+    unlabelled rather than being assigned either claim.
+    """
+    if source not in DECIDED_AT_SOURCES:
+        raise ValueError(f"decided_at source {source!r} is outside the closed taxonomy")
+    out = dict(record)
+    if not out.get("decision_id"):
+        out["decision_id"] = str(uuid.uuid4())
+    if not out.get("decided_at"):
+        out["decided_at"] = _now().isoformat()
+        out["decided_at_source"] = source
+    elif not out.get("decided_at_source"):
+        out["decided_at_source"] = DECIDED_AT_UNLABELLED
+    return out
+
+
+# ---------------------------------------------------------------------------
 # The journal
 # ---------------------------------------------------------------------------
 
@@ -302,9 +379,7 @@ class DecisionJournal:
         Journal a decision, stamping ``decided_at`` at the true moment it was
         taken. Returns the ``decision_id`` the caller can quote.
         """
-        entry = dict(record)
-        entry.setdefault("decision_id", str(uuid.uuid4()))
-        entry["decided_at"] = _now().isoformat()
+        entry = stamp_decision(record, source=DECIDED_AT_JOURNALLED)
         if len(self._entries) == self._entries.maxlen:
             # deque silently evicts the oldest; count it rather than lose it.
             self._dropped += 1
@@ -333,7 +408,10 @@ async def emit(writer: Any, record: dict) -> str:
     tamper into an exception that hides it. It is never silent either — an
     unavailable rail is logged at ERROR naming the decision that went unrecorded.
     """
-    out = dict(record)
+    # The chokepoint. A record that never passed through a journal is stamped
+    # HERE, so no path to the rail — present or future — can write a row without
+    # the identity of the decision it describes.
+    out = stamp_decision(record, source=DECIDED_AT_AT_EMIT)
     enqueued_at = _now()
     out["receipt_enqueued_at"] = enqueued_at.isoformat()
     out["receipt_deferred_ms"] = _deferral_ms(out.get("decided_at"), enqueued_at)
@@ -468,15 +546,15 @@ async def flush_journal(journal: DecisionJournal, writer: Any) -> list[tuple[str
         results.append((entry["decision_id"], await emit(writer, entry)))
 
     if dropped:
-        overflow = {
-            "decision_id": str(uuid.uuid4()),
-            "decided_at": _now().isoformat(),
+        # Stamped through the same one function as every other record — an
+        # inline dict is exactly the shape that used to escape identity.
+        overflow = stamp_decision({
             "event_type": EVENT_JOURNAL_OVERFLOW,
             "risk_level": RISK_LEVEL,
             "source": "profile_decision_journal",
             "dropped_decisions": dropped,
             "journal_capacity": journal.capacity,
-        }
+        }, source=DECIDED_AT_JOURNALLED)
         logger.error(
             "F20 decision journal overflowed: %d decision(s) were taken and are "
             "described by no audit row (capacity=%d)", dropped, journal.capacity,

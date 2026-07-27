@@ -924,6 +924,238 @@ def test_inv8_negative_self_test_detects_a_raw_field_in_a_log_call():
 
 
 # ---------------------------------------------------------------------------
+# INV-9 / INV-10 — the rail has exactly ONE door, and that door stamps
+# ---------------------------------------------------------------------------
+#
+# Earned by Codex on PR #34, in this branch, against the fix itself: ``proxy/
+# main.py`` has four posture branches that call ``emit(build_key_load_record(...))``
+# **directly**, and ``DecisionJournal.record`` was the only code that stamped
+# ``decision_id`` / ``decided_at``. So the branch that actually fires in
+# production wrote a hash-chained row with no decision identity and
+# ``receipt_deferred_ms: null`` — a record that looks like evidence and is not
+# one. The deferral mechanism was real and the production path never reached it.
+#
+# The fix is structural: ``stamp_decision`` runs inside ``emit``, and ``emit`` is
+# the only route to a writer. These two invariants are what keep that true for a
+# FIFTH branch nobody has written yet:
+#
+#   INV-9   every receipt a production module builds is consumed by ``emit(...)``
+#           or ``<journal>.record(...)`` — it cannot be handed anywhere else;
+#   INV-10  on the governance path, the only ``.write(...)`` call is the one
+#           inside ``emit`` — so nothing can go round the stamping.
+#
+# The governance path is DISCOVERED (modules that import the decision taxonomy),
+# never enumerated, so a new module joins the invariant the day it imports.
+
+#: Calls that legitimately consume a freshly built receipt.
+RECEIPT_CONSUMERS = frozenset({"emit", "record"})
+
+
+def _governance_path_files() -> list[Path]:
+    """Production modules that import ``proxy.audit.decision_journal``, plus the
+    module itself. Discovered from the import graph, not a hand-kept list."""
+    out: list[Path] = [JOURNAL]
+    for path in _prod_python_files():
+        if path == JOURNAL:
+            continue
+        tree = _parse(path)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module \
+                    and node.module.endswith("audit.decision_journal"):
+                out.append(path)
+                break
+    return out
+
+
+def _unconsumed_receipts(tree: ast.Module) -> tuple[list[str], int]:
+    """
+    ``(violations, builder call sites examined)``.
+
+    A builder call is consumed when it is a direct argument of a consumer, or
+    when its result is bound to a name that a consumer is passed in the same
+    function. Anything else — logged, returned bare, stored on an attribute,
+    handed to a writer — is a receipt that can reach disk without being stamped.
+    """
+    violations: list[str] = []
+    examined = 0
+
+    for fn in [n for n in ast.walk(tree)
+               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+        # Names a consumer is handed anywhere in this function.
+        consumed_names: set[str] = set()
+        # Builder calls passed straight into a consumer.
+        consumed_calls: set[int] = set()
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Call):
+                continue
+            fname = node.func.id if isinstance(node.func, ast.Name) else (
+                node.func.attr if isinstance(node.func, ast.Attribute) else None
+            )
+            if fname not in RECEIPT_CONSUMERS:
+                continue
+            for arg in list(node.args) + [kw.value for kw in node.keywords]:
+                if isinstance(arg, ast.Name):
+                    consumed_names.add(arg.id)
+                elif isinstance(arg, ast.Call):
+                    consumed_calls.add(id(arg))
+
+        # Names bound from a builder call.
+        bound: dict[int, str] = {}
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) \
+                    and isinstance(node.value.func, ast.Name) \
+                    and node.value.func.id in BUILDERS:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        bound[id(node.value)] = target.id
+
+        for node in ast.walk(fn):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id in BUILDERS):
+                continue
+            examined += 1
+            if id(node) in consumed_calls:
+                continue
+            name = bound.get(id(node))
+            if name is not None and name in consumed_names:
+                continue
+            violations.append(
+                f"line {node.lineno}: {node.func.id}(...) inside {fn.name}() is not "
+                f"consumed by {sorted(RECEIPT_CONSUMERS)}. A receipt that reaches "
+                f"the rail by another route is not stamped with its decision "
+                f"identity — the exact defect Codex reproduced on PR #34"
+            )
+    return violations, examined
+
+
+def test_inv9_every_built_receipt_is_consumed_by_the_stamping_path():
+    files = _governance_path_files()
+    assert len(files) >= 3, (
+        f"only {len(files)} module(s) discovered on the governance path; the "
+        f"import walk is wrong, and a wrong walk reads exactly like a clean estate"
+    )
+
+    violations: list[str] = []
+    examined = 0
+    for path in files:
+        found, count = _unconsumed_receipts(_parse(path))
+        examined += count
+        violations += [f"{path.relative_to(ROOT)}:{v}" for v in found]
+
+    assert examined >= 6, (
+        f"only {examined} receipt-builder call sites examined across the "
+        f"governance path — this check passes by finding nothing, so its "
+        f"population is pinned"
+    )
+    assert not violations, "unconsumed receipts:\n  " + "\n  ".join(violations)
+
+
+def test_inv9_negative_self_test_detects_a_receipt_that_goes_round_the_door():
+    broken = ast.parse(
+        "async def fifth_branch(writer):\n"
+        "    record = build_key_load_record(outcome=KEY_LOAD_UNAVAILABLE)\n"
+        "    await writer.write(record)\n"
+    )
+    violations, examined = _unconsumed_receipts(broken)
+    assert examined == 1 and len(violations) == 1
+    assert "not consumed" in violations[0]
+
+
+def test_inv9_negative_self_test_has_passing_control_rows():
+    """
+    DONE.md v1.15 clause 5. Both legitimate shapes must come back clean, or the
+    check merely forbids rather than discriminates.
+    """
+    direct = ast.parse(
+        "async def branch(writer):\n"
+        "    return await emit(writer, build_key_load_record(outcome=X))\n"
+    )
+    bound = ast.parse(
+        "async def branch(self):\n"
+        "    record = build_profile_auth_record(outcome=X)\n"
+        "    return self.decision_journal.record(record)\n"
+    )
+    for tree in (direct, bound):
+        violations, examined = _unconsumed_receipts(tree)
+        assert examined == 1 and violations == []
+
+
+def _writes_outside_emit(path: Path) -> tuple[list[str], int]:
+    """
+    ``(violations, awaited .write() call sites examined)`` for one module.
+
+    Only **awaited** ``.write(...)`` counts. ``AuditWriter.write`` is a coroutine,
+    so that is exactly the shape of a rail write; a synchronous ``f.write(...)``
+    to a file is a different act and flagging it would make this floor cry wolf,
+    which is how a floor gets switched off.
+    """
+    tree = _parse(path)
+    inside_emit: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                and node.name == "emit":
+            for child in ast.walk(node):
+                inside_emit.add(id(child))
+
+    awaited: set[int] = {
+        id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Await)
+    }
+
+    violations: list[str] = []
+    examined = 0
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "write" and id(node) in awaited):
+            continue
+        examined += 1
+        if id(node) in inside_emit:
+            continue
+        violations.append(
+            f"line {node.lineno}: {ast.unparse(node.func)}(...) writes to a rail "
+            f"outside emit(). emit() is where a record is stamped with its "
+            f"decision identity; a write that goes round it lands unstamped"
+        )
+    return violations, examined
+
+
+def test_inv10_the_governance_path_writes_to_the_rail_only_through_emit():
+    violations: list[str] = []
+    examined = 0
+    for path in _governance_path_files():
+        found, count = _writes_outside_emit(path)
+        examined += count
+        violations += [f"{path.relative_to(ROOT)}:{v}" for v in found]
+
+    assert examined >= 1, (
+        "no .write(...) call found anywhere on the governance path. The one "
+        "inside emit() must exist, so finding none means this check is blind"
+    )
+    assert not violations, "writes that bypass the stamping door:\n  " + "\n  ".join(violations)
+
+
+def test_inv10_negative_self_test_detects_a_write_that_bypasses_emit(tmp_path):
+    module = tmp_path / "m.py"
+    module.write_text(
+        "async def emit(writer, record):\n"
+        "    await writer.write(record)\n"
+        "\n"
+        "async def fifth_branch(writer, record):\n"
+        "    await writer.write(record)\n"
+        "\n"
+        "def save(path, blob):\n"
+        "    with open(path, 'w') as f:\n"
+        "        f.write(blob)\n",
+        encoding="utf-8",
+    )
+    violations, examined = _writes_outside_emit(module)
+    # Two control rows, so the check discriminates rather than banning the word
+    # "write": the awaited write INSIDE emit is clean, and a synchronous file
+    # write is not this invariant's subject at all.
+    assert examined == 2 and len(violations) == 1
+    assert "line 5" in violations[0]
+
+
+# ---------------------------------------------------------------------------
 # INV-5 — this file's own subject matter still exists
 # ---------------------------------------------------------------------------
 
