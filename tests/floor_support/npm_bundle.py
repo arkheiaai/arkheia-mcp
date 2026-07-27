@@ -214,7 +214,10 @@ def require_node() -> str:
 
 def hand_maintained(root: Path = REPO_ROOT) -> set[str]:
     """
-    Bundle-relative paths the build declares it does NOT generate.
+    Bundle-relative non-import paths the build declares are allowed to ship.
+
+    The function name is kept for compatibility with the existing floor, but the
+    list now includes generated runtime metadata as well as hand-maintained files.
 
     ASKED OF THE BUILD, not restated here. The build both cleans by this list and
     prints it, so the exception list has one source of truth; a floor that kept its

@@ -69,10 +69,14 @@
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const { execFileSync } = require("child_process");
 
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
+const PACKAGE_ROOT = path.resolve(__dirname, "..");
 const BUNDLE_ROOT = path.resolve(__dirname, "..", "python");
+const PROVENANCE_FILE = ".arkheia-bundle-provenance.json";
+const PROVENANCE_SCHEMA = "arkheia.npm.bundle-provenance.v1";
 
 /**
  * The module `bin/arkheia-mcp.js` spawns as `python -m <ENTRY_MODULE>`. It is
@@ -107,10 +111,13 @@ const CLOSURE_TOOL = path.join(
 const SKIP_NAMES = new Set(["__pycache__", "tests"]);
 
 /**
- * The ONLY paths under the bundle root this build does not generate.
+ * The ONLY non-import files allowed under the bundle root.
  *
- * Bundle-relative POSIX paths. Everything else under `npm-wrapper/python` is build
- * output and is deleted before each copy, so the tree cannot accumulate.
+ * Bundle-relative POSIX paths. Python source is derived from the import graph;
+ * `requirements.txt` is hand-maintained runtime input; and
+ * `.arkheia-bundle-provenance.json` is generated metadata that pins the bytes the
+ * launcher will trust. Everything else under `npm-wrapper/python` is deleted
+ * before each copy, so the tree cannot accumulate.
  *
  * HOW GENERATED WAS TOLD APART FROM HAND-MAINTAINED — two independent signals had
  * to agree, because either one alone gets it wrong:
@@ -133,11 +140,15 @@ const SKIP_NAMES = new Set(["__pycache__", "tests"]);
  * have preserved a generated file forever. Classifying by "what can this script
  * write" is a property of the code, and is what the floor re-derives.
  *
- * Adding an entry here is adding a hole to the shipped ⊆ required assertion, so the
- * floor requires every entry to be real: it must actually ship, and it may not name
- * a path the import closure requires (an exception may not shadow a derivation).
+ * Adding an entry here is adding a hole to the shipped ⊆ required assertion, so
+ * the floor requires every entry to be real: it must actually ship, and it may not
+ * name a path the import closure requires (an exception may not shadow a
+ * derivation). `HAND_MAINTAINED` is the clean keep-list; generated metadata is
+ * removed during the clean and rewritten after the copy.
  */
 const HAND_MAINTAINED = ["requirements.txt"];
+const GENERATED_BUNDLE_METADATA = [PROVENANCE_FILE];
+const NON_IMPORT_BUNDLE_FILES = [...HAND_MAINTAINED, ...GENERATED_BUNDLE_METADATA];
 
 function fail(message) {
   process.stderr.write(`[build] ${message}\n`);
@@ -408,6 +419,80 @@ function cleanBundle() {
   return removed;
 }
 
+function toPosix(relativePath) {
+  return relativePath.split(path.sep).join("/");
+}
+
+function sha256File(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function collectBundleFiles(dir, relative = "") {
+  const files = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const rel = relative ? path.join(relative, entry.name) : entry.name;
+    const relPosix = toPosix(rel);
+    if (relPosix === PROVENANCE_FILE) continue;
+    if (rel.split(path.sep).includes("__pycache__") || relPosix.endsWith(".pyc")) {
+      continue;
+    }
+
+    const absolute = path.resolve(dir, entry.name);
+    if (!inside(absolute, BUNDLE_ROOT)) {
+      fail(`refusing to hash ${absolute}, which is outside ${BUNDLE_ROOT}`);
+    }
+    if (entry.isDirectory()) {
+      files.push(...collectBundleFiles(absolute, rel));
+    } else if (entry.isFile()) {
+      files.push(relPosix);
+    }
+  }
+  return files.sort();
+}
+
+function packageManifest() {
+  const manifestPath = path.join(PACKAGE_ROOT, "package.json");
+  try {
+    return JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+  } catch (err) {
+    fail(`could not read package manifest at ${manifestPath}: ${err.message}`);
+  }
+}
+
+function writeProvenanceManifest() {
+  const files = collectBundleFiles(BUNDLE_ROOT);
+  for (const required of ["requirements.txt", "mcp_server/server.py"]) {
+    if (!files.includes(required)) {
+      fail(
+        `cannot write bundle provenance: ${required} is absent from ` +
+          `${BUNDLE_ROOT}. The npm package would not start from its own bytes.`
+      );
+    }
+  }
+
+  const pkg = packageManifest();
+  const manifest = {
+    schema: PROVENANCE_SCHEMA,
+    package: {
+      name: pkg.name,
+      version: pkg.version,
+    },
+    entry_module: ENTRY_MODULE,
+    bundle_root: toPosix(path.relative(PACKAGE_ROOT, BUNDLE_ROOT)),
+    files: files.map((rel) => ({
+      path: rel,
+      sha256: sha256File(path.join(BUNDLE_ROOT, rel)),
+    })),
+  };
+
+  fs.writeFileSync(
+    path.join(BUNDLE_ROOT, PROVENANCE_FILE),
+    JSON.stringify(manifest, null, 2) + "\n",
+    "utf-8"
+  );
+  console.log(`Wrote bundle provenance for ${files.length} file(s).`);
+}
+
 /**
  * `HAND_MAINTAINED` may not shadow the derivation.
  *
@@ -417,16 +502,16 @@ function cleanBundle() {
  */
 function assertExceptionsDoNotShadow(required) {
   const derived = new Set(required.map((s) => path.normalize(s)));
-  const shadowing = HAND_MAINTAINED.filter((p) => derived.has(path.normalize(p)));
+  const shadowing = NON_IMPORT_BUNDLE_FILES.filter((p) => derived.has(path.normalize(p)));
   if (shadowing.length) {
     fail(
-      `HAND_MAINTAINED names ${JSON.stringify(shadowing)}, which the import ` +
+      `NON_IMPORT_BUNDLE_FILES names ${JSON.stringify(shadowing)}, which the import ` +
         "closure already requires. An exception may not shadow a derived source: " +
-        "remove it from HAND_MAINTAINED and let the build generate it."
+        "remove it from the exception list and let the build generate it."
     );
   }
-  for (const entry of HAND_MAINTAINED) {
-    assertContainedUnder(entry, BUNDLE_ROOT, "HAND_MAINTAINED entry");
+  for (const entry of NON_IMPORT_BUNDLE_FILES) {
+    assertContainedUnder(entry, BUNDLE_ROOT, "NON_IMPORT_BUNDLE_FILES entry");
   }
 }
 
@@ -455,6 +540,7 @@ function main() {
   for (const source of outsideEntry) {
     copySource(source);
   }
+  writeProvenanceManifest();
 
   console.log("Build complete. Run `npm publish` from npm-wrapper/.");
 }
@@ -463,7 +549,7 @@ function main() {
 // floor reads it from here so the list has exactly one source of truth — the same
 // reason this build asks Python for the import graph instead of restating it.
 if (process.argv.includes("--print-hand-maintained")) {
-  process.stdout.write(JSON.stringify(HAND_MAINTAINED) + "\n");
+  process.stdout.write(JSON.stringify(NON_IMPORT_BUNDLE_FILES) + "\n");
 } else {
   main();
 }
