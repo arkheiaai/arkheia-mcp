@@ -4,7 +4,8 @@ Tests for AIInterceptionMiddleware.
 PASSING CRITERIA:
   1. /v1/chat/completions request: X-Arkheia-Risk header is present on response
   2. LOW risk: response body passes through unchanged, header = LOW
-  3. HIGH risk + warn: response body is prepended with b"[ARKHEIA WARNING"
+  3. HIGH risk + warn: the verdict is surfaced in headers and the response body
+     is delivered INTACT (see the note on criterion 3 below)
   4. HIGH risk + block: response body is {"error":"arkheia_blocked",...}, header = HIGH
   5. UNKNOWN risk: body passes through, header = UNKNOWN
   6. Engine None: body passes through, header = UNAVAILABLE
@@ -117,8 +118,29 @@ class TestAIInterceptionMiddleware:
         data = resp.json()
         assert data["choices"][0]["message"]["content"] == "Paris"
 
-    def test_high_risk_warn_prepends_warning(self):
-        """CRITERION 3: HIGH risk + warn prepends [ARKHEIA WARNING to response body."""
+    def test_high_risk_warn_signals_without_corrupting_the_body(self):
+        """
+        CRITERION 3, AMENDED (F10 sweep) — DELIBERATE BEHAVIOUR CHANGE.
+
+        This test previously asserted the body STARTED WITH
+        ``b"[ARKHEIA WARNING: HIGH RISK DETECTED] "``. Prepending that banner to
+        a JSON completion produces bytes no JSON parser accepts, so on the warn
+        path every SDK client saw a parse error instead of a warning — and the
+        answer itself, which warn is supposed to deliver, became unusable.
+
+        The repo had already ruled against the pattern twice, both times naming
+        this module:
+          * ``proxy/endpoints/detect.py::_signal`` — "Header/structured-field
+            signalling ONLY -- we never prepend to the body (that pattern in
+            interception.py corrupts responses and 400-loops sessions)".
+          * the operator's local proxy, where the inline prepend was REMOVED
+            because mutating the response wedges the session.
+
+        The verdict is now carried by ``X-Arkheia-Risk`` / ``X-Arkheia-Action``
+        / ``X-Arkheia-Detection-Id``, which is strictly more information than
+        the banner carried. Flagged for adjudication on the PR: reversing this
+        is a one-line change, but it reinstates a corrupt payload.
+        """
         app = _make_app(risk_level="HIGH", high_risk_action="warn")
         with TestClient(app, raise_server_exceptions=False) as client:
             resp = client.post(
@@ -126,7 +148,9 @@ class TestAIInterceptionMiddleware:
                 json={"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]},
             )
         assert resp.headers.get("x-arkheia-risk") == "HIGH"
-        assert resp.content.startswith(b"[ARKHEIA WARNING")
+        assert resp.headers.get("x-arkheia-action") == "warn"
+        assert not resp.content.startswith(b"[ARKHEIA WARNING")
+        assert resp.json()["choices"][0]["message"]["content"] == "Paris"
 
     def test_high_risk_block_returns_blocked_body(self):
         """CRITERION 4: HIGH risk + block returns arkheia_blocked JSON, header = HIGH."""
