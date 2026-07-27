@@ -214,6 +214,105 @@ def test_a_valid_log_is_still_recovered_exactly(tmp_path):
 
 
 # ===========================================================================
+# RED (b2) -- a valid record LARGER than the fixed tail-read window must
+# still be recovered correctly, or ordinary caller input (an unbounded
+# session_id/model_id, see proxy/endpoints/detect.py's VerifyRequest) poisons
+# recovery exactly like a hostile value does. Codex adversarial review of
+# PR #37, second pass, 2026-07-27.
+# ===========================================================================
+
+def _write_one_record_with_a_big_field(path: Path, field_bytes: int) -> tuple[str, int]:
+    """Write ONE valid, correctly hash-linked record whose JSON exceeds
+    ``field_bytes`` bytes (via an oversized string field, mirroring an
+    unbounded caller-controlled ``session_id``). Returns (this_hash, seq)."""
+    record = {"seq": 1, "prev_hash": GENESIS, "session_id": "S" * field_bytes}
+    this_hash = _compute_hash(record, GENESIS)
+    record["this_hash"] = this_hash
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    return this_hash, 1
+
+
+def test_a_record_bigger_than_the_tail_window_is_still_recovered(tmp_path):
+    """
+    RED, pre-fix: ``_load_chain_state`` read a fixed last-8KB window and
+    treated a window with no complete line as "unrecoverable," falling back
+    to genesis (seq 0). A single record whose JSON exceeds 8KB -- ordinary
+    caller input, since ``session_id``/``model_id`` are unbounded strings
+    persisted verbatim -- IS that case: the whole window is a headless
+    fragment of the one giant line, gets dropped as a "probable partial
+    leading record," and nothing is left. The fix grows the read window
+    until it finds a complete record (or has read the whole file), so
+    recovery must be EXACT here, not merely "did not crash."
+    """
+    w = _writer(tmp_path)
+    this_hash, seq = _write_one_record_with_a_big_field(w.log_path, 12_000)
+    assert w.log_path.stat().st_size > 8192, "test setup invalid -- record must exceed the window"
+
+    from proxy.audit.writer import _load_chain_state
+
+    state = _load_chain_state(w.log_path)
+    assert state.ok is True, (
+        f"a single oversized-but-VALID record must recover cleanly, not "
+        f"ok=False: {state}"
+    )
+    assert state.last_hash == this_hash, state
+    assert state.last_seq == seq, state
+
+
+def test_a_record_needing_multiple_window_growths_is_still_recovered(tmp_path):
+    """
+    Same as above but sized so a single x4 growth (8192 -> 32768) is not
+    enough (record is ~40KB, forcing two growth iterations: 8192 -> 32768 ->
+    (clamped to file size)). Pins that growth actually loops rather than
+    trying exactly once more.
+    """
+    w = _writer(tmp_path)
+    this_hash, seq = _write_one_record_with_a_big_field(w.log_path, 40_000)
+    assert w.log_path.stat().st_size > 32768, "test setup invalid -- needs >1 growth"
+
+    from proxy.audit.writer import _load_chain_state
+
+    state = _load_chain_state(w.log_path)
+    assert state.ok is True, state
+    assert state.last_hash == this_hash, state
+    assert state.last_seq == seq, state
+
+
+async def test_a_restart_after_an_oversized_record_does_not_duplicate_seq(tmp_path):
+    """
+    End-to-end version of the two tests above, through the real async writer
+    across a real restart -- pins the actual observable failure (duplicate
+    sequence numbers on disk) rather than only the internal recovery value.
+    Before the fix: seq on disk was ``[1, 1]`` (the second process could not
+    recover seq=1 and restarted counting from 0), which is itself a second,
+    independent tamper-evidence defect (two on-disk records sharing a seq).
+    """
+    w1 = _writer(tmp_path)
+    await w1.start()
+    await w1.write({"event_type": "detect", "risk_level": "LOW",
+                     "session_id": "S" * 12_000})
+    await w1.stop()
+    assert w1.log_path.stat().st_size > 8192
+
+    w2 = _writer(tmp_path)
+    await w2.start()
+    assert w2._chain_ok is True, (
+        f"restart after a valid oversized record must not report a degraded "
+        f"chain: status={w2._chain_status!r} detail={w2._chain_detail!r}"
+    )
+    assert w2._seq == 1, f"expected seq to recover as 1, got {w2._seq}"
+    await w2.write({"event_type": "detect", "risk_level": "LOW", "session_id": "small"})
+    await w2.stop()
+
+    seqs = [r["seq"] for r in _records(w2.log_path)]
+    assert seqs == [1, 2], f"expected consecutive seqs, got {seqs} (duplicate = data loss risk)"
+
+    report = w2.verify_chain()
+    assert report["ok"] is True, report
+    assert report["verified"] == 2, report
+
+
+# ===========================================================================
 # RED (c) -- every subsequent write is silently dropped
 # ===========================================================================
 
@@ -546,3 +645,35 @@ def test_startup_on_an_intact_chain_still_reports_ok(seeded_client_factory):
         body = client.get("/admin/health").json()
         assert body["status"] == "ok", body
         assert body["audit_chain"]["ok"] is True, body["audit_chain"]
+
+
+def test_startup_past_the_old_1000_limit_still_catches_a_tail_tamper(seeded_client_factory):
+    """
+    RED, through the REAL lifespan and the REAL /admin/health -- the exact
+    repro from Codex's second-pass adversarial review of PR #37, 2026-07-27:
+    1001 valid records, tamper record #1001 (the last one), boot the real
+    FastAPI app. Before the fix, ``verify_chain()``'s old default
+    ``limit=1000`` never looked at record #1001 at all and startup reported
+    "status": "ok" over a genuinely tampered chain -- past 1000 records is
+    the STEADY STATE for a running deployment, not an edge case, and it is
+    exactly where an attacker appending a tampered tail record would land.
+    """
+    log_path, make_client = seeded_client_factory
+    _write_valid_chain(log_path, 1001)
+    lines = log_path.read_text().splitlines()
+    tampered = json.loads(lines[1000])  # record #1001 -- the LAST one
+    tampered["detection_id"] = "TAMPERED"
+    lines[1000] = json.dumps(tampered)
+    log_path.write_text("\n".join(lines) + "\n")
+
+    client = make_client()
+    with client:
+        body = client.get("/admin/health").json()
+        assert body["audit_chain"]["ok"] is False, (
+            f"a tamper in record #1001 of a 1001-record chain was not caught "
+            f"by the real startup self-check: {body['audit_chain']}"
+        )
+        assert body["status"] != "ok", (
+            f"the real app reported top-level status 'ok' over a chain "
+            f"tampered past the old 1000-record limit: {body}"
+        )

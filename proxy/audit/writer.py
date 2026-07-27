@@ -191,6 +191,12 @@ def _sanitize_for_json(obj):
 
 
 _TAIL_BYTES = 8192
+# Growth factor for _load_chain_state's read window when the tail does not
+# contain a complete record (Codex adversarial review of PR #37, second pass,
+# 2026-07-27) -- see that function's docstring. x4 converges in
+# O(log4(record_size / _TAIL_BYTES)) reads regardless of how large the
+# offending record actually is.
+_TAIL_GROWTH_FACTOR = 4
 
 
 def _load_chain_state(log_path: Path) -> ChainState:
@@ -235,6 +241,27 @@ def _load_chain_state(log_path: Path) -> ChainState:
     disk is never handed out again. Only if the tail yields nothing usable at
     all does this fall back to genesis -- and that case reports ``ok=False``.
 
+    THE READ WINDOW GROWS -- it does not just take the last 8 KB and give up
+    (Codex adversarial review of PR #37, second pass, 2026-07-27). A single
+    valid record larger than one fixed window makes the whole window a
+    fragment of ITS content with no newline in it at all; the old code then
+    dropped that one fragment as "probably a partial leading record" and was
+    left with nothing, reporting the tail unrecoverable and restarting the
+    chain from seq 0 -- on a record that was perfectly valid and fully on
+    disk. This is reachable with ordinary caller input, not an attack: the
+    audit record for /detect/verify persists ``VerifyRequest.session_id``
+    verbatim (``proxy/endpoints/detect.py``), and neither ``session_id`` nor
+    ``model_id`` is length-bounded at that endpoint. So the fix is in THIS
+    function, not (only) a bound at the API boundary: the read window starts
+    at ``_TAIL_BYTES`` and, if it contains no complete line after discarding
+    a probable leading fragment, GROWS by ``_TAIL_GROWTH_FACTOR`` and retries
+    -- up to the whole file, so recovery is correct no matter how large the
+    most recent record(s) actually are. (Bounding oversized caller strings at
+    the boundary is a reasonable follow-up for a different reason -- keeping
+    the log itself compact -- but is explicitly NOT the fix for this defect:
+    the recovery path must be correct regardless of what is already on disk,
+    including logs written before any such bound existed.)
+
     Returns a ChainState. ``ok=False`` + ``detail`` is the load-path half of
     "fail-open, but NEVER fail-silent": the writer still starts and still
     writes (see AuditWriter.start), but it starts KNOWING its chain is corrupt
@@ -249,21 +276,39 @@ def _load_chain_state(log_path: Path) -> ChainState:
             size = f.tell()
             if size == 0:
                 return genesis
-            # Read last 8 KB — sufficient for any single record
-            partial = size > _TAIL_BYTES
-            f.seek(max(0, size - _TAIL_BYTES))
-            tail = f.read().decode("utf-8", errors="replace")
 
-        lines = [ln.strip() for ln in tail.split("\n") if ln.strip()]
-        if partial and lines:
-            # The window almost certainly begins mid-record. That is normal for
-            # a large log, not corruption, so it must not be reported as such.
-            lines = lines[1:]
+            window = _TAIL_BYTES
+            lines: list[str] = []
+            while True:
+                partial = size > window
+                f.seek(max(0, size - window))
+                tail = f.read().decode("utf-8", errors="replace")
+                candidate = [ln.strip() for ln in tail.split("\n") if ln.strip()]
+                if partial and candidate:
+                    # The window almost certainly begins mid-record. That is
+                    # normal for a large log, not corruption, so the leading
+                    # fragment must not be treated as content.
+                    candidate = candidate[1:]
+                if candidate or not partial:
+                    # Either we found something usable, or we have now read
+                    # the ENTIRE file and there is nowhere left to grow --
+                    # either way, stop here.
+                    lines = candidate
+                    break
+                # Nothing usable yet and more file remains unread: GROW the
+                # window rather than concluding "unrecoverable" -- see the
+                # docstring note above. Guaranteed to terminate: `window`
+                # strictly increases each iteration and is clamped to `size`.
+                window = (
+                    size if window * _TAIL_GROWTH_FACTOR >= size
+                    else window * _TAIL_GROWTH_FACTOR
+                )
+
         if not lines:
             return ChainState(
                 GENESIS_HASH, 0, False,
-                f"the last {_TAIL_BYTES} bytes of the log contain no complete "
-                f"record — chain state could not be recovered",
+                f"no complete record could be recovered even after reading the "
+                f"entire {size}-byte log — chain state could not be recovered",
             )
 
         problems: list[str] = []
@@ -672,23 +717,25 @@ class AuditWriter:
 
         return {"events": events, "summary": summary}
 
-    def verify_chain(self, limit: int = 1000) -> dict:
+    def verify_chain(self, limit: Optional[int] = None) -> dict:
         """
         Walk the hash chain and report any breaks or sequence gaps.
 
-        Returns {"ok": bool, "verified": n, "breaks": [{seq, expected, got}],
+        Returns {"ok": bool, "complete": bool, "verified": n,
+        "breaks": [{seq, expected, got}],
         "gaps": [{after_seq, expected_seq, got_seq}], "error": str|None}
 
-        "ok" is only True for a chain that was actually walked without incident
-        (including the legitimate case of a log that does not exist yet -- a
-        fresh deployment has nothing to verify, and that is not evidence of
-        tampering). It is deliberately NOT just `len(breaks) == 0`: an absent
-        log, a genuinely empty one, a log whose every line failed to parse, and
-        a walk that raised before checking anything all leave `breaks` empty
-        too, but only the first two are "nothing to check" -- the latter two are
-        content that COULD NOT be verified, which is evidence of a problem, not
-        an intact chain, and must not read the same as one (Codex adversarial
-        review, 2026-07-27; sibling of the integrity.py empty-manifest defect).
+        "ok" is only True for a chain that was actually walked, IN FULL,
+        without incident (including the legitimate case of a log that does
+        not exist yet -- a fresh deployment has nothing to verify, and that is
+        not evidence of tampering). It is deliberately NOT just
+        `len(breaks) == 0`: an absent log, a genuinely empty one, a log whose
+        every line failed to parse, and a walk that raised before checking
+        anything all leave `breaks` empty too, but only the first two are
+        "nothing to check" -- the latter two are content that COULD NOT be
+        verified, which is evidence of a problem, not an intact chain, and
+        must not read the same as one (Codex adversarial review, 2026-07-27;
+        sibling of the integrity.py empty-manifest defect).
 
         `gaps` is a SEPARATE signal from `breaks`, added 2026-07-27 alongside
         the writer-loop fix that stopped `self._seq` from being consumed by a
@@ -703,11 +750,44 @@ class AuditWriter:
         evidence that something existed and is not on disk, which a verifier
         must not be unable to tell apart from a chain where nothing is missing.
 
+        `limit` / `complete` (Codex adversarial review of PR #37, second
+        pass, 2026-07-27) -- `limit` used to default to 1000 and a walk that
+        hit it stopped and returned `"ok": len(breaks) == 0 and len(gaps) ==
+        0` exactly as if it had reached the end of the file. That is the same
+        `all([]) is True` shape as every other defect this method exists to
+        rule out: a break sitting in record #1001 of a 1001-record chain was
+        never looked at, and the caller was told "ok": True anyway. Reviewer
+        reproduced this against the real FastAPI app's /admin/health at the
+        exact scale a live deployment reaches in normal operation (past 1000
+        records is the steady state, not an edge case) -- an attacker
+        appending a tampered tail record specifically defeats a check that
+        only ever looks at the head.
+
+        The fix: `limit=None` (the default) means "verify the WHOLE chain,"
+        which is what the one production caller (proxy/main.py's startup
+        self-check) always wants -- there is no other place in this codebase
+        that calls verify_chain() at all (grepped 2026-07-27; the
+        `/admin/verify-chain` endpoint mentioned below does not exist yet). A
+        caller that explicitly passes a smaller `limit` (a future bounded/
+        on-demand check) gets an HONEST answer instead: `complete` is False
+        when the walk stopped early because of that limit rather than because
+        it ran out of log, and `ok` folds `complete` in -- an unchecked tail
+        is missing evidence, and missing evidence must not read as "no tamper
+        found," exactly like the absent-log and unparseable-content cases
+        above. Measured cost of the new default (2026-07-27, this machine,
+        Python 3.12): ~6us/record; a 200,000-record / 56MB log (well beyond
+        current production volume) verifies in ~1.2s. `purge_old_records`
+        exists to keep the log bounded by `retention_days`; if a deployment
+        ever grows the log large enough for this to matter at boot, wiring
+        that on a schedule is the fix, not silently trusting an unread tail.
+
         Hook for enterprise upgrade: expose this via /admin/verify-chain endpoint
-        and run it on a schedule to detect log tampering.
+        (pass an explicit `limit` for a cheap on-demand check there, which will
+        now honestly report `complete: False` rather than borrowing the
+        startup path's "ok").
         """
         if not self.log_path.exists():
-            return {"ok": True, "verified": 0, "breaks": [], "gaps": [], "error": None}
+            return {"ok": True, "complete": True, "verified": 0, "breaks": [], "gaps": [], "error": None}
 
         breaks = []
         gaps = []
@@ -717,6 +797,7 @@ class AuditWriter:
         total_lines = 0
         unparseable = 0
         error: Optional[str] = None
+        complete = True
 
         try:
             with open(self.log_path, "r", encoding="utf-8") as f:
@@ -781,17 +862,25 @@ class AuditWriter:
                     # keep going, not stop looking.
                     prev_hash = stored_this if _is_valid_chain_hash(stored_this) else expected
                     verified += 1
-                    if verified >= limit:
+                    if limit is not None and verified >= limit:
+                        # We are STOPPING WHILE RECORDS REMAIN UNSEEN. That is
+                        # not the same claim as "walked to the end and found
+                        # nothing wrong" -- see the `complete` note above.
+                        complete = False
                         break
 
         except Exception as e:
             logger.error("AuditWriter.verify_chain: %s", e)
             error = str(e)
+            complete = False
 
         if error is not None:
             # The walk did not complete -- we cannot claim anything about the
             # chain's integrity, so this must not be reported as ok=True.
-            return {"ok": False, "verified": verified, "breaks": breaks, "gaps": gaps, "error": error}
+            return {
+                "ok": False, "complete": False, "verified": verified,
+                "breaks": breaks, "gaps": gaps, "error": error,
+            }
 
         if total_lines > 0 and verified == 0:
             # The log has content, but every line failed to parse. That is
@@ -800,6 +889,7 @@ class AuditWriter:
             # read as ok=True.
             return {
                 "ok": False,
+                "complete": complete,
                 "verified": 0,
                 "breaks": breaks,
                 "gaps": gaps,
@@ -808,11 +898,16 @@ class AuditWriter:
             }
 
         return {
-            "ok": len(breaks) == 0 and len(gaps) == 0,
+            "ok": len(breaks) == 0 and len(gaps) == 0 and complete,
+            "complete": complete,
             "verified": verified,
             "breaks": breaks,
             "gaps": gaps,
-            "error": None,
+            "error": (
+                None if complete
+                else f"stopped at limit={limit} with more of the log unread -- "
+                     f"the unread tail is UNVERIFIED, not confirmed clean"
+            ),
         }
 
     def purge_old_records(self) -> int:
