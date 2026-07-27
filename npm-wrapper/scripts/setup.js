@@ -79,12 +79,6 @@ function parseOptions(argv = process.argv.slice(2), env = process.env) {
   };
 }
 
-function maskKey(apiKey) {
-  if (!apiKey) return "";
-  if (apiKey.length <= 12) return "***";
-  return `${apiKey.substring(0, 8)}...${apiKey.substring(apiKey.length - 4)}`;
-}
-
 function chmodIfPossible(target, mode) {
   try {
     fs.chmodSync(target, mode);
@@ -329,7 +323,7 @@ function main() {
       : `Not persisted. Set ARKHEIA_PERSIST_API_KEY=1 to save it to ${keyState.configFile}.`;
     console.log(`
   ============================================================
-  API key found: ${maskKey(keyState.apiKey)}
+  API key configured.
   ${persistence}
   ============================================================
   `);
@@ -372,7 +366,6 @@ module.exports = {
   checkApiKey,
   installClaudeMd,
   main,
-  maskKey,
   parseOptions,
   pathsForHome,
   saveConfig,
