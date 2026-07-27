@@ -838,13 +838,22 @@ def test_memory_relate_does_not_persist_secrets_unredacted(tmp_path):
     """
     from mcp_server.tools import memory as mem
 
-    content = _drive_memory_write_path(
-        tmp_path,
-        lambda: mem.store_relation(
+    async def _write_relation():
+        await mem.store_entity(
+            f"{MEMORY_SENTINEL} -- service-A",
+            "service",
+            ["relation source"],
+        )
+        await mem.store_entity(_MEM_RELATION_SECRET, "credential", ["relation target"])
+        await mem.store_relation(
             from_entity=f"{MEMORY_SENTINEL} -- service-A",
             relation_type="uses_credential",
             to_entity=_MEM_RELATION_SECRET,
-        ),
+        )
+
+    content = _drive_memory_write_path(
+        tmp_path,
+        _write_relation,
     )
 
     assert MEMORY_SENTINEL.encode() in content, (
