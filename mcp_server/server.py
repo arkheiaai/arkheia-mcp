@@ -26,6 +26,7 @@ Transport: stdio (default — Claude Code / Claude Desktop)
 
 import os
 import logging
+from typing import Any
 
 import anyio
 from mcp.server.fastmcp import FastMCP
@@ -52,6 +53,10 @@ proxy = ProxyClient(
     hosted_url=ARKHEIA_HOSTED_URL,
     api_key=ARKHEIA_API_KEY,
 )
+
+
+def _present_metadata(**metadata: Any) -> dict[str, Any]:
+    return {key: value for key, value in metadata.items() if value is not None}
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +181,7 @@ async def run_grok(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
-        usage=provider_result.get("usage"),
+        **_present_metadata(usage=provider_result.get("usage")),
     )
     logger.info(
         "run_grok: model=%s risk=%s confidence=%.2f",
@@ -223,7 +228,7 @@ async def run_gemini(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
-        usage=provider_result.get("usage"),
+        **_present_metadata(usage=provider_result.get("usage")),
     )
     logger.info(
         "run_gemini: model=%s risk=%s confidence=%.2f",
@@ -273,7 +278,7 @@ async def run_ollama(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
-        output_tokens=provider_result.get("eval_count"),
+        **_present_metadata(output_tokens=provider_result.get("eval_count")),
     )
     logger.info(
         "run_ollama: model=%s risk=%s confidence=%.2f",
@@ -325,7 +330,7 @@ async def run_together(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
-        usage=provider_result.get("usage"),
+        **_present_metadata(usage=provider_result.get("usage")),
     )
     logger.info(
         "run_together: model=%s risk=%s confidence=%.2f",

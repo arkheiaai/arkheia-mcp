@@ -257,13 +257,12 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
         return _signal(http_response, r, "pass", "advise")
 
     try:
-        result = await engine.verify(
-            req.prompt,
-            req.response,
-            req.model_id,
-            output_tokens=output_tokens,
-            is_function_call=req.is_function_call,
-        )
+        metadata = {}
+        if output_tokens is not None:
+            metadata["output_tokens"] = output_tokens
+        if req.is_function_call is not None:
+            metadata["is_function_call"] = req.is_function_call
+        result = await engine.verify(req.prompt, req.response, req.model_id, **metadata)
     except Exception as e:
         logger.error("Detection engine error for model=%s: %s", req.model_id, e)
         r = _unknown(model_id=req.model_id, error="engine_error")
