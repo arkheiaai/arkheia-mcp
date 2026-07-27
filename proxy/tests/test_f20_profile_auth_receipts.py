@@ -102,8 +102,13 @@ def _rows(probe, outcome: str | None = None) -> list[dict]:
     return rows
 
 
-async def _build(profiles, probe, key=None) -> ProfileRouter:
-    router = ProfileRouter(str(profiles), decryption_key=key, audit_writer=probe.writer)
+async def _build(profiles, probe, key=None, license_key=None) -> ProfileRouter:
+    router = ProfileRouter(
+        str(profiles),
+        decryption_key=key,
+        audit_writer=probe.writer,
+        license_key=license_key,
+    )
     await router.flush_decision_journal()
     await probe.writer._queue.join()
     return router
@@ -226,6 +231,34 @@ async def test_an_expired_LICENCE_is_never_confused_with_a_tamper(profiles, prob
     assert len(rows) == 1
     assert rows[0]["outcome"] == PROFILE_AUTH_LICENSE_REJECTED
     assert rows[0]["outcome"] != PROFILE_AUTH_FAILED
+
+
+async def test_a_bad_license_signature_is_never_confused_with_a_tamper(profiles, probe):
+    """
+    The encrypted bytes authenticated, then license trust failed. That is not an
+    AES-GCM tag failure and must not be reported as one.
+    """
+    key = _key()
+    license_key = "test-license-secret"
+    valid_until = (date.today() + timedelta(days=30)).isoformat()
+    body = {
+        "model": "test-model",
+        "version": "1.0",
+        "license": {
+            "customer_id": "acme",
+            "valid_until": valid_until,
+            "signature": "bad",
+        },
+    }
+    _seal(profiles, "test-model", key, body)
+
+    await _build(profiles, probe, key, license_key=license_key)
+
+    rows = _rows(probe)
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == PROFILE_AUTH_LICENSE_REJECTED
+    assert rows[0]["outcome"] != PROFILE_AUTH_FAILED
+    assert rows[0]["error_type"] is None
 
 
 async def test_decrypted_but_empty_and_decrypted_but_unusable_are_distinct(profiles, probe):
