@@ -669,11 +669,25 @@ async def health(request: Request, _: str = Depends(require_auth)):
         else None
     )
 
+    # Binary-integrity state of the compiled detection modules, published so the
+    # UNVERIFIED case is VISIBLE to an operator rather than only in a startup log
+    # line nobody reads. Codex finding 4: absent/unverifiable fails open, but it
+    # must not fail silent. A TAMPERED engine never reaches this endpoint at all —
+    # the lifespan refuses to start (proxy/main.py step 1c).
+    integrity = getattr(request.app.state, "integrity", None) or {
+        "status": "NOT_CHECKED",
+        "verified": False,
+        "startup_blocked": False,
+        "detail": "the startup integrity self-check did not record a result; treat "
+                  "the compiled detection modules as UNVERIFIED",
+    }
+
     return {
         "status": "ok",
         "profiles_loaded": profiles_loaded,
         "profile_ids": profile_ids,
         "last_registry_pull": last_pull,
+        "integrity": integrity,
     }
 
 

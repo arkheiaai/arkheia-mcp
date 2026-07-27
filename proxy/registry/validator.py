@@ -88,7 +88,18 @@ class ProfileValidator:
         expected_risk = smoke.get("expected_risk", "")
 
         if not response or not expected_risk:
-            return True, "smoke test incomplete -- skipped"
+            # The smoke_test block was DECLARED (unlike the `not smoke` branch
+            # above, where the key is absent entirely) but is missing fields
+            # profiles/schema.yaml requires together. This is a malformed
+            # declared check, not the absence of one -- `return True` here was
+            # the `if not items: return True` vacuous-truth shape: nothing to
+            # compare, so it defaulted to "passed". Reject instead, same as any
+            # other schema violation.
+            return False, (
+                "smoke test declared but incomplete (missing response and/or "
+                "expected_risk) -- an incomplete smoke test is evidence of a "
+                "malformed profile, not evidence that it passed"
+            )
 
         try:
             from proxy.detection.features import classify_with_profile, extract_structural_features
@@ -100,8 +111,14 @@ class ProfileValidator:
 
             result = classify_with_profile(profile, signals)
             if result is None:
-                # No features computable -- smoke test inconclusive
-                return True, "smoke test inconclusive (no features computed)"
+                # No features computable: classify_with_profile already refused
+                # to guess (it returns None rather than defaulting to a risk
+                # level). Absence of evidence is not evidence of a pass, so the
+                # smoke test must not certify the profile either.
+                return False, (
+                    "smoke test inconclusive: no features computable for the "
+                    "given response, so nothing was actually verified"
+                )
 
             actual_risk = result.get("risk", "UNKNOWN")
             if actual_risk != expected_risk:
