@@ -164,9 +164,10 @@ MUTANTS: list[Mutant] = [
     Mutant("M10", JOURNAL, "the deferral is no longer measured",
            'out["receipt_deferred_ms"] = _deferral_ms(out.get("decided_at"), enqueued_at)',
            'out["receipt_deferred_ms"] = None', "timing"),
-    Mutant("M11", JOURNAL, "decided_at is stamped at flush time, not at the decision",
-           '        entry["decided_at"] = _now().isoformat()',
-           "        entry.setdefault(\"decided_at\", None)", "timing"),
+    Mutant("M11", JOURNAL, "the journal stops stamping, so decided_at becomes the WRITE time",
+           "        entry = stamp_decision(record, source=DECIDED_AT_JOURNALLED)",
+           "        entry = dict(record)\n"
+           "        entry.setdefault(\"decision_id\", str(uuid.uuid4()))", "timing"),
 
     # -- the journal's own not-observed bucket -------------------------------
     Mutant("M12", JOURNAL, "evicted decisions stop being counted",
@@ -296,9 +297,11 @@ MUTANTS: list[Mutant] = [
            "    logger.info(\"Loaded %d profiles from %s\",", "ordering",
            extra=((ROUTER, "        self.load_all()\n        self._schedule_flush()\n\n    def attach_audit_writer",
                    "        self.load_all()\n\n    def attach_audit_writer"),)),
-    Mutant("M39", MAIN, "step 1b stops recording the key-load posture",
-           "    await _record_key_load_posture(audit_writer, profiles_dir, profile_router)",
-           "    pass", "ordering"),
+    Mutant("M39", MAIN, "the key-load posture is never resolved or recorded",
+           "    decryption_key, _key_receipt_status = await _resolve_profile_key(\n"
+           "        audit_writer, profiles_dir, preconfigured_key=_preconfigured_profile_key(),\n"
+           "    )",
+           "    decryption_key, _key_receipt_status = None, \"unavailable\"", "ordering"),
     Mutant("M40", MAIN, "the writer moves back below the profile router (the original defect)",
            "    audit_writer = AuditWriter(\n"
            "        log_path=settings.audit.log_path,\n"
@@ -306,21 +309,70 @@ MUTANTS: list[Mutant] = [
            "    )\n    await audit_writer.start()\n",
            "", "ordering",
            extra=((MAIN,
-                   "    # 2. Detection engine\n    engine = DetectionEngine(profile_router)",
+                   "    # 3. Detection engine\n    engine = DetectionEngine(profile_router)",
                    "    audit_writer = AuditWriter(\n"
                    "        log_path=settings.audit.log_path,\n"
                    "        retention_days=settings.audit.retention_days,\n"
                    "    )\n    await audit_writer.start()\n\n"
-                   "    # 2. Detection engine\n    engine = DetectionEngine(profile_router)"),)),
+                   "    # 3. Detection engine\n    engine = DetectionEngine(profile_router)"),)),
     Mutant("M41", MAIN, "the no-encrypted-profiles branch stops leaving a row",
-           "    if not enc_files:\n        return await emit(audit_writer, build_key_load_record(",
-           "    if False:\n        return await emit(audit_writer, build_key_load_record(",
+           "    if not enc_files:\n        return preconfigured_key, await emit(audit_writer, build_key_load_record(",
+           "    if False:\n        return preconfigured_key, await emit(audit_writer, build_key_load_record(",
            "ordering"),
     Mutant("M42", MAIN, "a preconfigured key is not distinguished from no key at all",
            "            outcome=KEY_LOAD_KEY_PRECONFIGURED,\n"
            "            key_source=KEY_SOURCE_PRECONFIGURED,",
            "            outcome=KEY_LOAD_NO_API_KEY,\n"
            "            key_source=KEY_SOURCE_NONE,", "ordering"),
+
+    # -- the stamping chokepoint (Codex #1, PR #34) ---------------------------
+    # The rail has ONE door and the door stamps. These faults reopen the exact
+    # state Codex reproduced: a hash-chained row that cannot be tied to the
+    # decision it describes, and a deferral field that is null because the
+    # production branch never reached the mechanism.
+    Mutant("M46", JOURNAL, "emit stops stamping, so a direct branch writes an unidentified row",
+           "    out = stamp_decision(record, source=DECIDED_AT_AT_EMIT)",
+           "    out = dict(record)", "identity"),
+    Mutant("M47", JOURNAL, "stamp_decision mints no decision_id",
+           '    if not out.get("decision_id"):\n'
+           '        out["decision_id"] = str(uuid.uuid4())\n', "", "identity"),
+    Mutant("M48", JOURNAL, "an emit-time stamp is labelled as journalled at the decision",
+           '        out["decided_at"] = _now().isoformat()\n'
+           '        out["decided_at_source"] = source',
+           '        out["decided_at"] = _now().isoformat()\n'
+           '        out["decided_at_source"] = DECIDED_AT_JOURNALLED', "identity"),
+    Mutant("M49", JOURNAL, "a record arriving with an unlabelled decided_at is called journalled",
+           '    elif not out.get("decided_at_source"):\n'
+           '        out["decided_at_source"] = DECIDED_AT_UNLABELLED',
+           '    elif not out.get("decided_at_source"):\n'
+           '        out["decided_at_source"] = DECIDED_AT_JOURNALLED', "identity"),
+
+    # -- the startup ordering (Codex #2, PR #34) ------------------------------
+    Mutant("M50", MAIN, "the fetched key is receipted but never handed back",
+           "        return key, loader.last_receipt_status",
+           "        return None, loader.last_receipt_status", "ordering"),
+    Mutant("M51", MAIN, "the router is built without the key that was just resolved",
+           "        decryption_key=decryption_key,\n", "", "ordering"),
+    Mutant("M52", ROUTER, "skipped_no_key is journalled even when a key IS held",
+           "        if enc_files and not self._decryption_key:",
+           "        if enc_files:", "ordering"),
+    # The original defect, restored exactly: the key is resolved AFTER the
+    # router's first load_all(), so the boot journals 'these surfaces went dark'
+    # for a startup that then fetched the key and authenticated them.
+    Mutant("M53", MAIN, "key resolution moves back BELOW the router (the false-alarm ordering)",
+           "    decryption_key, _key_receipt_status = await _resolve_profile_key(\n"
+           "        audit_writer, profiles_dir, preconfigured_key=_preconfigured_profile_key(),\n"
+           "    )",
+           "    decryption_key = None", "ordering",
+           extra=((MAIN,
+                   '    logger.info("Loaded %d profiles from %s",',
+                   "    decryption_key, _key_receipt_status = await _resolve_profile_key(\n"
+                   "        audit_writer, profiles_dir, preconfigured_key=_preconfigured_profile_key(),\n"
+                   "    )\n"
+                   "    if decryption_key:\n"
+                   "        profile_router.set_decryption_key(decryption_key)\n"
+                   "        await profile_router.flush_decision_journal()\n"
+                   '    logger.info("Loaded %d profiles from %s",'),)),
 ]
 
 

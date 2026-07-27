@@ -61,6 +61,9 @@ from proxy.audit.decision_journal import (
     REVOCATION_NOT_APPLICABLE,
     REVOCATION_UNKNOWN_OFFLINE,
     RISK_LEVEL,
+    DECIDED_AT_AT_EMIT,
+    DECIDED_AT_JOURNALLED,
+    DECIDED_AT_UNLABELLED,
     DecisionJournal,
     build_key_load_record,
     emit,
@@ -333,6 +336,67 @@ async def test_disclosed_rail_gap_enqueued_does_not_mean_landed(probe, key_serve
     )
 
 
+async def test_a_record_arriving_with_an_unlabelled_decided_at_is_not_called_journalled(probe):
+    """
+    Found by the mutation campaign (M49 survived run 4 — a real hole in this
+    suite, not an equivalent mutant). ``DECIDED_AT_UNLABELLED`` was a bucket I
+    added and never drove.
+
+    ``stamp_decision`` sets ``decided_at`` and its provenance together, so a
+    record that turns up carrying a ``decided_at`` and no label was stamped by
+    something this module did not do. Reporting it as "journalled at the
+    decision" would assert a fact nobody observed — DONE.md v1.19 clause (d): an
+    outcome that produced no observation is its own bucket, never folded into a
+    good one.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    arrived = build_key_load_record(
+        outcome=KEY_LOAD_UNAVAILABLE,
+        key_source=KEY_SOURCE_NONE,
+        revocation_state=REVOCATION_NOT_APPLICABLE,
+    )
+    earlier = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+    arrived["decided_at"] = earlier
+
+    assert await emit(probe.writer, arrived) == RECEIPT_ENQUEUED
+    await probe.writer._queue.join()
+
+    rows = [r for r in probe.rows() if r["event_type"] == EVENT_KEY_LOAD]
+    assert len(rows) == 1
+    assert rows[0]["decided_at_source"] == DECIDED_AT_UNLABELLED
+    assert rows[0]["decided_at"] == earlier, (
+        "the timestamp the record arrived with must be preserved, not replaced "
+        "by the write time — replacing it would erase the very gap the deferral "
+        "field exists to disclose"
+    )
+    assert rows[0]["receipt_deferred_ms"] >= 4000, (
+        "control: the five-second gap must be MEASURED from the arriving "
+        "timestamp, or 'preserved' above is satisfied by a field nothing reads"
+    )
+
+
+async def test_a_record_with_no_decided_at_at_all_is_labelled_stamped_at_emit(probe):
+    """
+    Control row for the test above (DONE.md v1.15 clause 5): the ordinary direct
+    path must come back ``stamped_at_emit``, so the label discriminates rather
+    than always reading ``unlabelled``.
+    """
+    fresh = build_key_load_record(
+        outcome=KEY_LOAD_UNAVAILABLE,
+        key_source=KEY_SOURCE_NONE,
+        revocation_state=REVOCATION_NOT_APPLICABLE,
+    )
+    assert "decided_at" not in fresh
+
+    assert await emit(probe.writer, fresh) == RECEIPT_ENQUEUED
+    await probe.writer._queue.join()
+
+    rows = [r for r in probe.rows() if r["event_type"] == EVENT_KEY_LOAD]
+    assert rows[0]["decided_at_source"] == DECIDED_AT_AT_EMIT
+    assert rows[0]["receipt_deferred_ms"] < 1000
+
+
 async def test_emit_reports_unavailable_when_there_is_no_writer():
     """
     The pre-fix world, exercised: a decision taken with no writer in existence.
@@ -589,7 +653,11 @@ async def test_a_deployment_with_no_encrypted_profiles_still_leaves_a_row(probe,
     assert len(rows) == 1
     assert rows[0]["outcome"] == KEY_LOAD_NO_ENCRYPTED_PROFILES
     assert rows[0]["encrypted_profile_count"] == 0
-    assert_decision_identity(rows[0], branch=KEY_LOAD_NO_ENCRYPTED_PROFILES)
+    assert_decision_identity(
+        rows[0], branch=KEY_LOAD_NO_ENCRYPTED_PROFILES,
+        # A DIRECT branch: decided and handed over in the same breath.
+        expect_source=DECIDED_AT_AT_EMIT,
+    )
     assert probe.require(rows[0]["decision_id"]) == rows[0]
     assert probe.find("00000000-0000-4000-8000-000000000000") is None, (
         "vacuity guard: if a fabricated id also found a row, the lookup above "
@@ -619,7 +687,11 @@ async def test_encrypted_profiles_without_an_api_key_leave_a_row(probe, tmp_path
     assert rows[0]["outcome"] == KEY_LOAD_NO_API_KEY
     assert rows[0]["encrypted_profile_count"] == 2
     assert rows[0]["key_source"] == KEY_SOURCE_NONE
-    assert_decision_identity(rows[0], branch=KEY_LOAD_NO_API_KEY)
+    assert_decision_identity(
+        rows[0], branch=KEY_LOAD_NO_API_KEY,
+        # A DIRECT branch: decided and handed over in the same breath.
+        expect_source=DECIDED_AT_AT_EMIT,
+    )
 
 
 async def test_a_preconfigured_key_is_recorded_as_such(probe, tmp_path):
@@ -642,7 +714,11 @@ async def test_a_preconfigured_key_is_recorded_as_such(probe, tmp_path):
     assert rows[0]["outcome"] == KEY_LOAD_KEY_PRECONFIGURED
     assert rows[0]["key_source"] == KEY_SOURCE_PRECONFIGURED
     assert rows[0]["key_id"] == key_id(key)
-    assert_decision_identity(rows[0], branch=KEY_LOAD_KEY_PRECONFIGURED)
+    assert_decision_identity(
+        rows[0], branch=KEY_LOAD_KEY_PRECONFIGURED,
+        # A DIRECT branch: decided and handed over in the same breath.
+        expect_source=DECIDED_AT_AT_EMIT,
+    )
 
 
 async def test_a_loader_that_explodes_leaves_a_row_naming_the_failure(
@@ -673,7 +749,11 @@ async def test_a_loader_that_explodes_leaves_a_row_naming_the_failure(
     assert len(rows) == 1
     assert rows[0]["outcome"] == KEY_LOAD_LOADER_ERROR
     assert rows[0]["error_type"] == "RuntimeError"
-    assert_decision_identity(rows[0], branch=KEY_LOAD_LOADER_ERROR)
+    assert_decision_identity(
+        rows[0], branch=KEY_LOAD_LOADER_ERROR,
+        # A DIRECT branch: decided and handed over in the same breath.
+        expect_source=DECIDED_AT_AT_EMIT,
+    )
     assert "boom" not in json.dumps(rows[0]), (
         "an exception MESSAGE can echo whatever the code choked on; only the "
         "class name is structural enough to record"

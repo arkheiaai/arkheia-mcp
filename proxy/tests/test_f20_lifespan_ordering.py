@@ -38,6 +38,7 @@ import pytest
 import yaml
 
 from proxy.audit.decision_journal import (
+    DECIDED_AT_JOURNALLED,
     EVENT_KEY_LOAD,
     EVENT_PROFILE_AUTH,
     KEY_LOAD_FETCHED_HOSTED,
@@ -203,7 +204,11 @@ def test_a_real_boot_that_fetches_its_key_never_reports_the_surfaces_dark(
         f"second load_all() over the same file is a second verdict about one "
         f"decision, and the audit rail counts rows"
     )
-    assert_decision_identity(key_rows[0], branch=KEY_LOAD_FETCHED_HOSTED)
+    assert_decision_identity(
+        key_rows[0], branch=KEY_LOAD_FETCHED_HOSTED,
+        # fetch_key() is async, so this one is JOURNALLED at the decision.
+        expect_source=DECIDED_AT_JOURNALLED,
+    )
 
 
 def test_a_genuinely_keyless_boot_still_says_the_surfaces_went_dark(

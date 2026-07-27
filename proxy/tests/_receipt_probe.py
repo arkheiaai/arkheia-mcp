@@ -222,7 +222,9 @@ def contains(haystack: bytes, needle: Any) -> bool:
     return str(needle).encode("utf-8") in haystack
 
 
-def assert_decision_identity(row: dict, *, branch: str) -> None:
+def assert_decision_identity(
+    row: dict, *, branch: str, expect_source: Optional[str] = None
+) -> None:
     """
     Every governance row on the rail carries the identity of the decision it
     describes — asserted on the row AS READ BACK OFF DISK.
@@ -246,7 +248,13 @@ def assert_decision_identity(row: dict, *, branch: str) -> None:
     assert decision_id, (
         f"{branch}: the row on disk carries no decision_id "
         f"({decision_id!r}). A hash-chained row that cannot be tied to the "
-        f"decision it describes is not a receipt; row={row!r}"
+        f"decision it describes is not a receipt. Fields present on the row: "
+        # NAMES, never values. Every field on a decision record is built from
+        # arguments whose lineage includes key material, so a diagnostic that
+        # dumps the row is one careless future field away from printing it —
+        # the same reasoning that produced _label()/_uuid_label() after CodeQL
+        # flagged this module. The shape is what a red run needs anyway.
+        f"{sorted(row)}"
     )
     assert str(_uuid.UUID(hex=str(decision_id))) == str(decision_id), (
         f"{branch}: decision_id {decision_id!r} is not a canonical UUID"
@@ -291,3 +299,11 @@ def assert_decision_identity(row: dict, *, branch: str) -> None:
         f"record reached the rail; an unlabelled timestamp claims the first "
         f"while possibly being the second"
     )
+    if expect_source is not None:
+        assert source == expect_source, (
+            f"{branch}: decided_at_source is {source!r}, expected "
+            f"{expect_source!r}. A record journalled at the decision and one "
+            f"stamped when it reached the rail describe different facts, and a "
+            f"row that reports the wrong one is telling a reader the deferral "
+            f"was something it was not"
+        )
