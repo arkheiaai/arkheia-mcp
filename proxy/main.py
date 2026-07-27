@@ -229,9 +229,43 @@ async def lifespan(app: FastAPI):
     # site so the tamper-evident chain is actually validated on boot rather than
     # only ever computed on write. Fail-open — an integrity check must never
     # block startup (consistent with the audit pipeline's non-blocking design).
+    #
+    # POSTURE ON A DETECTED BREAK (Codex adversarial review of PR #37,
+    # 2026-07-27) — LOUDLY DEGRADED, not fail-closed. Startup used to detect the
+    # break, log one WARNING, and continue with every downstream surface still
+    # reporting "ok": we noticed and did nothing, which is the worst of both
+    # worlds. The two candidate postures:
+    #
+    #   FAIL CLOSED (refuse to start) is right for BINARY INTEGRITY above,
+    #     because a tampered detection engine is TRUSTED — it produces false
+    #     LOW verdicts that every downstream receipt inherits. Wrong here: the
+    #     audit LOG is downstream evidence, not an input to any live verdict,
+    #     and the log is append-only and world-appendable by anything sharing
+    #     the volume. Refusing to boot on a corrupt chain would hand an attacker
+    #     a ONE-APPEND denial of the entire detection service — write `null`
+    #     into the log, the proxy never starts again, and there is no detection
+    #     at all. That trades silent audit loss for total loss.
+    #
+    #   LOUDLY DEGRADED (chosen): start, keep recording (a corrupt chain is
+    #     exactly when you most want new records landing), and make the state
+    #     impossible to mistake for healthy — app.state.audit_chain,
+    #     /admin/health reporting top-level "degraded" instead of "ok", and
+    #     AuditWriter re-emitting the signal from its writer loop for as long as
+    #     the condition persists rather than once at boot.
+    #
+    # "fail-open, but NEVER fail-silent": fail-open is the availability call,
+    # and the persistent operator-visible signal is the half that is not
+    # optional.
     try:
         chain = audit_writer.verify_chain()
         if not chain.get("ok", True):
+            audit_writer.mark_chain_degraded(
+                "CHAIN_VERIFY_FAILED",
+                f"startup verify_chain(): {len(chain.get('breaks', []))} break(s), "
+                f"{len(chain.get('gaps', []))} sequence gap(s), "
+                f"{chain.get('verified', 0)} record(s) verified"
+                + (f" ({chain['error']})" if chain.get("error") else ""),
+            )
             # "ok": False now covers three distinct causes (2026-07-27): a
             # genuine broken link (breaks non-empty), content that could not
             # be verified at all — e.g. every line unparseable, or the walk
@@ -254,7 +288,18 @@ async def lifespan(app: FastAPI):
                 chain.get("verified", 0),
             )
     except Exception as exc:  # fail-open: never block startup on the self-check
-        logger.warning("Audit hash-chain startup self-check skipped: %s", exc)
+        # Not "skipped" as if that were benign: the check that exists to prove
+        # the chain is intact did not run, so the chain is UNVERIFIED and that
+        # must be visible, not swallowed.
+        logger.error("Audit hash-chain startup self-check could not run: %s", exc)
+        audit_writer.mark_chain_degraded(
+            "CHAIN_UNVERIFIED",
+            f"the startup chain self-check could not run: {type(exc).__name__}: {exc}",
+        )
+
+    # Published continuously, not just logged once at boot: /admin/health reads
+    # this on every request and downgrades its top-level status when ok is False.
+    app.state.audit_chain = audit_writer.chain_status()
 
     # 4. Registry client (only if API key configured)
     registry_client = RegistryClient(
