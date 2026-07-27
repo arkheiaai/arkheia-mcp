@@ -35,7 +35,17 @@ Every trial is totalled against the baseline and lands in exactly one bucket.
                     summarised.
 
 An equivalent survivor is a defect in the MUTANT, not evidence about the suite:
-withdraw it, replace it, and say so.
+withdraw it, replace it, and say so. Three have been withdrawn so far and all
+three are named in the file at the point they used to sit (M38, M53, M16) — a
+withdrawal that is not visible where the mutant was is indistinguishable from a
+mutant quietly deleted because it survived.
+
+ROUND 2 added three areas — ``gate`` (the block is authorised by the
+profile-earned ``gate_action``, not by policy intent), and extensions to
+``receipts`` (the receipt status is DERIVED, never asserted) and ``headers``
+(the forward leg is an ALLOW-list). Two ``headers`` mutants became equivalent
+when ``REQUEST_OWNED_HEADERS`` was subsumed by the allow-list and were replaced
+in place rather than dropped.
 
 THE COUNTERFACTUAL, AND THE HONEST COMPLICATION IN IT
 -----------------------------------------------------
@@ -154,10 +164,20 @@ MUTANTS: list[Mutant] = [
            "    lowered = path.lower()", "    lowered = path", "rawpath"),
 
     # -- forward headers ----------------------------------------------------
-    Mutant("M16", "hop-by-hop headers are relayed on the FORWARD leg",
-           "        if lowered in HOP_BY_HOP_HEADERS:\n            continue\n"
-           "        if lowered in REQUEST_OWNED_HEADERS:",
-           "        if lowered in REQUEST_OWNED_HEADERS:", "headers"),
+    # M16 WITHDRAWN — EQUIVALENT SINCE THE ALLOW-LIST LANDED. It deleted the
+    # forward leg's hop-by-hop deny check, which no longer exists: a header is
+    # forwarded only if FORWARDABLE_HEADERS names it, and no hop-by-hop field
+    # does. There is nothing left to delete, so the fault cannot be planted and
+    # a survival would say nothing about the suite. Replaced by M16R (the same
+    # fault on the RESPONSE leg, where a relay-everything default is correct and
+    # the deny-set therefore still carries load) and by M67, which attacks the
+    # allow-list guard itself.
+    Mutant("M16R", "hop-by-hop headers are relayed on the RESPONSE leg",
+           "    for name, value in upstream_headers.multi_items():\n"
+           "        lowered = name.lower()\n"
+           "        if lowered in HOP_BY_HOP_HEADERS:\n            continue\n",
+           "    for name, value in upstream_headers.multi_items():\n"
+           "        lowered = name.lower()\n", "headers"),
     Mutant("M17", "proxy-authenticate is relayed to the provider",
            '    "proxy-authenticate",\n    "proxy-authorization",\n'
            '    "proxy-connection",\n',
@@ -166,9 +186,9 @@ MUTANTS: list[Mutant] = [
            '    "transfer-encoding",\n    "upgrade",\n', '    "transfer-encoding",\n',
            "headers"),
     Mutant("M19", "Connection-nominated headers are relayed past their hop",
-           "        if lowered in REQUEST_OWNED_HEADERS:\n            continue\n"
+           "        if lowered not in FORWARDABLE_HEADERS:\n            continue\n"
            "        if lowered in nominated:\n            continue\n",
-           "        if lowered in REQUEST_OWNED_HEADERS:\n            continue\n",
+           "        if lowered not in FORWARDABLE_HEADERS:\n            continue\n",
            "headers"),
     Mutant("M20", "duplicate credential headers are tolerated again",
            "            if seen_credentials[lowered] > 1:",
@@ -181,9 +201,13 @@ MUTANTS: list[Mutant] = [
            "    return [(k, v) for k, v in {\n"
            "        k2: v2 for k2, v2 in headers.items() if k2.lower() != 'host'\n"
            "    }.items()]\n    nominated = _nominated_hop_headers(headers)", "headers"),
-    Mutant("M23", "the caller's content-length is forwarded alongside httpx's",
-           'REQUEST_OWNED_HEADERS = frozenset({"host", "content-length"})',
-           'REQUEST_OWNED_HEADERS = frozenset({"host"})', "headers"),
+    # M23 REPLACED BY M70 — REQUEST_OWNED_HEADERS no longer exists. The
+    # allow-list subsumed it: `content-length` is not forwarded because nothing
+    # names it, not because a second constant forbids it. One decision site, so
+    # the equivalent fault is now "content-length becomes forwardable".
+    Mutant("M70", "the caller's content-length is forwarded alongside httpx's",
+           '    "idempotency-key",\n})',
+           '    "idempotency-key",\n    "content-length",\n})', "headers"),
 
     # -- response relay / framing ------------------------------------------
     Mutant("M24", "content-length is relayed over an httpx-decoded body",
@@ -244,18 +268,21 @@ MUTANTS: list[Mutant] = [
 
     # -- block / warn -------------------------------------------------------
     Mutant("M36", "block never fires",
-           "        if result.risk_level == \"HIGH\" and action == \"block\":",
+           "        if result.risk_level == \"HIGH\" and policy == \"block\" "
+           "and gate_authorises_block:",
            "        if False:", "enforce"),
     Mutant("M37", "block serves the flagged answer anyway",
            "            return _build_response(\n"
            "                json.dumps(payload).encode(\"utf-8\"), 200,\n"
            "                [(\"content-type\", \"application/json\")],\n"
-           "                _signal_headers(\"HIGH\", \"block\", result.detection_id),\n"
+           "                _signal_headers(\"HIGH\", \"block\", result.detection_id,\n"
+           "                                gate_action=gate_action, policy_action=policy),\n"
            "            )",
            "            return _build_response(\n"
            "                response_body, 200,\n"
            "                [(\"content-type\", \"application/json\")],\n"
-           "                _signal_headers(\"HIGH\", \"block\", result.detection_id),\n"
+           "                _signal_headers(\"HIGH\", \"block\", result.detection_id,\n"
+           "                                gate_action=gate_action, policy_action=policy),\n"
            "            )", "enforce"),
     # M38 WITHDRAWN — EQUIVALENT, and the equivalence is a fact about the code,
     # not a hole in the suite. Dropping the `risk_level == "HIGH"` conjunct
@@ -265,26 +292,31 @@ MUTANTS: list[Mutant] = [
     # survival would have said nothing about the tests. Replaced by M38R, which
     # attacks the binding rather than the conjunct.
     Mutant("M38R", "non-HIGH verdicts inherit the configured block policy",
-           "        else:\n            action = \"pass\"",
-           "        else:\n            action = getattr(detection_cfg, "
+           "        else:\n            policy = \"pass\"",
+           "        else:\n            policy = getattr(detection_cfg, "
            "\"high_risk_action\", \"pass\") if detection_cfg else \"pass\"",
            "enforce"),
     Mutant("M39", "warn re-prepends the banner that corrupts the payload",
            "            return _build_response(\n"
            "                response_body, status_code, relayed,\n"
-           "                _signal_headers(\"HIGH\", \"warn\", result.detection_id),\n"
+           "                _signal_headers(\"HIGH\", \"warn\", result.detection_id,\n"
+           "                                gate_action=gate_action, policy_action=policy),\n"
            "            )",
            "            return _build_response(\n"
            "                b\"[ARKHEIA WARNING: HIGH RISK DETECTED] \" + response_body,\n"
            "                status_code, relayed,\n"
-           "                _signal_headers(\"HIGH\", \"warn\", result.detection_id),\n"
+           "                _signal_headers(\"HIGH\", \"warn\", result.detection_id,\n"
+           "                                gate_action=gate_action, policy_action=policy),\n"
            "            )", "enforce"),
     Mutant("M40", "the risk header is hardcoded LOW on the pass path",
-           "            _signal_headers(result.risk_level, action, result.detection_id),",
-           "            _signal_headers(\"LOW\", action, result.detection_id),", "enforce"),
+           "            _signal_headers(result.risk_level, policy, result.detection_id,",
+           "            _signal_headers(\"LOW\", policy, result.detection_id,", "enforce"),
     Mutant("M41", "a block is no longer attributable to a detection id",
-           "                _signal_headers(\"HIGH\", \"block\", result.detection_id),",
-           "                _signal_headers(\"HIGH\", \"block\", None),", "enforce"),
+           "                _signal_headers(\"HIGH\", \"block\", result.detection_id,\n"
+           "                                gate_action=gate_action, policy_action=policy),",
+           "                _signal_headers(\"HIGH\", \"block\", None,\n"
+           "                                gate_action=gate_action, policy_action=policy),",
+           "enforce"),
     Mutant("M42", "the block stops saying what would clear it",
            '                "remedy": (\n                    "re-run the request, narrow '
            'the prompt to material the "\n                    "model can ground, or ask an '
@@ -292,8 +324,8 @@ MUTANTS: list[Mutant] = [
            'in the audit log"\n                ),',
            '                "remedy": "",', "enforce"),
     Mutant("M43", "the high-risk action falls back to block instead of warn",
-           'action = getattr(detection_cfg, "high_risk_action", "warn") if detection_cfg else "warn"',
-           'action = getattr(detection_cfg, "high_risk_action", "block") if detection_cfg else "block"',
+           'policy = getattr(detection_cfg, "high_risk_action", "warn") if detection_cfg else "warn"',
+           'policy = getattr(detection_cfg, "high_risk_action", "block") if detection_cfg else "block"',
            "enforce"),
 
     # -- receipts -----------------------------------------------------------
@@ -313,10 +345,10 @@ MUTANTS: list[Mutant] = [
            "                risk_level=\"HIGH\",\n                action_taken=\"block\",",
            "receipts"),
     Mutant("M48", "a refusal leaves no record",
-           "        await _emit(request, _audit_record(\n"
+           "        receipt = await _emit(request, _audit_record(\n"
            "            detection_id=detection_id,\n"
            "            risk_level=\"REFUSED\",",
-           "        await _noop(request, _audit_record(\n"
+           "        receipt = await _noop(request, _audit_record(\n"
            "            detection_id=detection_id,\n"
            "            risk_level=\"REFUSED\",", "receipts"),
     Mutant("M49", "prompt TEXT is written to the evidence file instead of a hash",
@@ -325,13 +357,9 @@ MUTANTS: list[Mutant] = [
     Mutant("M50", "a warn leaves no record",
            '                action_taken="warn",', '                action_taken="pass",',
            "receipts"),
-    Mutant("M51", "the receipt status overclaims: enqueued -> recorded",
-           '                "receipt": "enqueued",\n            }\n'
-           '            return _build_response(\n'
-           '                json.dumps(payload).encode("utf-8"), 200,',
-           '                "receipt": "recorded",\n            }\n'
-           '            return _build_response(\n'
-           '                json.dumps(payload).encode("utf-8"), 200,', "receipts"),
+    Mutant("M51", "the block re-asserts its receipt instead of deriving one",
+           '                "receipt": receipt,\n            }',
+           '                "receipt": "enqueued",\n            }', "receipts"),
     Mutant("M52", "the blocked surface is dropped from the record",
            "                path=request.url.path,\n"
            "                method=request.method,\n                prompt=prompt,\n"
@@ -340,6 +368,8 @@ MUTANTS: list[Mutant] = [
            "                profile_version=result.profile_version,\n"
            "                confidence=result.confidence,\n"
            "                features_triggered=list(result.features_triggered or []),\n"
+           "                gate_action=gate_action,\n"
+           "                policy_action=policy,\n"
            "            ))\n            payload = {",
            "                path=\"\",\n"
            "                method=request.method,\n                prompt=prompt,\n"
@@ -348,6 +378,8 @@ MUTANTS: list[Mutant] = [
            "                profile_version=result.profile_version,\n"
            "                confidence=result.confidence,\n"
            "                features_triggered=list(result.features_triggered or []),\n"
+           "                gate_action=gate_action,\n"
+           "                policy_action=policy,\n"
            "            ))\n            payload = {", "receipts"),
     # M53 WITHDRAWN — the guard is real but its trigger is not reachable
     # without patching the rail, so the mutant cannot be scored honestly.
@@ -360,9 +392,89 @@ MUTANTS: list[Mutant] = [
     Mutant("M53R", "the refusal record loses its deny code",
            '            deny_code=refusal.deny_code,', '            deny_code=None,',
            "receipts"),
-    Mutant("M54", "the caller's Host header is relayed to the provider",
-           'REQUEST_OWNED_HEADERS = frozenset({"host", "content-length"})',
-           'REQUEST_OWNED_HEADERS = frozenset({"content-length"})', "headers"),
+    # M54 REPLACED BY M71 — same reason as M23.
+    Mutant("M71", "the caller's Host header is relayed to the provider",
+           '    "idempotency-key",\n})',
+           '    "idempotency-key",\n    "host",\n})', "headers"),
+
+    # -- gate_action authorisation (round 2, P1) ---------------------------
+    Mutant("M55", "the block guard drops the gate conjunct (the exact P1 defect)",
+           "        if result.risk_level == \"HIGH\" and policy == \"block\" "
+           "and gate_authorises_block:",
+           "        if result.risk_level == \"HIGH\" and policy == \"block\":",
+           "gate"),
+    Mutant("M56", "any value that is not 'advise' authorises a hard block",
+           "        gate_authorises_block = gate_action == GATE_ACTION_BLOCK",
+           "        gate_authorises_block = gate_action != \"advise\"", "gate"),
+    Mutant("M57", "a result with no gate_action field is read as authorisation",
+           "        gate_action = getattr(result, \"gate_action\", None)",
+           "        gate_action = getattr(result, \"gate_action\", \"block\")", "gate"),
+    Mutant("M58", "the gate comparison is case-folded, so 'BLOCK' authorises",
+           "        gate_authorises_block = gate_action == GATE_ACTION_BLOCK",
+           "        gate_authorises_block = str(gate_action).lower() == GATE_ACTION_BLOCK",
+           "gate"),
+    Mutant("M59", "the authorising token widens to the advisory value",
+           'GATE_ACTION_BLOCK = "block"', 'GATE_ACTION_BLOCK = "advise"', "gate"),
+    Mutant("M60", "a downgraded block collapses to a silent pass",
+           "        if result.risk_level == \"HIGH\" and policy in (\"block\", \"warn\"):",
+           "        if result.risk_level == \"HIGH\" and policy == \"warn\":", "gate"),
+    Mutant("M61", "the gate signal is not surfaced to the caller",
+           '        "X-Arkheia-Gate-Action": gate_action,\n',
+           '        "X-Arkheia-Gate-Action": None,\n', "gate"),
+    Mutant("M62", "the policy intent is not surfaced, so a downgrade is invisible",
+           '        "X-Arkheia-Policy-Action": policy_action,\n',
+           '        "X-Arkheia-Policy-Action": None,\n', "gate"),
+    Mutant("M63", "the evidence row forgets which gate was in force",
+           '        "gate_action": gate_action,\n        "policy_action": policy_action,\n',
+           '        "gate_action": None,\n        "policy_action": None,\n', "gate"),
+
+    # -- receipt status derivation (round 2, P2) ---------------------------
+    Mutant("M64", "an absent audit rail is reported as an enqueued receipt",
+           "        return RECEIPT_NO_WRITER\n", "        return RECEIPT_ENQUEUED\n",
+           "receipts"),
+    Mutant("M65", "a write that raised is reported as enqueued",
+           "        return RECEIPT_WRITE_FAILED\n", "        return RECEIPT_ENQUEUED\n",
+           "receipts"),
+    Mutant("M66", "the refusal re-asserts its receipt instead of deriving one",
+           '            "receipt": receipt,\n        }',
+           '            "receipt": "enqueued",\n        }', "receipts"),
+    Mutant("M72", "the no-writer branch is never taken",
+           "    if audit is None:\n        logger.warning(",
+           "    if audit is None and False:\n        logger.warning(", "receipts"),
+
+    # -- forward-header allow-list (round 2, P2) ---------------------------
+    Mutant("M67", "the allow-list guard is removed: the default returns to FORWARD",
+           "        if lowered not in FORWARDABLE_HEADERS:\n            continue\n",
+           "", "headers"),
+    Mutant("M68", "cookie becomes forwardable",
+           '    "idempotency-key",\n})', '    "idempotency-key",\n    "cookie",\n})',
+           "headers"),
+    Mutant("M69", "the internal proxy-domain header becomes forwardable",
+           '    "idempotency-key",\n})',
+           '    "idempotency-key",\n    "x-arkheia-internal",\n})', "headers"),
+    Mutant("M73", "x-forwarded-for becomes forwardable",
+           '    "idempotency-key",\n})',
+           '    "idempotency-key",\n    "x-forwarded-for",\n})', "headers"),
+    Mutant("M74", "allow-list matching becomes case-sensitive (Content-Type is dropped)",
+           "    for name, value in headers.items():\n        lowered = name.lower()\n"
+           "        if lowered in SINGLE_VALUED_CREDENTIAL_HEADERS:",
+           "    for name, value in headers.items():\n        lowered = name\n"
+           "        if lowered in SINGLE_VALUED_CREDENTIAL_HEADERS:", "headers"),
+    Mutant("M75", "the credential-duplication refusal runs AFTER the allow-list",
+           "        if lowered in SINGLE_VALUED_CREDENTIAL_HEADERS:\n"
+           "            seen_credentials[lowered] = seen_credentials.get(lowered, 0) + 1\n"
+           "            if seen_credentials[lowered] > 1:\n"
+           "                raise InterceptionRefusal(\n"
+           "                    \"duplicate_credential_header\", header=lowered\n"
+           "                )\n"
+           "        if lowered not in FORWARDABLE_HEADERS:\n            continue\n",
+           "        if lowered not in FORWARDABLE_HEADERS:\n            continue\n"
+           "        if lowered in SINGLE_VALUED_CREDENTIAL_HEADERS:\n"
+           "            seen_credentials[lowered] = seen_credentials.get(lowered, 0) + 1\n"
+           "            if seen_credentials[lowered] > 1:\n"
+           "                raise InterceptionRefusal(\n"
+           "                    \"duplicate_credential_header\", header=lowered\n"
+           "                )\n", "headers"),
 ]
 
 
