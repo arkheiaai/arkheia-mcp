@@ -959,7 +959,9 @@ DISK_SINKS: dict[str, tuple[str, str]] = {
     ),
     "proxy/endpoints/admin.py:rollback_profile": (
         "NO_CALLER_DATA",
-        "copies a .bak of a profile we previously persisted back over the live profile",
+        "validates the live profile and .bak with ProfileValidator before atomically "
+        "replacing profile YAML; rollback decisions go through the audit rail, not "
+        "this disk sink",
     ),
     "proxy/crypto/profile_crypto.py:_save_cache": (
         "SECRET_BY_DESIGN",
