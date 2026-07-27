@@ -17,9 +17,10 @@ Hook for enterprise upgrade:
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import Enum
+from types import MappingProxyType
 
 
 class Permission(str, Enum):
@@ -29,20 +30,74 @@ class Permission(str, Enum):
     DEPLOY  = "deploy"    # push to production systems
 
 
-@dataclass
+@dataclass(frozen=True)
 class ToolPolicy:
+    """An immutable policy record.
+
+    IMMUTABILITY IS A SECURITY PROPERTY HERE, NOT A STYLE CHOICE.
+
+    ``check()`` returns the REGISTRY's own instance (``policy is
+    REGISTRY[name]``, pinned in mcp_server/tests/test_tool_registry_gate.py).
+    Sharing one instance with every caller is correct ONLY while that instance
+    cannot be written to. While this class was a plain ``@dataclass`` with a
+    ``list`` field, every gated tool body — ``check()`` is documented as "the
+    FIRST statement in every MCP tool body" — held a writable handle on the
+    gate's own decision data::
+
+        p = check("memory_store")          # local-only, READ+WRITE
+        p.network_egress = True            # wrote THROUGH to REGISTRY
+        p.permissions.append(Permission.DEPLOY)
+        check("memory_store")              # widened for EVERY caller, for the
+                                           # life of the process
+
+    Two distinct defences are required and both are load-bearing:
+
+    * ``frozen=True`` refuses attribute ASSIGNMENT (``p.network_egress = True``
+      raises ``FrozenInstanceError``).
+    * Every field must hold an IMMUTABLE VALUE. ``frozen=True`` protects the
+      binding, not the object bound: a ``list``/``dict``/``set`` field is still
+      mutable in place on a frozen dataclass, and ``permissions`` — the field
+      ``check()`` itself reads — was exactly that. ``__post_init__`` therefore
+      coerces it to a ``tuple``, so the guarantee holds however a caller
+      constructs a policy.
+
+    Any field added here must likewise hold an immutable value; that is enforced
+    by tests/test_tool_gate_floor.py INV-5, not left to review.
+    """
+
     name: str
-    permissions: list[Permission]
+    permissions: tuple[Permission, ...]
     description: str = ""
     network_egress: bool = True        # False = local-only (no outbound HTTP)
     requires_human_confirm: bool = False  # True = block until explicit approval
+
+    def __post_init__(self) -> None:
+        # Coerce rather than reject: policies are constructed with list literals
+        # throughout the repo and by anyone extending the allowlist, and a
+        # rejected construction would just push people back to a mutable field.
+        # `object.__setattr__` is the sanctioned way to write during __init__ of
+        # a frozen dataclass.
+        object.__setattr__(self, "permissions", tuple(self.permissions))
 
 
 # ---------------------------------------------------------------------------
 # The allowlist
 # ---------------------------------------------------------------------------
+#
+# `_REGISTRY` is the literal declaration; `REGISTRY` is the READ-ONLY view that
+# every importer sees. The public name must not be writable: `check()` is the
+# only place the allowlist is consulted, `assert_registry_covers()` runs ONCE at
+# startup and compares names only, so a write to the allowlist after startup —
+# adding an entry, or replacing a restrictive entry with a permissive one — would
+# never be re-checked by anything.
+#
+# This is a boundary against ACCIDENT and against escalation-as-an-implicit-
+# capability, not a sandbox: in-process Python has no hard boundary, and code
+# that deliberately reaches for `_REGISTRY` can still write it (that is how the
+# test suite installs synthetic policies). What it removes is the ability to
+# widen the live allowlist merely by holding something the gate handed you.
 
-REGISTRY: dict[str, ToolPolicy] = {
+_REGISTRY: dict[str, ToolPolicy] = {
     # ── Detection & audit (read-only) ────────────────────────────────────────
     "arkheia_verify": ToolPolicy(
         name="arkheia_verify",
@@ -103,6 +158,12 @@ REGISTRY: dict[str, ToolPolicy] = {
     ),
 }
 
+#: The allowlist as every importer sees it: a read-only view over `_REGISTRY`.
+#: Mutating attempts (`REGISTRY[k] = v`, `del REGISTRY[k]`) raise TypeError, and
+#: the mutating dict methods (clear/update/pop/popitem/setdefault) do not exist
+#: on it at all.
+REGISTRY: Mapping[str, ToolPolicy] = MappingProxyType(_REGISTRY)
+
 
 # ---------------------------------------------------------------------------
 # Policy gate
@@ -143,7 +204,11 @@ def check(tool_name: str, *, human_confirmed: bool = False) -> ToolPolicy:
                          passed deliberately (fail closed).
 
     Returns:
-        The ToolPolicy, if every policy rule allows the call.
+        The ToolPolicy, if every policy rule allows the call. This is the
+        registry's own instance, deliberately: ToolPolicy is frozen and all its
+        fields hold immutable values, so a caller cannot use the returned object
+        to alter what this gate decides next. Use ``dataclasses.replace()`` to
+        derive a variant — it produces an independent policy.
 
     Raises:
         PolicyViolation, with a distinct reason per deny branch:

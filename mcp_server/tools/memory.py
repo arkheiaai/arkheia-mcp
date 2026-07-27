@@ -10,6 +10,14 @@ Schema:
   relations    — rel_id, from_entity, relation_type, to_entity, created_at
 
 DB path: MEMORY_DB_PATH env var, default C:/arkheia-mcp/data/memory.db
+
+Every caller-supplied string field (entity name/type, observation content,
+relation endpoints/type) is passed through proxy.audit.redactor.redact()
+before it reaches sqlite -- the SAME redaction implementation the audit log
+uses, not a second one. See tests/test_audit_redactor_floor.py::DISK_SINKS
+for the sink's classification and tests/test_memory_store_does_not_persist_
+secrets_unredacted / test_memory_relate_does_not_persist_secrets_unredacted
+for the pinned regression coverage.
 """
 
 from __future__ import annotations
@@ -19,6 +27,8 @@ import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
+
+from proxy.audit.redactor import redact
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +89,14 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
         observations_added:  Number of new observations added this call
         total_observations:  Total observations stored for this entity
     """
+    # Every caller-supplied field is scrubbed through the shared redactor
+    # BEFORE it reaches sqlite -- this is the only redaction implementation in
+    # the repo (proxy/audit/redactor.py), reused rather than re-implemented.
+    # Redacting here (not just `observations`) also keeps the entity's lookup
+    # key consistent between the SELECT below and the INSERT that follows it.
+    name = redact(name)
+    entity_type = redact(entity_type)
+
     conn = _get_conn()
     try:
         _init_schema(conn)
@@ -110,7 +128,8 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
         }
 
         added = 0
-        for content in observations:
+        for raw_content in observations:
+            content = redact(raw_content)
             if content not in existing:
                 conn.execute(
                     "INSERT INTO observations (obs_id, entity_id, content, created_at) VALUES (?, ?, ?, ?)",
@@ -215,6 +234,11 @@ async def store_relation(from_entity: str, relation_type: str, to_entity: str) -
         relation_type: Relation label
         to_entity:     Target entity name
     """
+    # Scrub before the INSERT, same as store_entity above.
+    from_entity = redact(from_entity)
+    relation_type = redact(relation_type)
+    to_entity = redact(to_entity)
+
     conn = _get_conn()
     try:
         _init_schema(conn)

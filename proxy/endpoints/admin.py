@@ -687,7 +687,7 @@ async def health(request: Request, _: str = Depends(require_auth)):
     # up here too. Codex adversarial review of PR #37: startup detected a broken
     # chain, logged one line, and every operator surface still said "ok" — while
     # the writer silently dropped every subsequent record. Posture is loudly
-    # degraded rather than fail-closed (see proxy/main.py step 3 for why), which
+    # degraded rather than fail-closed (see proxy/main.py step 0 for why), which
     # only works if "degraded" is actually visible somewhere durable.
     writer = getattr(request.app.state, "audit_writer", None)
     if writer is not None and hasattr(writer, "chain_status"):
