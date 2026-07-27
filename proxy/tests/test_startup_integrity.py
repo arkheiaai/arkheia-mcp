@@ -126,6 +126,67 @@ def test_verify_integrity_distinguishes_verified_from_no_manifest(scan_root):
     assert ok.verified != absent.verified
 
 
+def test_verify_integrity_raises_on_empty_manifest(scan_root):
+    """
+    RED (Codex adversarial review, 2026-07-27): an EMPTY manifest must NOT verify.
+
+    ``verify_integrity`` used to loop ``for module_name, expected_hash in
+    manifest.items()`` and, when the manifest existed but declared zero modules,
+    the loop body never ran -- so no mismatch was ever found, and the function
+    fell through to the VERIFIED return with ``modules_checked=0``. That is the
+    `all([]) is True` class of bug: iterate nothing, conclude success. It is a
+    DIFFERENT state from ``UNVERIFIED_NO_MANIFEST`` (no manifest at all, handled
+    correctly above) -- here the manifest file EXISTS, so the artifact is claiming
+    to be a built, integrity-checked release, and that claim is empty. Per this
+    module's own ruling on corrupt manifests ("the manifest ships inside the
+    artifact; if it exists and cannot be read... the engine cannot be trusted"),
+    an empty manifest is EVIDENCE, not absence, and must raise TamperDetected
+    exactly like a corrupt or mismatched one -- never silently read as verified.
+    """
+    mod_dir = scan_root / "detection"
+    mod_dir.mkdir(exist_ok=True)
+    (mod_dir / MANIFEST_FILE).write_text("{}")
+
+    with pytest.raises(TamperDetected, match="[Ee]mpty"):
+        verify_integrity(mod_dir)
+
+
+def test_verify_integrity_raises_when_the_glob_finds_nothing_to_manifest(scan_root):
+    """
+    RED, sibling framing: an empty manifest PRODUCED BY THE BUILD (every entry
+    filtered out by ``generate_manifest``'s ``*.so``/``*.pyd`` glob matching zero
+    files) must fail the same way as a hand-written ``{}}``. This is the
+    "all-entries-filtered-out" shape of the same defect: the collection feeding
+    the manifest was empty, not the JSON text.
+    """
+    mod_dir = scan_root / "detection"
+    mod_dir.mkdir(exist_ok=True)
+    # No .so/.pyd files placed here -- generate_manifest's glob matches nothing.
+    manifest = generate_manifest(mod_dir, mod_dir / MANIFEST_FILE)
+    assert manifest == {}, "test setup: expected the glob to match zero files"
+
+    with pytest.raises(TamperDetected, match="[Ee]mpty"):
+        verify_integrity(mod_dir)
+
+
+def test_empty_manifest_is_not_the_same_state_as_no_manifest(scan_root):
+    """
+    Positive control tying the two together: EMPTY and ABSENT must not collapse
+    into each other any more than VERIFIED and ABSENT did (the original Codex
+    finding 4). Absent -> fail open (UNVERIFIED_NO_MANIFEST). Empty -> fail
+    closed (TamperDetected). Confusing the two would silently re-open this hole.
+    """
+    absent_dir = scan_root / "detection"
+    absent_dir.mkdir(exist_ok=True)
+    absent = verify_integrity(absent_dir)
+    assert absent.status == IntegrityStatus.UNVERIFIED_NO_MANIFEST
+    assert absent.verified is False
+
+    (absent_dir / MANIFEST_FILE).write_text("{}")
+    with pytest.raises(TamperDetected):
+        verify_integrity(absent_dir)
+
+
 def test_verify_integrity_raises_on_each_positive_finding(scan_root):
     """Modified module, missing module and corrupt manifest are all EVIDENCE."""
     mod_dir = _write_verified_module(scan_root)
@@ -202,6 +263,27 @@ def test_startup_refuses_when_a_manifest_module_is_missing(scan_root, client_fac
     with pytest.raises(TamperDetected, match="Missing module"):
         with client:
             pytest.fail("startup completed with a manifest module missing from disk")
+
+
+def test_startup_refuses_on_an_empty_manifest(scan_root, client_factory):
+    """
+    RED (Codex adversarial review, 2026-07-27): through the REAL lifespan, an
+    EMPTY manifest must refuse to start exactly like a corrupt one. Before the
+    fix, ``verify_all()`` reported ``VERIFIED`` for a directory whose manifest
+    declared zero modules, ``all(r.verified for r in integrity_reports)`` was
+    vacuously True, and the proxy served traffic having verified nothing.
+    """
+    mod_dir = scan_root / "detection"
+    mod_dir.mkdir(exist_ok=True)
+    (mod_dir / MANIFEST_FILE).write_text("{}")
+
+    client = client_factory()
+    with pytest.raises(TamperDetected, match="[Ee]mpty"):
+        with client:
+            pytest.fail(
+                "the proxy served traffic with an EMPTY integrity manifest: "
+                "0 modules checked is not the same as 0 modules tampered"
+            )
 
 
 # ---------------------------------------------------------------------------

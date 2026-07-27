@@ -32,6 +32,15 @@ cannot be read, either the integrity record itself was altered or the artifact i
 damaged, and either way the engine cannot be trusted. The cost of this ruling is
 named rather than hidden: a bad build that emits a malformed manifest will refuse
 to start instead of starting unverified.
+
+RULING (adopted 2026-07-27, Codex adversarial review): the same applies to an
+EMPTY manifest -- one that parses fine but lists zero modules. The 2026-07-26 fix
+above named "no manifest" vs "verified" as distinct states, but left a third
+collapse in place: ``for module_name, expected_hash in manifest.items()`` over an
+empty dict never executes, so the function fell through to VERIFIED with
+``modules_checked=0``. Zero modules checked is not the same as zero modules
+tampered. An empty manifest is treated exactly like a corrupt one: EVIDENCE, not
+absence, so it raises TamperDetected rather than reading as a pass.
 """
 from __future__ import annotations
 
@@ -135,6 +144,25 @@ def verify_integrity(module_dir: Path) -> IntegrityReport:
     except (json.JSONDecodeError, OSError) as exc:
         logger.error("Failed to read integrity manifest: %s", exc)
         raise TamperDetected(f"Corrupt integrity manifest: {exc}") from exc
+
+    if not manifest:
+        # An EMPTY manifest is not the same state as NO manifest. Absence (handled
+        # above) means "not built with integrity checking at all" -- there is no
+        # claim being made, so it is fail-open. An empty manifest means the
+        # opposite: MANIFEST_FILE exists, so this directory is asserting it is a
+        # checked build artifact, and that assertion lists zero modules. Left
+        # unguarded, `for module_name, expected_hash in manifest.items()` never
+        # executes and falls through to the VERIFIED return below with
+        # modules_checked=0 -- the classic `all([]) is True` vacuous pass: iterate
+        # nothing, conclude success. Per this module's own ruling on corrupt
+        # manifests, an empty one ships inside the artifact too, and either the
+        # build emitted a truncated manifest or one was tampered down to nothing.
+        # Either way it is EVIDENCE, not absence, and must refuse to start exactly
+        # like a corrupt or mismatched manifest -- never read as verified.
+        raise TamperDetected(
+            f"Empty integrity manifest: {manifest_path} exists but lists zero "
+            f"modules. A manifest with nothing in it verifies nothing."
+        )
 
     for module_name, expected_hash in manifest.items():
         module_path = module_dir / module_name

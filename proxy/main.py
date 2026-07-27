@@ -232,10 +232,16 @@ async def lifespan(app: FastAPI):
     try:
         chain = audit_writer.verify_chain()
         if not chain.get("ok", True):
+            # "ok": False now covers two distinct causes (2026-07-27): a genuine
+            # broken link (breaks non-empty), or content that could not be
+            # verified at all — e.g. every line unparseable, or the walk raised
+            # (chain["error"] set, breaks empty). Both are surfaced here rather
+            # than the second one silently reading as "0 breaks == fine".
             logger.warning(
                 "Audit hash-chain integrity check FAILED on startup: "
-                "%d record(s) verified, %d break(s) detected — possible tampering",
+                "%d record(s) verified, %d break(s) detected%s — possible tampering",
                 chain.get("verified", 0), len(chain.get("breaks", [])),
+                f" ({chain['error']})" if chain.get("error") else "",
             )
         else:
             logger.info(
