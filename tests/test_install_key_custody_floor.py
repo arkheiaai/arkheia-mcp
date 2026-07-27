@@ -192,13 +192,14 @@ def test_install_sh_dry_run_writes_nothing_and_does_not_echo_key(tmp_path: Path)
     assert "Dry run" in result.stdout
 
 
-def test_install_sh_configures_clients_without_persisting_api_key(tmp_path: Path):
+def test_install_sh_does_not_modify_client_configs_or_persist_api_key(tmp_path: Path):
     home = tmp_path / "home"
     home.mkdir()
     claude_code_dir = home / ".claude"
     claude_code_dir.mkdir()
     claude_settings = claude_code_dir / "settings.json"
-    claude_settings.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+    original_code_settings = '{"mcpServers": {}}\n'
+    claude_settings.write_text(original_code_settings, encoding="utf-8")
 
     first = _run_install(
         home,
@@ -211,16 +212,10 @@ def test_install_sh_configures_clients_without_persisting_api_key(tmp_path: Path
 
     assert PRIMARY_VALUE not in _combined(first)
     assert not (home / ".arkheia" / "config.json").exists()
-
-    desktop = json.loads(desktop_config.read_text(encoding="utf-8"))
-    code = json.loads(claude_settings.read_text(encoding="utf-8"))
-    assert desktop["mcpServers"]["arkheia"] == {"command": "npx", "args": ["@arkheia/mcp-server"]}
-    assert code["mcpServers"]["arkheia"] == {"command": "npx", "args": ["@arkheia/mcp-server"]}
-    assert PRIMARY_VALUE not in desktop_config.read_text(encoding="utf-8")
-    assert PRIMARY_VALUE not in claude_settings.read_text(encoding="utf-8")
+    assert not desktop_config.exists()
+    assert claude_settings.read_text(encoding="utf-8") == original_code_settings
     assert not (claude_code_dir / "CLAUDE.md").exists()
 
-    first_desktop = desktop_config.read_text(encoding="utf-8")
     first_code = claude_settings.read_text(encoding="utf-8")
 
     second = _run_install(
@@ -232,11 +227,11 @@ def test_install_sh_configures_clients_without_persisting_api_key(tmp_path: Path
 
     assert PRIMARY_VALUE not in _combined(second)
     assert not (home / ".arkheia" / "config.json").exists()
-    assert desktop_config.read_text(encoding="utf-8") == first_desktop
+    assert not desktop_config.exists()
     assert claude_settings.read_text(encoding="utf-8") == first_code
 
 
-def test_install_sh_rolls_back_claude_config_after_write_failure(tmp_path: Path):
+def test_install_sh_ignores_config_write_failure_injection_when_no_config_write_occurs(tmp_path: Path):
     home = tmp_path / "home"
     home.mkdir()
     desktop_config = _claude_desktop_config(home)
@@ -260,4 +255,4 @@ def test_install_sh_rolls_back_claude_config_after_write_failure(tmp_path: Path)
 
     assert PRIMARY_VALUE not in _combined(result)
     assert json.loads(desktop_config.read_text(encoding="utf-8")) == original
-    assert "Could not configure" in _combined(result)
+    assert "not modified" in _combined(result)
