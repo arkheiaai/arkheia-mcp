@@ -98,6 +98,7 @@ def _fake_install_path(tmp_path: Path) -> Path:
 
     (bin_dir / "npx").write_text(
         "#!/bin/sh\n"
+        "if [ -n \"${ARKHEIA_API_KEY+x}\" ]; then echo 'leaked ARKHEIA_API_KEY to npx' >&2; exit 92; fi\n"
         "printf '1.3.0\\n'\n"
         "exit 0\n",
         encoding="utf-8",
@@ -105,6 +106,7 @@ def _fake_install_path(tmp_path: Path) -> Path:
 
     (bin_dir / "curl").write_text(
         "#!/bin/sh\n"
+        "if [ -n \"${ARKHEIA_API_KEY+x}\" ]; then echo 'leaked ARKHEIA_API_KEY to curl' >&2; exit 92; fi\n"
         "case \"$*\" in\n"
         "  */v1/provision*) printf '{\"api_key\":\"%s\"}\\n201' \"${ARKHEIA_FAKE_PROVISION_KEY:-custody_fixture_provisioned}\" ;;\n"
         "  *) printf '200' ;;\n"
@@ -113,7 +115,9 @@ def _fake_install_path(tmp_path: Path) -> Path:
     )
 
     (bin_dir / "python3").write_text(
-        f"#!/bin/sh\nexec {shlex.quote(python_cmd)} \"$@\"\n",
+        "#!/bin/sh\n"
+        "if [ -n \"${ARKHEIA_API_KEY+x}\" ]; then echo 'leaked ARKHEIA_API_KEY to python' >&2; exit 92; fi\n"
+        f"exec {shlex.quote(python_cmd)} \"$@\"\n",
         encoding="utf-8",
     )
 
@@ -240,10 +244,9 @@ def test_install_sh_dry_run_writes_nothing_and_does_not_echo_key(tmp_path: Path)
     result = _run_install(
         home,
         tmp_path,
-        "--api-key",
-        PRIMARY_VALUE,
         "--persist-api-key",
         "--dry-run",
+        env_extra={"ARKHEIA_API_KEY": PRIMARY_VALUE},
     )
 
     assert PRIMARY_VALUE not in _combined(result)
@@ -260,7 +263,12 @@ def test_install_sh_persist_opt_in_private_modes_secret_free_configs_and_idempot
     claude_settings = claude_code_dir / "settings.json"
     claude_settings.write_text('{"mcpServers": {}}\n', encoding="utf-8")
 
-    first = _run_install(home, tmp_path, "--api-key", PRIMARY_VALUE, "--persist-api-key")
+    first = _run_install(
+        home,
+        tmp_path,
+        "--persist-api-key",
+        env_extra={"ARKHEIA_API_KEY": PRIMARY_VALUE},
+    )
 
     config_file = home / ".arkheia" / "config.json"
     desktop_config = _claude_desktop_config(home)
@@ -282,7 +290,12 @@ def test_install_sh_persist_opt_in_private_modes_secret_free_configs_and_idempot
     first_desktop = desktop_config.read_text(encoding="utf-8")
     first_code = claude_settings.read_text(encoding="utf-8")
 
-    second = _run_install(home, tmp_path, "--api-key", PRIMARY_VALUE, "--persist-api-key")
+    second = _run_install(
+        home,
+        tmp_path,
+        "--persist-api-key",
+        env_extra={"ARKHEIA_API_KEY": PRIMARY_VALUE},
+    )
 
     assert PRIMARY_VALUE not in _combined(second)
     assert config_file.read_text(encoding="utf-8") == first_config
@@ -305,10 +318,11 @@ def test_install_sh_rolls_back_claude_config_after_write_failure(tmp_path: Path)
     result = _run_install(
         home,
         tmp_path,
-        "--api-key",
-        PRIMARY_VALUE,
         "--no-persist-api-key",
-        env_extra={"ARKHEIA_INSTALL_TEST_FAIL_AFTER_WRITE": str(desktop_config)},
+        env_extra={
+            "ARKHEIA_API_KEY": PRIMARY_VALUE,
+            "ARKHEIA_INSTALL_TEST_FAIL_AFTER_WRITE": str(desktop_config),
+        },
     )
 
     assert PRIMARY_VALUE not in _combined(result)

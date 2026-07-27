@@ -4,7 +4,7 @@
  * Does NOT auto-install Python dependencies (that happens on first run).
  */
 
-const { execSync } = require("child_process");
+const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
@@ -87,6 +87,12 @@ function chmodIfPossible(target, mode) {
       throw err;
     }
   }
+}
+
+function childEnvWithoutApiKey(env = process.env) {
+  const childEnv = { ...env };
+  delete childEnv.ARKHEIA_API_KEY;
+  return childEnv;
 }
 
 function ensurePrivateArkheiaDir(arkheiaDir, { dryRun = false } = {}) {
@@ -250,9 +256,11 @@ function checkPython() {
   const candidates = ["python3", "python"];
   for (const cmd of candidates) {
     try {
-      const version = execSync(`${cmd} --version 2>&1`, {
+      const version = execFileSync(cmd, ["--version"], {
         encoding: "utf-8",
         timeout: 5000,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: childEnvWithoutApiKey(),
       }).trim();
       const match = version.match(/Python (\d+)\.(\d+)/);
       if (!match) continue;

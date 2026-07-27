@@ -4,7 +4,7 @@
 #
 # Usage:
 #   curl -fsSL https://arkheia.ai/install-mcp | bash
-#   curl -fsSL https://arkheia.ai/install-mcp | bash -s -- --api-key <arkheia-api-key>
+#   ARKHEIA_API_KEY=<arkheia-api-key> curl -fsSL https://arkheia.ai/install-mcp | bash
 #
 # What it does:
 #   1. Checks prerequisites (Node.js 18+, Python 3.10+)
@@ -20,6 +20,9 @@ set -euo pipefail
 
 HOSTED_URL="${ARKHEIA_HOSTED_URL:-https://arkheia-proxy-production.up.railway.app}"
 API_KEY="${ARKHEIA_API_KEY:-}"
+# Keep the installer-local copy, but do not leak it to prerequisite, helper, or
+# package-install subprocesses that do not need the runtime API key.
+unset ARKHEIA_API_KEY
 EMAIL=""
 DRY_RUN=0
 PERSIST_API_KEY="${ARKHEIA_PERSIST_API_KEY:-}"
@@ -65,9 +68,7 @@ require_value() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --api-key)
-            require_value "$1" "${2:-}"
-            API_KEY="$2"
-            shift 2
+            fail "--api-key KEY is not supported because command-line arguments can leak. Set ARKHEIA_API_KEY in the environment instead."
             ;;
         --email)
             require_value "$1" "${2:-}"
@@ -92,7 +93,6 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: curl -fsSL https://arkheia.ai/install-mcp | bash"
             echo ""
             echo "Options (pass via: bash -s -- --option value):"
-            echo "  --api-key KEY          Use an existing API key (skip provisioning)"
             echo "  --email EMAIL          Email for free-tier key provisioning"
             echo "  --persist-api-key      Save ARKHEIA_API_KEY to ~/.arkheia/config.json"
             echo "  --no-persist-api-key   Do not save ARKHEIA_API_KEY"
@@ -162,7 +162,7 @@ write_arkheia_api_key_config() {
         return 0
     fi
 
-    "$PYTHON_CMD" - "$config_file" "$hosted_url" 3<<<"$api_key" <<'PY'
+    env -u ARKHEIA_API_KEY "$PYTHON_CMD" - "$config_file" "$hosted_url" 3<<<"$api_key" <<'PY'
 import json
 import os
 import stat
@@ -245,7 +245,7 @@ verify_arkheia_api_key() {
     local api_key="$1"
     local hosted_url="$2"
 
-    "$PYTHON_CMD" - "$hosted_url" 3<<<"$api_key" <<'PY'
+    env -u ARKHEIA_API_KEY "$PYTHON_CMD" - "$hosted_url" 3<<<"$api_key" <<'PY'
 import json
 import os
 import sys
@@ -413,7 +413,7 @@ if [ -z "$API_KEY" ]; then
 
         case "$HTTP_CODE" in
             201)
-                API_KEY=$("$PYTHON_CMD" -c 'import json, sys; print(json.load(sys.stdin).get("api_key", ""))' <<<"$BODY")
+                API_KEY=$(env -u ARKHEIA_API_KEY "$PYTHON_CMD" -c 'import json, sys; print(json.load(sys.stdin).get("api_key", ""))' <<<"$BODY")
                 if [ -z "$API_KEY" ]; then
                     fail "Provisioning succeeded but could not parse API key from response."
                 fi
@@ -499,7 +499,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     info "Dry run: would install @arkheia/mcp-server via npx."
 else
     info "Installing @arkheia/mcp-server..."
-    npx @arkheia/mcp-server --version 2>/dev/null || true
+    env -u ARKHEIA_API_KEY npx @arkheia/mcp-server --version 2>/dev/null || true
     ok "Package installed."
 fi
 
