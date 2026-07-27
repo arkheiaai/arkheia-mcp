@@ -114,6 +114,7 @@ You should see a detection result with `risk_level: HIGH` and a confidence score
 |----------|----------|---------|-------------|
 | `ARKHEIA_API_KEY` | Yes | — | Your API key (`ak_live_...`). Get one free at Step 1. |
 | `ARKHEIA_PROXY_URL` | No | `http://localhost:8098` | Enterprise proxy URL (if running on-prem). |
+| `ARKHEIA_PROXY_AUTH_TOKEN` | No | — | Proxy JWT session token for protected local endpoints such as `arkheia_audit_log`; distinct from `ARKHEIA_API_KEY`. |
 | `ARKHEIA_HOSTED_URL` | No | Railway production URL | Hosted detection API. |
 | `XAI_API_KEY` | No | — | Required for `run_grok` tool. |
 | `GOOGLE_API_KEY` | No | — | Required for `run_gemini` tool. |

@@ -45,12 +45,14 @@ logger = logging.getLogger(__name__)
 ARKHEIA_PROXY_URL = os.environ.get("ARKHEIA_PROXY_URL", "http://localhost:8098")
 ARKHEIA_HOSTED_URL = os.environ.get("ARKHEIA_HOSTED_URL", "https://arkheia-proxy-production.up.railway.app")
 ARKHEIA_API_KEY = os.environ.get("ARKHEIA_API_KEY")
+ARKHEIA_PROXY_AUTH_TOKEN = os.environ.get("ARKHEIA_PROXY_AUTH_TOKEN")
 
 mcp   = FastMCP("arkheia-trust")
 proxy = ProxyClient(
     base_url=ARKHEIA_PROXY_URL,
     hosted_url=ARKHEIA_HOSTED_URL,
     api_key=ARKHEIA_API_KEY,
+    proxy_auth_token=ARKHEIA_PROXY_AUTH_TOKEN,
 )
 
 
