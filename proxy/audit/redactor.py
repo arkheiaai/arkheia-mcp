@@ -40,6 +40,29 @@ DESIGN CONTRACT — read before adding or widening a pattern
    ``_is_opaque_credential``: entropy AND credential context, never entropy
    alone. Entropy alone eats every sha, UUID and base64 payload in the log.
 
+5. **An ENCODING must never be the thing that protects a value, and a BENIGN
+   token must never switch a control off.** Both are the same mistake — a
+   detail of presentation deciding a security outcome — and both leaked:
+
+   * Decoding was one pass per codec over two codecs. Encodings COMPOSE, so
+     ``b64(b64(k))``, ``b64(pct(k))`` and ``pct(b64(k))`` each restored nothing
+     to scan and reached disk intact, while their single-wrapped forms were
+     caught. Hex and base32 were not decoded at all. ``_decoded_views`` is now
+     BREADTH-FIRST over all four codecs to ``_MAX_DECODE_DEPTH``, feeding every
+     decoded view back through every decoder.
+   * Decoding was TOKEN-LOCAL inside one ``\\n``-split line, so a MIME-wrapped
+     body was redacted only in the fragment carrying the credential's prefix —
+     2 of 3 fragments of a wrapped key reached disk and concatenated back into
+     it. Runs of wholly-encoded lines are now REJOINED before scanning.
+   * A data URI anywhere on a line exempted the WHOLE LINE from both fallback
+     passes, so a credential written beside a screenshot leaked. Only the
+     payload SPAN is masked now.
+
+   The safety argument is unchanged in shape: a decoded view may only *trigger*
+   redaction, never *widen* what counts as a secret. ``_plausible_text`` is the
+   gate that keeps this from eating the log — a sha256 digest decodes to
+   high-entropy BINARY under hex, base32 and base64 alike and stops there.
+
 WHAT IS NOT HANDLED — named, so absence is not mistaken for coverage
 --------------------------------------------------------------------
   * **Quoted-printable.** Implemented, then removed: it could not be shown to
@@ -55,6 +78,21 @@ WHAT IS NOT HANDLED — named, so absence is not mistaken for coverage
   * **Compression wrappers** (gzip/zlib inside base64) are not decompressed.
   * **Split-across-records** secrets: redaction is per string value, so a
     credential assembled from two fields is invisible to it.
+  * **Encodings past ``_MAX_DECODE_DEPTH``**, and encodings whose decoded form
+    is not plausibly text (a credential wrapped so that it decodes to binary at
+    an intermediate step). Bounded deliberately: an unbounded decode over
+    caller-supplied strings is a decode bomb in the writer loop.
+  * **Prefixed credentials in a case they are never issued in** — ``GHP_…``
+    uppercase is not redacted. The provider prefixes are lowercase by
+    specification; matching them case-insensitively buys nothing real and
+    widens over-redaction.
+  * **A URI password beginning digits-then-delimiter** (``//u:8080/x@h``) is
+    skipped by the ``conn_password`` guard that stops it eating a PORT. A
+    password of that exact shape is a trade taken knowingly.
+  * **A non-str, non-container value** (``bytes``, ``set``) is not scrubbed —
+    but it also cannot be serialised, so the writer's ``except`` DROPS the whole
+    record rather than leaking it. Verified: no leak, but a silent audit loss.
+    Tracked separately; it is a durability defect, not a redaction one.
 
 Hook for enterprise upgrade: swap the pattern tables for a runtime-loaded
 policy (e.g. from HashiCorp Vault, AWS Secrets Manager) and add
@@ -145,10 +183,29 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
 
 _LABELLED_SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
     # URI with inline password: scheme://user:PASSWORD@host
+    #
+    # The secret class is `[^\s]`, NOT `[^\s:/?#@]`. The first cut excluded
+    # every URI-reserved character from the password, which meant it could not
+    # see its own subject: a generated DB password routinely contains `/` or
+    # `+`, and `postgresql://svc:aB3/xY9z@db` matched NOTHING — not this rule
+    # (the `/` broke the class) and not the opaque-entropy rule either, because
+    # `_CREDENTIAL_CONTEXT` has no URI/DSN term so a bare DSN line carries no
+    # credential context at all. The password reached disk in full.
+    # The userinfo class is `*` for the same reason: `redis://:pw@host` is the
+    # ordinary password-only form and `+` required a username that isn't there.
+    #
+    # Widening the secret class this far needs one guard, or it eats a PORT:
+    # in `http://localhost:8000/reports/user@example.com` the `:` is a port
+    # delimiter and the `@` is in the path. The negative lookahead rejects a
+    # secret that STARTS as digits-then-URI-delimiter, which is exactly the
+    # port shape and is not a shape a password takes. `post` additionally
+    # requires a host-looking authority terminated the way a URI terminates,
+    # so the non-greedy body cannot run off across the line.
     ("conn_password",
-     re.compile(r'(?P<pre>\b[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/?#@]+:)'
-                r'(?P<secret>[^\s:/?#@]{6,})'
-                r'(?P<post>@)')),
+     re.compile(r'(?P<pre>\b[a-zA-Z][a-zA-Z0-9+.\-]*://[^\s:/?#@]*:)'
+                r'(?P<secret>(?!\d{1,5}[/?#@])[^\s]{6,256}?)'
+                r'(?P<post>@[A-Za-z0-9._\-\[\]]{1,255}(?::\d{1,5})?'
+                r'(?=[\s/?#\'",\\]|$))')),
     # Authorization: Bearer <opaque token>
     ("bearer",
      re.compile(r'(?P<pre>(?i:bearer)\s+)'
@@ -187,49 +244,104 @@ def _placeholder(secret: str) -> str:
 # characters and part of an AWS secret body.
 _TOKEN = re.compile(r'[^\s=&?,;:\'"<>\[\]{}()|\\]+')
 
-_B64ISH = re.compile(r'^[A-Za-z0-9+/_-]{20,}={0,2}$')
+_B64ISH = re.compile(r'^[A-Za-z0-9+/_-]{16,}={0,2}$')
+_B32ISH = re.compile(r'^[A-Z2-7]{16,}={0,6}$')
+_HEXISH = re.compile(r'^[0-9a-fA-F]{16,}$')
 _PCT = re.compile(r'%[0-9A-Fa-f]{2}')
 
-
-def _percent_views(tok: str) -> list[str]:
-    """Percent-decoded views, iterated for double-encoding (`%252D`)."""
-    views, cur = [], tok
-    for _ in range(3):
-        if not _PCT.search(cur):
-            break
-        try:
-            nxt = urllib.parse.unquote(cur, errors="strict")
-        except Exception:
-            break
-        if nxt == cur:
-            break
-        views.append(nxt)
-        cur = nxt
-    return views
+#: How many times an encoding may be UNWRAPPED. One pass per codec was not
+#: enough: encodings COMPOSE, and a decoded view was never itself decoded, so
+#: `b64(b64(k))`, `b64(pct(k))` and `pct(b64(k))` each reached disk intact
+#: while their single-wrapped forms were caught.
+_MAX_DECODE_DEPTH = 3
+#: Bound on total decoded views per token, so a pathological input cannot turn
+#: the writer loop into a decode bomb.
+_MAX_DECODED_VIEWS = 24
+#: Below this, a token cannot carry a credential worth decoding.
+_MIN_DECODABLE = 16
 
 
-def _base64_views(tok: str) -> list[str]:
-    """Base64-decoded view, only when the result is plausibly text."""
+def _plausible_text(raw: bytes) -> str | None:
+    """
+    Decoded bytes as text, or None if they are not plausibly text.
+
+    Binary payloads (images, compressed blobs) are not credential carriers
+    worth scanning, and decoding them yields mojibake that could match by
+    accident. This gate is what keeps hex and base32 decoding from turning
+    every sha256 digest in the log into a redaction candidate: a digest
+    decodes to high-entropy BINARY and stops here.
+    """
+    if len(raw) < 12:
+        return None
+    printable = sum(1 for b in raw if 32 <= b < 127 or b in (9, 10, 13))
+    if printable / len(raw) < 0.9:
+        return None
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _percent_decode_once(tok: str) -> list[str]:
+    if not _PCT.search(tok):
+        return []
+    try:
+        out = urllib.parse.unquote(tok, errors="strict")
+    except Exception:
+        return []
+    return [out] if out != tok else []
+
+
+def _base64_decode_once(tok: str) -> list[str]:
+    """Base64 (standard and url-safe) decoded view, when it is plausibly text."""
     if not _B64ISH.match(tok):
         return []
+    out = []
     for decoder in (base64.b64decode, base64.urlsafe_b64decode):
         try:
             raw = decoder(tok + "=" * (-len(tok) % 4))
         except Exception:
             continue
-        if len(raw) < 12:
-            continue
-        printable = sum(1 for b in raw if 32 <= b < 127)
-        # Binary payloads (images, compressed blobs) are not credential
-        # carriers worth scanning, and decoding them yields mojibake that
-        # could match by accident.
-        if printable / len(raw) < 0.9:
-            continue
-        try:
-            return [raw.decode("utf-8")]
-        except UnicodeDecodeError:
-            continue
-    return []
+        text = _plausible_text(raw)
+        if text is not None and text != tok and text not in out:
+            out.append(text)
+    return out
+
+
+def _hex_decode_once(tok: str) -> list[str]:
+    """Hex is a transport encoding like any other; it was not decoded at all."""
+    if len(tok) % 2 or not _HEXISH.match(tok):
+        return []
+    try:
+        raw = bytes.fromhex(tok)
+    except ValueError:
+        return []
+    text = _plausible_text(raw)
+    return [text] if text is not None else []
+
+
+def _base32_decode_once(tok: str) -> list[str]:
+    if not _B32ISH.match(tok):
+        return []
+    try:
+        raw = base64.b32decode(tok + "=" * (-len(tok) % 8))
+    except Exception:
+        return []
+    text = _plausible_text(raw)
+    return [text] if text is not None else []
+
+
+_DECODERS = (
+    _percent_decode_once,
+    _base64_decode_once,
+    _hex_decode_once,
+    _base32_decode_once,
+)
+
+
+def _base64_views(tok: str) -> list[str]:
+    """Single-step base64 view — the exemption in `_is_opaque_credential`."""
+    return _base64_decode_once(tok)
 
 
 # QUOTED-PRINTABLE is NOT handled. It was implemented, then removed, because it
@@ -253,7 +365,34 @@ def _contains_secret(text: str) -> bool:
 
 
 def _decoded_views(tok: str) -> list[str]:
-    return _percent_views(tok) + _base64_views(tok)
+    """
+    Every view of `tok` reachable by unwrapping transport encodings.
+
+    Breadth-first over the codecs, so COMPOSED and REPEATED encodings unwrap:
+    a decoded view is fed back through every decoder, not just the one that
+    produced it. Depth- and count-bounded, and cycle-guarded by `seen`.
+    """
+    views: list[str] = []
+    seen = {tok}
+    frontier = [tok]
+    for _ in range(_MAX_DECODE_DEPTH):
+        nxt: list[str] = []
+        for cur in frontier:
+            if len(cur) < _MIN_DECODABLE:
+                continue
+            for decoder in _DECODERS:
+                for view in decoder(cur):
+                    if view in seen:
+                        continue
+                    seen.add(view)
+                    views.append(view)
+                    nxt.append(view)
+                    if len(views) >= _MAX_DECODED_VIEWS:
+                        return views
+        if not nxt:
+            break
+        frontier = nxt
+    return views
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +468,66 @@ def _is_opaque_credential(tok: str) -> bool:
     return _shannon(tok) >= 3.5
 
 
+# ---------------------------------------------------------------------------
+# DATA URIs — exempt the PAYLOAD, never the LINE.
+#
+# A data URI's base64 payload is audit content, and it is the shape most at
+# risk from the entropy rule, so it must be exempt. The first cut exempted the
+# whole LINE that contained one, which is a blast radius wildly larger than the
+# thing being protected: every other token on that line lost the encoding pass
+# AND the opaque-entropy pass, so a credential written beside a screenshot
+# reached disk. One legitimate token must not switch off a control for
+# everything next to it.
+#
+# The payload spans are therefore masked out, the line is processed normally,
+# and the spans are restored verbatim. The mask uses private-use codepoints so
+# it cannot itself look like a credential: they are outside every character
+# class here (`_B64ISH`, `_B32ISH`, `_HEXISH`, `_OPAQUE_TOKEN`).
+# ---------------------------------------------------------------------------
+
+_DATA_URI = re.compile(
+    r'data:[A-Za-z0-9!#$&^+.\-/]*(?:;[A-Za-z0-9.+\-]+)*;base64,[A-Za-z0-9+/=_-]+'
+)
+_MASK_OPEN, _MASK_CLOSE = "\ue000", "\ue001"
+_MASK_REF = re.compile(_MASK_OPEN + r'(\d+)' + _MASK_CLOSE)
+
+
+def _mask_data_uris(line: str) -> tuple[str, list[str]]:
+    saved: list[str] = []
+
+    def _keep(m: "re.Match") -> str:
+        saved.append(m.group(0))
+        return f"{_MASK_OPEN}{len(saved) - 1}{_MASK_CLOSE}"
+
+    return _DATA_URI.sub(_keep, line), saved
+
+
+def _unmask_data_uris(line: str, saved: list[str]) -> str:
+    if not saved:
+        return line
+    return _MASK_REF.sub(lambda m: saved[int(m.group(1))], line)
+
+
+# ---------------------------------------------------------------------------
+# LINE-WRAPPED BODIES — a credential does not stop being one at column 76.
+#
+# `base64(1)`, `openssl base64` and every MIME/attachment pipeline wrap their
+# output. Scanning TOKENS inside a single line then recognises only the
+# fragment that happens to carry the credential's prefix; every later fragment
+# decodes to an anonymous middle slice, survives, and the survivors
+# concatenate straight back into the credential body. Measured: 2 of 3
+# fragments of a wrapped Anthropic key reached disk.
+#
+# So a run of consecutive wholly-encoded lines is REJOINED and scanned as one
+# body. The join only ever decides whether to redact — it never widens what
+# counts as a secret — so a wrapped PNG or a pair of wrapped digests still
+# decodes to binary, fails `_plausible_text`, and survives verbatim.
+# ---------------------------------------------------------------------------
+
+_WRAPPED_LINE = re.compile(r'^[A-Za-z0-9+/_-]{16,}={0,6}$')
+_MIN_WRAPPED_RUN = 2
+
+
 def _redact_encoded_and_opaque(value: str) -> str:
     """
     One line-oriented pass, so the two fallbacks agree.
@@ -341,31 +540,55 @@ def _redact_encoded_and_opaque(value: str) -> str:
     value is protected.
     """
     lines = value.split("\n")
-    out = []
-    for i, line in enumerate(lines):
-        # A data URI's payload is audit content, never a credential, and it is
-        # exactly the shape most at risk from the entropy rule.
-        if "data:" in line and "base64," in line:
-            out.append(line)
+
+    def _ctx_at(i: int) -> bool:
+        return any(_CREDENTIAL_CONTEXT.search(w) for w in lines[max(0, i - 3): i + 1])
+
+    def _view_is_secret(view: str, ctx: bool) -> bool:
+        if _contains_secret(view):
+            return True
+        # Opaque bodies are only credentials in credential context, and the
+        # candidate test must run on TOKENS inside the decoded view — a whole
+        # decoded line of prose can trivially satisfy the mixed-case and
+        # entropy tests that a credential body satisfies.
+        return ctx and any(
+            _is_opaque_credential(t) for t in _OPAQUE_TOKEN.findall(view)
+        )
+
+    # --- pass 1: rejoin runs of wholly-encoded lines ------------------------
+    handled: dict[int, str | None] = {}
+    i = 0
+    while i < len(lines):
+        if not _WRAPPED_LINE.match(lines[i].rstrip("\r")):
+            i += 1
             continue
-        window = lines[max(0, i - 3): i + 1]
-        ctx = any(_CREDENTIAL_CONTEXT.search(w) for w in window)
+        j = i
+        while j < len(lines) and _WRAPPED_LINE.match(lines[j].rstrip("\r")):
+            j += 1
+        if j - i >= _MIN_WRAPPED_RUN:
+            joined = "".join(ln.rstrip("\r") for ln in lines[i:j])
+            ctx = _ctx_at(i)
+            if any(_view_is_secret(v, ctx) for v in _decoded_views(joined)):
+                handled[i] = _placeholder(joined)
+                for k in range(i + 1, j):
+                    handled[k] = None      # absorbed into the placeholder
+        i = j
 
-        def _view_is_secret(view: str) -> bool:
-            if _contains_secret(view):
-                return True
-            # Opaque bodies are only credentials in credential context, and the
-            # candidate test must run on TOKENS inside the decoded view — a
-            # whole decoded line of prose can trivially satisfy the mixed-case
-            # and entropy tests that a credential body satisfies.
-            return ctx and any(
-                _is_opaque_credential(t) for t in _OPAQUE_TOKEN.findall(view)
-            )
+    # --- pass 2: per line ---------------------------------------------------
+    out: list[str] = []
+    for i, line in enumerate(lines):
+        if i in handled:
+            if handled[i] is not None:
+                out.append(handled[i])
+            continue
 
-        def repl(m: "re.Match") -> str:
+        line, saved = _mask_data_uris(line)
+        ctx = _ctx_at(i)
+
+        def repl(m: "re.Match", _ctx: bool = ctx) -> str:
             tok = m.group(0)
             for view in _decoded_views(tok):
-                if _view_is_secret(view):
+                if _view_is_secret(view, _ctx):
                     return _placeholder(tok)
             return tok
 
@@ -376,7 +599,7 @@ def _redact_encoded_and_opaque(value: str) -> str:
                 if _is_opaque_credential(m.group(0)) else m.group(0),
                 line,
             )
-        out.append(line)
+        out.append(_unmask_data_uris(line, saved))
     return "\n".join(out)
 
 

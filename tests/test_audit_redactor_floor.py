@@ -401,6 +401,17 @@ MUST_SURVIVE: list[tuple[str, str]] = [
     # The payload itself must still survive, including alongside other content.
     ("data-uri-beside-audit-content",
      "det_01HQ8X7Y6Z5W4V3U2T1S0R9Q8P " + _DATA_URI + " commit " + _rnd(40, _HEX, seed=93)),
+    # The `_plausible_text` binary gate — the guard that stops decoding from
+    # judging a payload by the MOJIBAKE inside it. It is NOT redundant with the
+    # UTF-8 decode that follows it: these bytes decode cleanly (every byte is
+    # < 0x80) while being 60% non-printable, and the printable part is a
+    # 40-char high-entropy id. Remove the gate and the decoded view looks like
+    # an opaque credential in credential context, so a wire frame captured into
+    # an audit field is eaten. A mutation deleting the gate SURVIVED until this
+    # case existed; the corpus held nothing that decoded to valid-UTF-8 binary.
+    ("hex-encoded-binary-frame-near-credentials",
+     "credentials frame "
+     + (b"\x01\x00\x00\x2c" + _rnd(40, seed=95).encode() + b"\x00" * 24).hex()),
 ]
 
 # A stable non-secret token written alongside every record. Its presence on

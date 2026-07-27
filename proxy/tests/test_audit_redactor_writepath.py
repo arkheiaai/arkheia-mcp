@@ -33,6 +33,7 @@ caller-supplied strings that DO reach disk verbatim are ``session_id`` and
 this file drives. Corpus values are SYNTHETIC and are never printed on failure.
 """
 
+import base64
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -241,6 +242,162 @@ def test_secret_in_model_id_never_reaches_disk_via_the_endpoint(harness):
     )
     assert _body(secret) not in content, (
         "a credential passed as model_id reached disk unredacted (value not printed)."
+    )
+
+
+def _strict_pct(s: str) -> str:
+    """Percent-encode EVERY non-alphanumeric, hyphens included.
+
+    `urllib.parse.quote(s, safe="")` does not reproduce this class: it leaves
+    `-._~` untouched, so a hyphenated key is unchanged and the plain pattern
+    still fires. The leak needs a strict encoder.
+    """
+    return "".join(c if c.isalnum() else "%%%02X" % ord(c) for c in s)
+
+
+def _b64(s: str) -> str:
+    return base64.b64encode(s.encode()).decode()
+
+
+# Each entry names the exact bytes that must be absent. The floor tier's
+# "longest high-entropy run" derivation is the WRONG span for all three of
+# these classes and would report `ok` while the value sits on disk in full.
+_ENCODED_CLASS_CASES: list[tuple[str, str, tuple[str, ...]]] = [
+    # Encodings COMPOSE; one decode pass per codec restores nothing to scan.
+    ("b64-double-wrapped",
+     "session " + _b64(_b64(SECRETS["anthropic"])),
+     (_b64(_b64(SECRETS["anthropic"])).rstrip("="),)),
+    ("pct-of-b64",
+     "cb=" + _strict_pct(_b64(SECRETS["anthropic"])),
+     (_strict_pct(_b64(SECRETS["anthropic"])),)),
+    # Hex is a transport encoding like any other and was not decoded at all.
+    ("hex-encoded",
+     "blob=" + SECRETS["anthropic"].encode().hex(),
+     (SECRETS["anthropic"].encode().hex(),)),
+    # A benign data URI must not switch the fallback passes off for the whole
+    # line — a credential written beside a screenshot still reaches disk.
+    ("data-uri-poisons-line",
+     "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg cb="
+     + _strict_pct(SECRETS["anthropic"]),
+     (_strict_pct(SECRETS["anthropic"]),)),
+    # A URI password holding a URI-reserved character matched nothing at all.
+    ("conn-password-with-slash",
+     "postgresql://svc:" + "Kp5" * 5 + "/" + "Rt6" * 5 + "@db.internal:5432/arkheia",
+     ("Kp5" * 5, "Rt6" * 5)),
+]
+
+
+def test_encoded_and_uri_password_classes_do_not_reach_disk_via_the_endpoint(harness):
+    """
+    The three round-3 leak classes, pinned at the ENDPOINT tier too.
+
+    The floor tier already pins them, but this file exists because a mutant
+    once survived here while the floor tier killed it: an endpoint corpus that
+    does not contain a shape agrees with an implementation that leaks it. So
+    the classes are carried at both tiers, not just the cheap one.
+    """
+    payloads = [
+        {"prompt": "p", "response": "a response of some length",
+         "model_id": SENTINEL_MODEL, "session_id": value}
+        for _shape, value, _bodies in _ENCODED_CLASS_CASES
+    ]
+    content = harness.post_all(payloads)
+    records = _lines(content)
+
+    # --- POSITIVE CONTROLS ---
+    assert len(records) == len(_ENCODED_CLASS_CASES), (
+        f"POSITIVE CONTROL FAILED: {len(records)} records on disk, expected "
+        f"{len(_ENCODED_CLASS_CASES)}. Absence would prove nothing."
+    )
+    assert all(r["model_id"] == SENTINEL_MODEL for r in records), (
+        "POSITIVE CONTROL FAILED: audit content missing — only the secret should be gone."
+    )
+    assert all(r["seq"] >= 1 and len(r["this_hash"]) == 64 for r in records), (
+        "POSITIVE CONTROL FAILED: hash-chain fields absent — not the real writer."
+    )
+    assert REDACTION_MARKER in content, (
+        "POSITIVE CONTROL FAILED: no redaction marker anywhere — the redactor never ran."
+    )
+
+    # --- THE CHECK ---
+    leaked = []
+    for shape, _value, bodies in _ENCODED_CLASS_CASES:
+        for i, body in enumerate(bodies):
+            assert len(body) >= 8, f"{shape!r} body #{i} is too short to be evidence"
+            if body in content:
+                leaked.append(shape if len(bodies) == 1 else f"{shape}[{i}]")
+    assert not leaked, (
+        f"encoded / URI-password secret material reached disk via POST /detect/verify: "
+        f"{sorted(leaked)}. Values deliberately not printed."
+    )
+
+
+def test_wrapped_base64_credential_does_not_reach_disk_via_the_endpoint(harness):
+    """
+    MIME base64 wraps a body at 76 columns, and the redactor scanned tokens
+    inside a single line — so only the fragment carrying the prefix was
+    recognised and the survivors concatenated back into the credential.
+    Checked fragment by fragment: a whole-blob check passes while the
+    credential is on disk, because the blob as written contains newlines.
+    """
+    secret = SECRETS["anthropic"] + "TailPadding9"
+    wrapped = base64.encodebytes(secret.encode()).decode()
+    fragments = [ln for ln in wrapped.split("\n") if ln]
+    assert len(fragments) >= 2, (
+        f"the case is not actually wrapped ({len(fragments)} fragment(s))."
+    )
+
+    content = harness.post_all([{
+        "prompt": "p", "response": "a response of some length",
+        "model_id": SENTINEL_MODEL, "session_id": "payload=\n" + wrapped,
+    }])
+    records = _lines(content)
+
+    assert len(records) == 1 and records[0]["model_id"] == SENTINEL_MODEL, (
+        "POSITIVE CONTROL FAILED: the record did not reach disk intact."
+    )
+    assert REDACTION_MARKER in records[0]["session_id"], (
+        "POSITIVE CONTROL FAILED: nothing was redacted in the field under test."
+    )
+    survivors = [i for i, frag in enumerate(fragments) if frag in content]
+    assert not survivors, (
+        f"{len(survivors)} of {len(fragments)} base64 fragments of a credential reached "
+        f"disk via the endpoint (indices {survivors}); concatenated they decode back to "
+        f"the credential body."
+    )
+
+
+def test_widened_decoding_does_not_eat_endpoint_audit_content(harness):
+    """
+    The over-redaction mirror, at the endpoint tier.
+
+    Recursive multi-codec decoding, line de-wrapping and a widened URI-password
+    rule all WIDEN what the redactor looks at. What it looks at must not become
+    what it eats: an audit log scrubbed to uselessness fails its own purpose as
+    surely as a leaky one.
+    """
+    must_survive = [
+        ("sha256-hex", "a3f" + "9c4e1b7d" * 7 + "0d21"),
+        ("url-with-port-and-at-in-path", "http://localhost:8000/reports/user@example.com"),
+        ("upstream-url", "https://api.anthropic.com/v1/messages"),
+        ("data-uri-payload", "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg" + "Ab3" * 20),
+        ("b64-prose", "note " + _b64("the quick brown fox jumps over the lazy dog")),
+    ]
+    content = harness.post_all([
+        {"prompt": "p", "response": "a response of some length",
+         "model_id": SENTINEL_MODEL, "session_id": value}
+        for _label, value in must_survive
+    ])
+    records = _lines(content)
+
+    assert len(records) == len(must_survive), (
+        "POSITIVE CONTROL FAILED: not every record reached disk."
+    )
+    eaten = [label for (label, value), r in zip(must_survive, records)
+             if r["session_id"] != value]
+    assert not eaten, (
+        f"the redactor OVER-MATCHED and destroyed endpoint audit content for: "
+        f"{sorted(eaten)}."
     )
 
 
