@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import gzip
 import json
+from dataclasses import dataclass
+from typing import Optional
 
 import httpx
 import pytest
@@ -349,6 +351,99 @@ async def test_resolve_upstream_is_the_verifier_not_the_artifact():
     url, deny = pt._resolve_upstream(pt.GROK, "chat/completions")
     assert deny is None
     assert url == "https://api.x.ai/v1/chat/completions"
+
+
+@dataclass(frozen=True)
+class SkewedProvider:
+    """
+    A provider whose verifier-owned expectations disagree with its base URL.
+
+    ``_resolve_upstream`` only reads these five attributes, so this drives the
+    REAL function with the real comparisons; only the constants it verifies
+    against are varied.
+
+    Why this exists. The scheme/host/port/prefix arms of the post-condition
+    cannot be tripped through the live route today: the base is a constant
+    ``https://host[/path]`` literal and string concatenation onto it cannot move
+    the authority. That is the *good* news on this flow — there is no
+    host-escape primitive. It also means a mutation that deletes one of those
+    arms is unobservable through the route, so the arms would be untested
+    decoration unless they are exercised here, at the boundary that owns them.
+    They guard the refactor that makes a base URL configurable, which is exactly
+    when nobody re-reads this function.
+    """
+    base: str
+    expected_scheme: str
+    expected_host: str
+    expected_port: Optional[int]
+    base_path: str
+
+
+@pytest.mark.parametrize("skew,expect_deny", [
+    # host mismatch
+    (dict(base="https://api.x.ai/v1", expected_scheme="https",
+          expected_host="api.together.xyz", expected_port=None,
+          base_path="/v1"), True),
+    # scheme mismatch
+    (dict(base="https://api.x.ai/v1", expected_scheme="http",
+          expected_host="api.x.ai", expected_port=None,
+          base_path="/v1"), True),
+    # port mismatch
+    (dict(base="https://api.x.ai/v1", expected_scheme="https",
+          expected_host="api.x.ai", expected_port=8443,
+          base_path="/v1"), True),
+    # prefix confusion: /v1beta starts with /v1 but is a different surface
+    (dict(base="https://api.x.ai/v1beta", expected_scheme="https",
+          expected_host="api.x.ai", expected_port=None,
+          base_path="/v1"), True),
+    # control row: everything agrees, so the table discriminates
+    (dict(base="https://api.x.ai/v1", expected_scheme="https",
+          expected_host="api.x.ai", expected_port=None,
+          base_path="/v1"), False),
+])
+async def test_each_post_condition_arm_refuses_on_its_own(skew, expect_deny):
+    provider = SkewedProvider(**skew)
+    url, deny = pt._resolve_upstream(provider, "models")
+    if expect_deny:
+        assert url is None, skew
+        assert deny == pt.DENY_UPSTREAM_TARGET_ESCAPED, skew
+    else:
+        assert deny is None
+        assert url == "https://api.x.ai/v1/models"
+
+
+async def test_post_condition_refuses_a_query_or_fragment_smuggled_in_the_path():
+    """
+    Reachable only with a weakened allowlist, which is the case this arm is for:
+    a query string in the PATH is not a provider path, and the caller's real
+    query is forwarded separately and explicitly.
+    """
+    for smuggled in ("chat/completions?x=1", "chat/completions#frag"):
+        url, deny = pt._resolve_upstream(pt.GROK, smuggled)
+        assert url is None, smuggled
+        assert deny == pt.DENY_UPSTREAM_TARGET_ESCAPED, smuggled
+    url, deny = pt._resolve_upstream(pt.GROK, "chat/completions")     # control
+    assert (url, deny) == ("https://api.x.ai/v1/chat/completions", None)
+
+
+@pytest.mark.parametrize("route_key,foreign_path", [
+    ("gemini",    "chat/completions"),
+    ("anthropic", "chat/completions"),
+    ("grok",      "models/gemini-2.5-flash:generateContent"),
+    ("together",  "messages"),
+])
+async def test_a_route_accepts_only_its_own_providers_allowlist(route_key, foreign_path):
+    """
+    Each route must screen against ITS provider's allowlist. One shared regex
+    read by every route is a copy-paste away, and it silently widens three
+    surfaces at once.
+    """
+    prefix, _provider, _origin = ROUTES[route_key]
+    app = make_app()
+    with capture_upstream() as log:
+        resp = await asgi_request(app, "POST", prefix + foreign_path)
+    assert (resp.status, log.count) == (400, 0)
+    assert resp.json()["deny_code"] == pt.DENY_PATH_NOT_ALLOWLISTED
 
 
 async def test_post_condition_holds_when_the_allowlist_is_weakened():
