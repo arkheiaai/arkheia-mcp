@@ -197,6 +197,12 @@ async def lifespan(app: FastAPI):
     from proxy.auth import _get_jwt_secret
     _get_jwt_secret()  # raises RuntimeError with clear message if missing/short
 
+    # Validate a configured governance-push address at boot. Unconfigured local
+    # and demo runs remain silent; malformed URLs fail while an operator is
+    # watching instead of losing fire-and-forget pushes one at a time.
+    from proxy.detection_adapter import validate_config_or_raise
+    validate_config_or_raise()
+
     logger.info("Arkheia Enterprise Proxy starting up")
 
     # ----------------------------------------------------------------

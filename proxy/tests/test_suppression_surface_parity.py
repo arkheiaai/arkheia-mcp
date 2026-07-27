@@ -63,6 +63,7 @@ will conflict textually in the `VerifyResponse` / `_audit_record` / push blocks.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -126,10 +127,8 @@ def wire(monkeypatch):
     w = _PushWire()
     # push_event returns early unless BOTH are configured; set them so the real
     # code path runs end to end.
-    monkeypatch.setattr("proxy.detection_adapter.DETECTION_ADAPTER_URL",
-                        "http://adapter.test")
-    monkeypatch.setattr("proxy.detection_adapter.DETECTION_ADAPTER_HMAC_SECRET",
-                        "test-secret")
+    monkeypatch.setenv("DETECTION_ADAPTER_URL", "http://adapter.test")
+    monkeypatch.setenv("DETECTION_ADAPTER_HMAC_SECRET", "test-secret")
     monkeypatch.setattr(httpx.AsyncClient, "send", w.send)
     return w
 
@@ -340,14 +339,15 @@ class TestTheGovernancePushCanTellSuppressedFromScored:
     def test_the_pushed_body_carries_the_reason(self, client, wire):
         body = _verify(client, SHORT_RESPONSE).json()
         pushed = wire.await_one()
-        assert pushed["payload"]["detection_id"] == body["detection_id"]
-        assert pushed["payload"]["risk_level"] == "LOW"
-        assert pushed["payload"]["gate_reason"] == "token_count_below_80"
+        assert pushed["context"]["detection_id"] == body["detection_id"]
+        assert pushed["context"]["risk_level"] == "LOW"
+        assert pushed["context"]["risk_level_raw"] == "LOW"
+        assert pushed["context"]["gate_reason"] == "token_count_below_80"
 
     def test_a_scored_push_carries_none(self, client, wire):
         _verify(client, LONG_RESPONSE)
         pushed = wire.await_one()
-        assert pushed["payload"]["gate_reason"] is None
+        assert pushed["context"]["gate_reason"] is None
 
     def test_the_reason_is_on_the_serialized_bytes_not_just_the_dict(self, client, wire):
         """A field built but not sent looks correct in a dict view. Assert on bytes."""
@@ -357,62 +357,38 @@ class TestTheGovernancePushCanTellSuppressedFromScored:
         assert b'"token_count_below_80"' in wire.bodies[0]
 
 
-class TestTheGovernanceEnvelopeBandIsPinnedNotFixed:
-    """PINNED CURRENT BEHAVIOUR — NOT A FIX, and NOT this flow's to fix.
+class TestTheGovernanceEnvelopeBandIsHonestForUnknown:
+    """A couldn't-assess UNKNOWN must not be published as an authentic LOW."""
 
-    `detect.py` pushes
-        risk_level = response.risk_level if response.risk_level in
-                     ("LOW","MEDIUM","HIGH","CRITICAL") else "LOW"
-    — the `... else "LOW"` shape: an unrecognised band defaults to the safest-sounding
-    value. UNKNOWN (engine unavailable, engine error, no profile — every couldn't-assess
-    path) is published to the governance plane's envelope as a clean **LOW**, while the
-    caller is correctly told UNKNOWN. The audit/governance rail receives a MORE
-    REASSURING value than the caller.
-
-    `sweep/mcp-governance-adapter-push` already carries the fix (pass the raw band and
-    map UNKNOWN -> UNCERTAIN in the adapter, which needs the adapter-side change to go
-    with it). It is pinned here, not duplicated, so the divergence is visible on this
-    branch and this test goes red the moment that branch lands.
-    """
-
-    def test_unknown_is_published_to_the_envelope_as_low(self, client, wire):
+    def test_unknown_is_published_as_uncertain_not_authentic(self, client, wire):
         body = client.post("/detect/verify", json={
             "prompt": "p", "response": "r" * 400, "model_id": "no-such-model-xyz",
         }).json()
         assert body["risk_level"] == "UNKNOWN"
         pushed = wire.await_one()
-        assert pushed["risk_level"] == "LOW", (
-            "sweep/mcp-governance-adapter-push has landed — delete this pin"
-        )
-        assert pushed["payload"]["risk_level"] == "UNKNOWN"
+        assert pushed["detection"]["fabrication_risk"] == "UNKNOWN"
+        assert pushed["detection"]["classification"] == "UNCERTAIN"
+        assert pushed["context"]["risk_level_raw"] == "UNKNOWN"
 
 
-class TestThePushSerialisesOutsideItsOwnTryBlock:
-    """PINNED — NOT this flow's file to fix (`proxy/detection_adapter.py` is owned by
-    `sweep/mcp-governance-adapter-push`). Found while building the wire harness.
-
-    `push_event` documents "Fails open — never raises". It does not: `json.dumps(body_dict)`
-    sits ABOVE the `try:`, so a payload value that is not JSON-serialisable raises
-    straight out of the fire-and-forget task. The event is lost, the `logger.debug`
-    fail-open line below never runs, and the only trace is asyncio's
-    "Task exception was never retrieved". The reachable route is `action_taken`, which is
-    whatever `settings.detection.high_risk_action` / `unknown_action` holds — a `str` in
-    production, so this is a latent hole rather than a live outage, but it is a
-    governance event silently lost by the one function contracted never to lose one.
-    """
+class TestThePushSerialisesInsideItsFailOpenHandler:
+    """Non-serialisable context degrades to a visible failed push, not a task crash."""
 
     @pytest.mark.asyncio
-    async def test_a_non_serialisable_payload_escapes_the_fail_open_handler(
-        self, monkeypatch
+    async def test_a_non_serialisable_payload_is_reported_not_raised(
+        self, monkeypatch, caplog
     ):
         import proxy.detection_adapter as da
-        monkeypatch.setattr(da, "DETECTION_ADAPTER_URL", "http://adapter.test")
-        monkeypatch.setattr(da, "DETECTION_ADAPTER_HMAC_SECRET", "s")
-        with pytest.raises(TypeError):
-            await da.push_event(
+        monkeypatch.setenv("DETECTION_ADAPTER_URL", "http://adapter.test")
+        monkeypatch.setenv("DETECTION_ADAPTER_HMAC_SECRET", "s")
+        with caplog.at_level(logging.ERROR, logger="proxy.detection_adapter"):
+            outcome = await da.push_event(
                 tenant_id="t", source_id="m", event_type="mcp_detection",
                 payload={"action_taken": object()}, risk_level="LOW",
             )
+        assert outcome.status == da.PushOutcome.FAILED
+        assert "TypeError" in outcome.error
+        assert [r for r in caplog.records if da.FAILURE_MARKER in r.getMessage()]
 
 
 # ---------------------------------------------------------------------------

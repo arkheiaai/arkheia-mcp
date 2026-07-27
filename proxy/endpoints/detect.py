@@ -274,11 +274,14 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
         except Exception as e:
             logger.error("Audit write failed (detection result unaffected): %s", e)
 
-    # Push to Arkheia Governance Detection Adapter (fail-open, fire-and-forget)
+    # Push to Arkheia Governance Detection Adapter (fail-open, fire-and-forget).
+    # The detection audit row records what we decided; the governance-push receipt
+    # records whether that decision was actually delivered to the adapter.
     schedule_push(
         tenant_id=_ADAPTER_TENANT_ID,
         source_id=req.model_id,
         event_type="mcp_detection",
+        audit=audit,
         payload={
             "detection_id": response.detection_id,
             "model_id": response.model_id,
@@ -294,7 +297,10 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
             "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
             "action_taken": action,
         },
-        risk_level=response.risk_level if response.risk_level in ("LOW", "MEDIUM", "HIGH", "CRITICAL") else "LOW",
+        # Preserve UNKNOWN and other non-standard bands for the adapter builder;
+        # it maps them to an uncertain governance classification rather than
+        # publishing an evidence-limited non-verdict as a clean LOW.
+        risk_level=response.risk_level,
     )
 
     # Surface the governance decision to the caller: policy `action` (mirrors action_taken in
