@@ -20,7 +20,7 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import import_closure
 
@@ -170,6 +170,100 @@ def declared_build_hooks(root: Path = REPO_ROOT) -> dict[str, str]:
     """Which lifecycle hooks the manifest declares. Used to BUILD the red arm."""
     scripts = package_manifest(root).get("scripts") or {}
     return {k: v for k, v in scripts.items() if k in BUILD_HOOKS}
+
+
+def build_script_relpath(root: Path = REPO_ROOT) -> Path:
+    """
+    The build script npm runs at pack time, taken from the manifest's own hook.
+
+    Not hard-coded, for the same reason `launcher_relpath` is not: the day the
+    script moves, a floor that names it checks a file nothing runs.
+    """
+    hooks = declared_build_hooks(root)
+    pack_time = {k: v for k, v in hooks.items() if k in PACK_TIME_HOOKS}
+    if not pack_time:
+        raise ArtifactUnobservable(
+            f"{PACKAGE_DIR}/package.json declares no pack-time hook "
+            f"({list(PACK_TIME_HOOKS)}); found {sorted(hooks) or 'none'}. Nothing "
+            f"builds the bundle when a tarball is assembled."
+        )
+    scripts = set()
+    for command in pack_time.values():
+        scripts.update(tok for tok in command.split() if tok.endswith(".js"))
+    if len(scripts) != 1:
+        raise ArtifactUnobservable(
+            f"the pack-time hook(s) {pack_time} name {sorted(scripts)} as the build "
+            f"script; this parser assumes exactly one `.js`. Teach it the new form "
+            f"rather than leaving the exception list unread."
+        )
+    return PACKAGE_DIR / scripts.pop().lstrip("./")
+
+
+def require_node() -> str:
+    node = shutil.which("node")
+    if not node:
+        raise ArtifactUnobservable(
+            "`node` is not on PATH, so the build script cannot be asked for its "
+            "hand-maintained exception list. This FAILS rather than skips: an "
+            "unread exception list would silently widen the shipped-set assertion "
+            "to everything. CI installs Node in "
+            "`.github/workflows/floor-invariants.yml`."
+        )
+    return node
+
+
+def hand_maintained(root: Path = REPO_ROOT) -> set[str]:
+    """
+    Bundle-relative paths the build declares it does NOT generate.
+
+    ASKED OF THE BUILD, not restated here. The build both cleans by this list and
+    prints it, so the exception list has one source of truth; a floor that kept its
+    own copy would be the declared-set-diverging-from-reality defect this whole
+    branch exists to remove, one level up (DONE.md v1.13 clause 4).
+
+    Every entry is validated as a contained relative path, because it is about to
+    be used to EXCUSE a file from the shipped ⊆ required assertion.
+    """
+    script = root / build_script_relpath(root)
+    if not script.exists():
+        raise ArtifactUnobservable(
+            f"the pack-time hook names {script}, which does not exist"
+        )
+    result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [require_node(), str(script), "--print-hand-maintained"],
+        cwd=str(root / PACKAGE_DIR),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise ArtifactUnobservable(
+            f"`node {script.name} --print-hand-maintained` exited "
+            f"{result.returncode}.\n--- stdout ---\n{result.stdout}\n"
+            f"--- stderr ---\n{result.stderr}"
+        )
+    try:
+        entries = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ArtifactUnobservable(
+            f"the build script did not print JSON for its exception list ({exc}). "
+            f"Output was:\n{result.stdout}"
+        ) from exc
+    if not isinstance(entries, list) or not all(
+        isinstance(e, str) and e for e in entries
+    ):
+        raise ArtifactUnobservable(
+            f"the build script's exception list is not a list of non-empty strings: "
+            f"{entries!r}"
+        )
+    for entry in entries:
+        posix = PurePosixPath(entry)
+        if posix.is_absolute() or ".." in posix.parts:
+            raise ArtifactUnobservable(
+                f"the build script declares {entry!r} as hand-maintained, which is "
+                f"not a contained bundle-relative path"
+            )
+    return set(entries)
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +437,44 @@ def prune_generated(bundle_dir: Path, source_roots: set[str]) -> list[str]:
             shutil.rmtree(target)
             removed.append(name)
     return removed
+
+
+#: Filename used for the stale-output probe. Distinctive enough that a real module
+#: can never collide with it, and greppable if one ever escapes into a tarball.
+STALE_PROBE_NAME = "_arkheia_stale_output_probe.py"
+
+
+def stale_probe_paths(first_party: set[str], closure: set[Path]) -> list[str]:
+    """
+    Bundle-relative paths for the stale-output probe — DERIVED, never written down.
+
+    Two shapes, because an implementation can close one and leave the other open:
+
+    * under a first-party root the closure does NOT require — the case a second
+      vendor reproduced (`python/proxy/…` with no `proxy` file in the closure), and
+      the one a "remove the roots the closure mentions" clean would miss entirely;
+    * inside a root the closure DOES require — the case a "remove only unknown
+      roots" clean would miss, because the root is copied over rather than replaced.
+
+    A path is only usable as a probe if the real closure does not contain it, which
+    the distinctive filename guarantees.
+    """
+    required_roots = {p.parts[0] for p in closure}
+    probes = [f"{root}/{STALE_PROBE_NAME}" for root in sorted(required_roots)[:1]]
+    for root in sorted(first_party - required_roots)[:1]:
+        probes.append(f"{root}/{STALE_PROBE_NAME}")
+    return probes
+
+
+def write_stale_probes(bundle_dir: Path, rel_paths: list[str]) -> None:
+    """Seed pre-existing bundle output, exactly as a previous build would have left it."""
+    for rel in rel_paths:
+        target = bundle_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "raise SystemExit('stale bundle output — this file must never ship')\n",
+            encoding="utf-8",
+        )
 
 
 def stage_package_copy(

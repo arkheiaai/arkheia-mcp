@@ -42,8 +42,29 @@
  *   - ENTRY_MODULE below equals the module the Node launcher actually spawns.
  *   - a cross-package import injected into the entry package reaches the tarball.
  *
+ * ───────────────────────────────────────────────────────────────────────────────
+ * A DERIVED COPY SET IS NOT A DERIVED ARTIFACT — the destination is cleaned first.
+ * ───────────────────────────────────────────────────────────────────────────────
+ * The paragraph above was right and incomplete, and a second vendor proved it: the
+ * copy was ADDITIVE. It copied the derived set OVER whatever was already in
+ * `npm-wrapper/python`, and `package.json` ships all of `python/`, so anything ever
+ * generated there stayed and shipped. A stale `python/proxy/_stale_should_not_ship.py`
+ * survived a real `npm pack` while the resolver closure contained no `proxy` file at
+ * all. The floor asserted that everything REQUIRED was present; nothing asserted that
+ * everything PRESENT was required — a check that can only fail in the one direction
+ * somebody thought of.
+ *
+ * So the build now REMOVES before it copies, and the tree is a function of the graph
+ * plus one named, justified exception list, rather than an accumulation. See
+ * `HAND_MAINTAINED` for how generated is told apart from hand-maintained, and
+ * `tests/test_packed_artifact_floor.py` for the both-directions assertion against
+ * the real tarball.
+ *
  * Manual use (still supported, e.g. to inspect the bundle):
  *   node scripts/build.js
+ *
+ * Query mode (used by the packaging floor so the exception list has ONE source):
+ *   node scripts/build.js --print-hand-maintained
  */
 
 const fs = require("fs");
@@ -85,9 +106,72 @@ const CLOSURE_TOOL = path.join(
 
 const SKIP_NAMES = new Set(["__pycache__", "tests"]);
 
+/**
+ * The ONLY paths under the bundle root this build does not generate.
+ *
+ * Bundle-relative POSIX paths. Everything else under `npm-wrapper/python` is build
+ * output and is deleted before each copy, so the tree cannot accumulate.
+ *
+ * HOW GENERATED WAS TOLD APART FROM HAND-MAINTAINED — two independent signals had
+ * to agree, because either one alone gets it wrong:
+ *
+ *  1. WHAT THIS SCRIPT CAN WRITE. `copySource` writes only to
+ *     `BUNDLE_ROOT/<repo-relative path>`, and the resolver only ever returns `.py`
+ *     files whose first segment is a first-party root package (a top-level repo
+ *     directory containing `__init__.py`). `copyDir` additionally copies `.py` only.
+ *     So the build's output set is exactly `python/<first-party-root>/**.py`, and
+ *     nothing outside that shape can have come from here.
+ *  2. WHO PRODUCES AND READS IT. `python/requirements.txt` is written by hand — it
+ *     carries hand-authored CVE pins and their comments — and is read at runtime by
+ *     `bin/arkheia-mcp.js` as the pip install list for a customer. No copy step
+ *     produces it: the repo's own `mcp_server/requirements.txt` is never copied,
+ *     because `copyDir` takes `.py` only.
+ *
+ * Git tracking is NOT the discriminator, and that is the trap worth naming:
+ * `python/mcp_server/__init__.py` is committed too, yet it is pure build output (it
+ * is in the closure and is rewritten every run). Classifying by "is it in git" would
+ * have preserved a generated file forever. Classifying by "what can this script
+ * write" is a property of the code, and is what the floor re-derives.
+ *
+ * Adding an entry here is adding a hole to the shipped ⊆ required assertion, so the
+ * floor requires every entry to be real: it must actually ship, and it may not name
+ * a path the import closure requires (an exception may not shadow a derivation).
+ */
+const HAND_MAINTAINED = ["requirements.txt"];
+
 function fail(message) {
   process.stderr.write(`[build] ${message}\n`);
   process.exit(1);
+}
+
+/** Is `child` `parent` itself, or beneath it? Both must already be resolved. */
+function inside(child, parent) {
+  return child === parent || child.startsWith(parent + path.sep);
+}
+
+/**
+ * A relative path from a caller must stay under `root` once resolved.
+ *
+ * Shared by the copy set (which comes back from a subprocess) and the exception
+ * list (which is written above): both drive `fs` calls, so both are checked in the
+ * same place rather than each trusting itself.
+ */
+function assertContainedUnder(relative, root, label) {
+  if (typeof relative !== "string" || relative.length === 0) {
+    fail(`${label} is not a path: ${JSON.stringify(relative)}`);
+  }
+  if (path.isAbsolute(relative) || /^[A-Za-z]:/.test(relative)) {
+    fail(`${label} is an absolute path: ${relative}`);
+  }
+  const normalised = path.normalize(relative);
+  if (normalised.split(/[\\/]/).includes("..")) {
+    fail(`${label} escapes its root: ${relative}`);
+  }
+  const resolved = path.resolve(root, normalised);
+  if (!inside(resolved, root)) {
+    fail(`${label} "${relative}" resolves outside ${root}, to ${resolved}`);
+  }
+  return normalised;
 }
 
 /**
@@ -203,25 +287,13 @@ function requiredSources() {
  * has been asked to copy something it cannot vouch for does not get to guess.
  */
 function assertContained(source) {
-  if (typeof source !== "string" || source.length === 0) {
-    fail(`the resolver returned a non-path entry: ${JSON.stringify(source)}`);
-  }
-  if (path.isAbsolute(source) || /^[A-Za-z]:/.test(source)) {
-    fail(`the resolver returned an absolute path: ${source}`);
-  }
-  const normalised = path.normalize(source);
-  if (normalised.split(/[\\/]/).includes("..")) {
-    fail(`the resolver returned a path escaping the repo: ${source}`);
-  }
-
+  const normalised = assertContainedUnder(
+    source,
+    BUNDLE_ROOT,
+    "the resolver-supplied source"
+  );
   const src = path.resolve(REPO_ROOT, normalised);
-  const dest = path.resolve(BUNDLE_ROOT, normalised);
-  const inside = (child, parent) =>
-    child === parent || child.startsWith(parent + path.sep);
 
-  if (!inside(dest, BUNDLE_ROOT)) {
-    fail(`copying "${source}" would write outside the bundle, to ${dest}`);
-  }
   if (!fs.existsSync(src)) {
     fail(`required source "${source}" does not exist at ${src}`);
   }
@@ -279,22 +351,119 @@ function copySource(source) {
   }
 }
 
-const required = requiredSources();
+/**
+ * Delete every generated path under the bundle root, keeping only `HAND_MAINTAINED`.
+ *
+ * An ALLOW-LIST, not a list of things to remove. "Remove the roots the closure
+ * mentions" would leave behind exactly the debris that matters most — a tree
+ * generated by an older closure, from a package that no longer exists or is no
+ * longer imported — which is the case a second vendor reproduced. Removing
+ * everything except a named, justified set makes the bundle a function of the
+ * import graph, and makes any new unexplained file a decision somebody has to write
+ * down rather than a file that quietly ships.
+ *
+ * Symlinks are unlinked, never followed: descending into a symlinked directory to
+ * delete its contents would let a link inside the bundle reach outside it. Every
+ * removal is additionally bounded to the realpath of the bundle root — the same
+ * containment the copy side applies, for the same reason (this is `fs` mutation
+ * driven by directory contents, so the bound is checked rather than assumed).
+ */
+function cleanBundle() {
+  if (!fs.existsSync(BUNDLE_ROOT)) {
+    return [];
+  }
+  const bound = fs.realpathSync(BUNDLE_ROOT);
+  if (!inside(bound, fs.realpathSync(REPO_ROOT))) {
+    fail(
+      `the bundle root ${BUNDLE_ROOT} resolves to ${bound}, outside the repo — ` +
+        "refusing to delete anything"
+    );
+  }
 
-// The entry package whole; everything else exactly as required. Sorted so the
-// build log reads the same way twice.
-const outsideEntry = required
-  .filter((s) => s.split("/")[0] !== ENTRY_PACKAGE)
-  .sort();
+  const keep = new Set(HAND_MAINTAINED.map((p) => path.normalize(p)));
+  const removed = [];
 
-console.log(
-  `Bundle sources derived from the import closure of ${ENTRY_MODULE}: ` +
-    `${ENTRY_PACKAGE}/ (whole) + ${outsideEntry.length} cross-package file(s)`
-);
+  const walk = (dir, relative) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const absolute = path.resolve(dir, entry.name);
+      const rel = relative ? path.join(relative, entry.name) : entry.name;
+      if (!absolute.startsWith(bound + path.sep)) {
+        fail(`refusing to remove ${absolute}, which is outside ${bound}`);
+      }
+      if (entry.isDirectory() && !entry.isSymbolicLink()) {
+        walk(absolute, rel);
+        if (fs.readdirSync(absolute).length === 0) {
+          fs.rmdirSync(absolute);
+          removed.push(rel.split(path.sep).join("/") + "/");
+        }
+        continue;
+      }
+      if (keep.has(rel)) continue;
+      fs.unlinkSync(absolute);
+      removed.push(rel.split(path.sep).join("/"));
+    }
+  };
 
-copySource(ENTRY_PACKAGE);
-for (const source of outsideEntry) {
-  copySource(source);
+  walk(BUNDLE_ROOT, "");
+  return removed;
 }
 
-console.log("Build complete. Run `npm publish` from npm-wrapper/.");
+/**
+ * `HAND_MAINTAINED` may not shadow the derivation.
+ *
+ * An exception naming a file the import graph requires would exempt a real module
+ * from the shipped ⊆ required check AND survive the clean, which is precisely the
+ * accumulation this change removes — reintroduced by policy instead of by accident.
+ */
+function assertExceptionsDoNotShadow(required) {
+  const derived = new Set(required.map((s) => path.normalize(s)));
+  const shadowing = HAND_MAINTAINED.filter((p) => derived.has(path.normalize(p)));
+  if (shadowing.length) {
+    fail(
+      `HAND_MAINTAINED names ${JSON.stringify(shadowing)}, which the import ` +
+        "closure already requires. An exception may not shadow a derived source: " +
+        "remove it from HAND_MAINTAINED and let the build generate it."
+    );
+  }
+  for (const entry of HAND_MAINTAINED) {
+    assertContainedUnder(entry, BUNDLE_ROOT, "HAND_MAINTAINED entry");
+  }
+}
+
+function main() {
+  const required = requiredSources();
+  assertExceptionsDoNotShadow(required);
+
+  // The entry package whole; everything else exactly as required. Sorted so the
+  // build log reads the same way twice.
+  const outsideEntry = required
+    .filter((s) => s.split("/")[0] !== ENTRY_PACKAGE)
+    .sort();
+
+  console.log(
+    `Bundle sources derived from the import closure of ${ENTRY_MODULE}: ` +
+      `${ENTRY_PACKAGE}/ (whole) + ${outsideEntry.length} cross-package file(s)`
+  );
+
+  const removed = cleanBundle();
+  console.log(
+    `Cleaned ${removed.length} generated path(s) from the bundle, keeping ` +
+      `${JSON.stringify(HAND_MAINTAINED)}`
+  );
+
+  copySource(ENTRY_PACKAGE);
+  for (const source of outsideEntry) {
+    copySource(source);
+  }
+
+  console.log("Build complete. Run `npm publish` from npm-wrapper/.");
+}
+
+// Query mode: print the exception list and exit, touching nothing. The packaging
+// floor reads it from here so the list has exactly one source of truth — the same
+// reason this build asks Python for the import graph instead of restating it.
+if (process.argv.includes("--print-hand-maintained")) {
+  process.stdout.write(JSON.stringify(HAND_MAINTAINED) + "\n");
+} else {
+  main();
+}

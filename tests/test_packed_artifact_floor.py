@@ -282,6 +282,186 @@ def json_name() -> str:
 
 
 # ---------------------------------------------------------------------------
+# THE OTHER DIRECTION — everything PRESENT must be REQUIRED
+# ---------------------------------------------------------------------------
+#
+# The invariant above asserts required ⊆ shipped. On its own that is a check which
+# can only fail in the direction somebody thought of, and a second vendor showed
+# what lives in the other one: the build derived its copy set from the import graph
+# and then copied it OVER `npm-wrapper/python`, which `package.json` ships whole. A
+# stale `python/proxy/_stale_should_not_ship.py` survived a real `npm pack` while the
+# closure contained no `proxy` file at all. A derived copy set does not make a
+# derived artifact if the destination is never cleaned.
+#
+# So: shipped ⊆ required ∪ HAND_MAINTAINED, where the exception list is ASKED OF THE
+# BUILD (`node scripts/build.js --print-hand-maintained`) rather than restated here.
+
+
+def test_the_packed_bundle_ships_nothing_it_does_not_require(artifact: Artifact):
+    """
+    Every file under the bundle root is either derived or a named exception.
+
+    Scoped to the bundle root on purpose. `bin/`, `scripts/`, `README.md` and
+    `package.json` are hand-maintained package content, not build output, and
+    requiring them to appear in an import closure would be a false positive — and a
+    floor that cries wolf gets switched off. The bundle root is the one directory
+    this build WRITES, so it is the one directory whose contents must be a function
+    of the graph.
+    """
+    exceptions = npm_bundle.hand_maintained(_ROOT)
+    required = {p.as_posix() for p in artifact.required}
+    shipped = artifact.bundle_paths()
+
+    assert shipped, "nothing shipped under the bundle root — see the work-done guard"
+
+    unexplained = sorted(shipped - required - exceptions)
+    assert not unexplained, (
+        f"{artifact.tarball.name} ships {len(unexplained)} file(s) under "
+        f"{artifact.bundle_root!r} that `python -m {artifact.entry_module}` does not "
+        f"import and the build does not declare hand-maintained:\n"
+        + "\n".join(f"    UNREQUIRED  {artifact.bundle_root}/{p}" for p in unexplained)
+        + f"\n\nThe bundle is an accumulation, not a derivation. The build copies "
+        f"into {npm_bundle.PACKAGE_DIR}/{artifact.bundle_root} and `files` ships all "
+        f"of it, so anything ever generated there keeps shipping — including a "
+        f"module deleted from the repo, or a whole package that is no longer "
+        f"imported. Clean the generated tree in the build before copying, or, if one "
+        f"of these is genuinely hand-maintained, add it to HAND_MAINTAINED in the "
+        f"build script WITH the reason.\n"
+        f"Derived: {sorted(required)}\nDeclared hand-maintained: {sorted(exceptions)}"
+    )
+
+
+def test_every_declared_exception_is_live_and_does_not_shadow_a_derivation(
+    artifact: Artifact,
+):
+    """
+    An allow-list is only as honest as its entries, so both failure modes are closed.
+
+    A rotting entry (naming a file that no longer ships) is a hole nobody is using
+    and nobody will notice growing. An entry naming a file the import closure
+    already requires would exempt a real module from the check above — the
+    accumulation reintroduced by policy rather than by accident.
+    """
+    exceptions = npm_bundle.hand_maintained(_ROOT)
+    required = {p.as_posix() for p in artifact.required}
+    shipped = artifact.bundle_paths()
+
+    dead = sorted(e for e in exceptions if e not in shipped)
+    assert not dead, (
+        f"the build declares {dead} hand-maintained, but {artifact.tarball.name} does "
+        f"not ship them under {artifact.bundle_root!r} (it ships {sorted(shipped)}). "
+        f"An exception for a file that does not exist is a permanent hole in the "
+        f"shipped ⊆ required assertion; delete the entry or restore the file."
+    )
+
+    shadowing = sorted(e for e in exceptions if e in required)
+    assert not shadowing, (
+        f"the build declares {shadowing} hand-maintained, but the import closure of "
+        f"{artifact.entry_module} already requires them. An exception may not shadow "
+        f"a derived source: it would both survive the clean and be excused from the "
+        f"check, which is exactly the accumulation the clean removes."
+    )
+
+
+def test_stale_bundle_output_does_not_reach_the_tarball(tmp_path):
+    """
+    CODEX'S REPRODUCTION, EXECUTED ON EVERY CI RUN — against a real tarball.
+
+    The assertions above run against a bundle directory the fixture PRUNED before
+    packing, so they observe a clean checkout and cannot see accumulation at all. The
+    defect only exists when the destination already has something in it. So this
+    seeds stale output the way a previous build would have left it, and packs twice,
+    changing exactly one variable — whether the build runs:
+
+      RED   pack-time hook stripped -> the stale file MUST ship (the probe is real,
+                                       the observation can see it, and nothing else
+                                       in the pipeline removes it)
+      GREEN hook left as it is      -> the stale file MUST be absent, and the derived
+                                       closure MUST still be complete (the clean
+                                       removed the debris, not the bundle)
+
+    The red arm is what makes the green one mean something: without it, "the stale
+    file is absent" is equally consistent with a probe that was never written, a
+    tarball nobody read, and a path this harness spells differently from npm.
+
+    Probe paths are derived (`stale_probe_paths`), so this cannot rot into a test of
+    a package that no longer exists.
+    """
+    entry_module = npm_bundle.launcher_entry_module(_ROOT)
+    first_party = import_closure.first_party_roots(_ROOT)
+    closure = import_closure.required_files((entry_module,), _ROOT, first_party)
+    bundle_root = npm_bundle.bundle_root(_ROOT)
+    generated_roots = {p.parts[0] for p in closure}
+
+    probes = npm_bundle.stale_probe_paths(set(first_party), closure)
+    assert len(probes) >= 2, (
+        f"only {probes} could be derived as stale-output probes. Both shapes are "
+        f"needed — one inside a required root, one under a first-party root the "
+        f"closure does not require — because a clean can close one and leave the "
+        f"other open. First-party roots: {sorted(first_party)}; required roots: "
+        f"{sorted(generated_roots)}."
+    )
+    assert not (set(probes) & {p.as_posix() for p in closure}), (
+        f"a probe path collides with a real required module ({probes}); the probe "
+        f"would be indistinguishable from a legitimate source"
+    )
+
+    def pack_arm(name: str, strip_hooks: bool) -> set[str]:
+        staged = tmp_path / name
+        package_dir = npm_bundle.stage_package_copy(staged, generated_roots, _ROOT)
+        bundle_dir = package_dir / bundle_root
+        npm_bundle.prune_generated(bundle_dir, generated_roots)
+        npm_bundle.write_stale_probes(bundle_dir, probes)
+
+        if strip_hooks:
+            manifest_path = package_dir / "package.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            scripts = manifest.get("scripts") or {}
+            for hook in npm_bundle.BUILD_HOOKS:
+                scripts.pop(hook, None)
+            manifest["scripts"] = scripts
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+            )
+
+        tarball = npm_bundle.pack(package_dir, staged / "tgz")
+        prefix = bundle_root + "/"
+        return {
+            p[len(prefix):]
+            for p in npm_bundle.tarball_paths(tarball)
+            if p.startswith(prefix)
+        }
+
+    red = pack_arm("stale-without-build", strip_hooks=True)
+    green = pack_arm("stale-with-build", strip_hooks=False)
+
+    unseen = [p for p in probes if p not in red]
+    assert not unseen, (
+        f"with the build stripped out, the pack did NOT ship {unseen} — so this "
+        f"harness cannot observe a stale file at all, and the green arm below would "
+        f"pass for a reason nobody has established. It shipped {sorted(red)}."
+    )
+
+    survived = [p for p in probes if p in green]
+    assert not survived, (
+        f"stale bundle output survived a real `npm pack`: {survived} shipped inside "
+        f"{bundle_root}/ even though the import closure of {entry_module} does not "
+        f"contain it. The build copies into the bundle directory without clearing "
+        f"it, so the published tarball is an accumulation of everything ever "
+        f"generated there. Remove the generated tree before copying."
+    )
+
+    still_missing = import_closure.missing_from(closure, green)
+    assert not still_missing, (
+        f"the clean removed too much: {sorted(p.as_posix() for p in still_missing)} "
+        f"are required by {entry_module} and did not ship. The differential needs a "
+        f"passing row (DONE.md v1.15 clause 5) — a build that deletes the bundle and "
+        f"copies nothing would satisfy the stale-output assertion above while "
+        f"publishing an empty package."
+    )
+
+
+# ---------------------------------------------------------------------------
 # PRESENT IS NOT THE SAME AS IMPORTABLE
 # ---------------------------------------------------------------------------
 
