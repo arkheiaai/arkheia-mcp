@@ -149,3 +149,76 @@ def missing_from(required: set[Path], present: set[str]) -> set[Path]:
     intends to copy, a path says what shipped.
     """
     return {p for p in required if p.as_posix() not in present}
+
+
+# ---------------------------------------------------------------------------
+# CLI — so the BUILD and the FLOOR share one import graph
+# ---------------------------------------------------------------------------
+#
+# `npm-wrapper/scripts/build.js` invokes this file as a script and copies exactly
+# the paths it prints. That is deliberate and it is the point of the CLI existing
+# at all: the packaging defect this repo keeps re-suffering is a *declared* copy
+# set diverging from the *actual* import graph, and the only durable cure is to
+# stop declaring it. A build that asks the graph cannot drift from the graph.
+#
+# The alternative — reimplementing this walk in JavaScript so the build owns its
+# own copy — is the second-source-of-truth pattern DONE.md v1.13 clause 4 forbids,
+# and it is exactly how two parsers of one artifact come to disagree silently.
+#
+# Stdlib only, no relative imports, so `python3 tests/floor_support/import_closure.py`
+# works as a plain script with no package context and no install step.
+
+
+def _main(argv: list[str] | None = None) -> int:
+    import argparse
+    import json
+    import sys
+
+    parser = argparse.ArgumentParser(
+        prog="import_closure",
+        description=(
+            "Print, as a JSON array of repo-relative POSIX paths, the transitive "
+            "first-party import closure of one or more entry modules. This is the "
+            "set of files a build must copy for those modules to import outside a "
+            "git checkout."
+        ),
+    )
+    parser.add_argument(
+        "--entry",
+        required=True,
+        action="append",
+        dest="entries",
+        metavar="MODULE",
+        help="dotted entry module (repeatable), e.g. mcp_server.server",
+    )
+    parser.add_argument(
+        "--root",
+        default=None,
+        help="repo root (defaults to the root this file lives under)",
+    )
+    args = parser.parse_args(argv)
+
+    root = Path(args.root).resolve() if args.root else REPO_ROOT
+    roots = first_party_roots(root)
+    files = required_files(tuple(args.entries), root, roots)
+
+    # A closure that resolved to nothing is NOT an empty copy set — it is an
+    # unanswered question (a misspelled entry module, a moved package, a root that
+    # is not the repo). "Not observed" must never be handed to a caller as a clean
+    # empty result (DONE.md floor-ledger clause 9d), so it exits non-zero and the
+    # build stops rather than publishing a bundle with nothing in it.
+    if not files:
+        print(
+            f"import_closure: entry module(s) {args.entries} resolve to no "
+            f"first-party file under {root}. First-party roots discovered there: "
+            f"{sorted(roots) or 'NONE'}.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(json.dumps(sorted(p.as_posix() for p in files)))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

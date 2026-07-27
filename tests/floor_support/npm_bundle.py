@@ -358,9 +358,22 @@ def stage_package_copy(
     touching the repo. The relative layout matters: the build script resolves its
     sources relative to its own location, so the copy must keep `npm-wrapper/` a
     sibling of the packages it copies from.
+
+    THE RESOLVER IS A PACKAGING INPUT, so it is staged too. The build derives its
+    copy set by running `floor_support/import_closure.py` (see
+    `npm-wrapper/scripts/build.js`); a staged tree without it packs nothing and
+    the pack fails loudly. Staged as `tests/floor_support` rather than the whole
+    `tests/` tree so that what the build actually depends on is visible here — if
+    the resolver moves, this is one of the two places that must move with it.
     """
     ignore = shutil.ignore_patterns("node_modules", "__pycache__", "*.pyc", "*.tgz")
     shutil.copytree(root / PACKAGE_DIR, destination / PACKAGE_DIR, ignore=ignore)
     for name in sorted(source_roots):
         shutil.copytree(root / name, destination / name, ignore=ignore)
+
+    resolver_pkg = Path(__file__).resolve().parent
+    staged_resolver = destination / resolver_pkg.relative_to(root)
+    if not staged_resolver.exists():
+        staged_resolver.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(resolver_pkg, staged_resolver, ignore=ignore)
     return destination / PACKAGE_DIR
