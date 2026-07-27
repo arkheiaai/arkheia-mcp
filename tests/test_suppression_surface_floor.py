@@ -1,0 +1,449 @@
+"""
+FLOOR — a false-positive suppression gate cannot land invisible or unbounded.
+
+Stdlib + pytest only (`ast`, `pathlib`, `re`), no project imports, so this runs in the
+required `floor-invariants` job with zero dependency and zero interpreter variance.
+
+WHAT EARNED IT (2026-07-27, F7 run-to-ground)
+---------------------------------------------
+`proxy/detection/features.py` holds the only two functions in the detector that turn a
+would-be finding into LOW. Every defect found in them was a variant of one shape: a
+decision NOT to report something, taken on a value nobody validated, and then not
+written down.
+
+  * `float("nan") >= 1` is False, so a NaN `output_tokens` fell through to SUPPRESS.
+    `False` coerced to 0.0 and suppressed. So did a negative count.
+  * `is_function_call` was read for TRUTHINESS, so the string "false" suppressed a
+    9999-token generative response.
+  * `signals.get("token_count", inf) < max_tokens` raises TypeError for a None or
+    string token_count; the raise escaped into the engine's blanket handler and reached
+    the caller as `error="no_computable_features"` — a determinate benign-sounding cause
+    standing in for a crash.
+  * the suppression REASON died inside features.py: `DetectionResult` dropped it and
+    `/detect/verify` dropped the whole `metrics` dict, so no caller, no audit row and no
+    governance push could say why a LOW was a LOW.
+  * a suppression carried no `gate_action`, so "a suppression can never authorize a
+    block" depended on every consumer remembering a `.get(..., "advise")` default.
+
+Six invariants, all DISCOVERING (never enumerating): a third gate added next year is
+covered without anyone remembering this file exists. Per DONE.md v1.19/v1.22 each
+carries a negative self-test that feeds it the exact pre-fix shape and requires it to
+flag, and per invariant 9 each asserts its own work-done count is non-zero — "found
+nothing" must never be confusable with "looked in the wrong place".
+
+RED RUN (executed against origin/master @ 3037f0c): 5 failed, 10 passed. INV-1's
+`metrics` sub-keys were already correct there — correctly green, since the metrics dict
+was never the defect.
+"""
+from __future__ import annotations
+
+import ast
+import re
+from pathlib import Path
+
+import pytest
+
+_ROOT = Path(__file__).resolve().parents[1]
+FEATURES = _ROOT / "proxy" / "detection" / "features.py"
+ENGINE = _ROOT / "proxy" / "detection" / "engine.py"
+DETECT = _ROOT / "proxy" / "endpoints" / "detect.py"
+
+#: The field every consumer must be able to read to tell a suppressed verdict from a
+#: scored clean one. One name, checked at six boundaries.
+MARKER = "gate_reason"
+
+#: Keys a gate's own return dict must carry.
+REQUIRED_GATE_KEYS = {
+    "risk", "confidence", "gate_action", "evidence_depth_limited",
+    "detection_method", "metrics",
+}
+REQUIRED_GATE_METRIC_KEYS = {"features_used", "gate_reason"}
+
+#: Names of the module functions that decide a suppression. Discovered, not listed.
+GATE_NAME_RE = re.compile(r"^check_[a-z0-9_]+_gate$")
+
+
+# ---------------------------------------------------------------------------
+# Analysers — take SOURCE TEXT so the negative self-tests can feed them a
+# synthetic pre-fix shape rather than trusting the invariant's own description.
+# ---------------------------------------------------------------------------
+
+def _parse(src: str) -> ast.Module:
+    return ast.parse(src)
+
+
+def _dict_keys(node: ast.Dict) -> set[str]:
+    return {k.value for k in node.keys
+            if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+
+
+def _dict_value(node: ast.Dict, key: str):
+    for k, v in zip(node.keys, node.values):
+        if isinstance(k, ast.Constant) and k.value == key:
+            return v
+    return None
+
+
+def find_gates(src: str) -> dict[str, ast.FunctionDef]:
+    """Every module-level `check_*_gate`."""
+    return {n.name: n for n in _parse(src).body
+            if isinstance(n, ast.FunctionDef) and GATE_NAME_RE.match(n.name)}
+
+
+def gate_return_dicts(fn: ast.FunctionDef) -> list[ast.Dict]:
+    return [n.value for n in ast.walk(fn)
+            if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)]
+
+
+def declared_suppressed_methods(src: str) -> set[str]:
+    """The closed taxonomy, read from the module rather than repeated here."""
+    for n in _parse(src).body:
+        if isinstance(n, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "SUPPRESSED_DETECTION_METHODS"
+            for t in n.targets
+        ):
+            if isinstance(n.value, (ast.Tuple, ast.List, ast.Set)):
+                return {e.value for e in n.value.elts if isinstance(e, ast.Constant)}
+    return set()
+
+
+def raw_signal_comparisons(fn: ast.FunctionDef) -> list[str]:
+    """Comparisons with an UNVALIDATED `signals.get(...)` / `triggers.get(...)` /
+    `.get(...)`-on-a-config operand — the exact pre-fix crash-and-suppress shape."""
+    hits = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Compare):
+            continue
+        for operand in [node.left, *node.comparators]:
+            if (isinstance(operand, ast.Call)
+                    and isinstance(operand.func, ast.Attribute)
+                    and operand.func.attr == "get"):
+                hits.append(ast.unparse(node))
+    return hits
+
+
+def classdef_fields(src: str, class_name: str) -> set[str]:
+    for n in _parse(src).body:
+        if isinstance(n, ast.ClassDef) and n.name == class_name:
+            return {t.target.id for t in n.body
+                    if isinstance(t, ast.AnnAssign) and isinstance(t.target, ast.Name)}
+    return set()
+
+
+def call_kwargs(src: str, callee: str) -> list[set[str]]:
+    """Keyword names of every `callee(...)` call in the module."""
+    out = []
+    for node in ast.walk(_parse(src)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == callee:
+            out.append({kw.arg for kw in node.keywords if kw.arg})
+    return out
+
+
+def function_return_dict_keys(src: str, fn_name: str) -> list[set[str]]:
+    out = []
+    for node in ast.walk(_parse(src)):
+        if isinstance(node, ast.FunctionDef) and node.name == fn_name:
+            for r in ast.walk(node):
+                if isinstance(r, ast.Return) and isinstance(r.value, ast.Dict):
+                    out.append(_dict_keys(r.value))
+    return out
+
+
+def call_dict_kwarg_keys(src: str, callee: str, kwarg: str) -> list[set[str]]:
+    """Keys of the dict literal passed as `callee(..., kwarg={...})`."""
+    out = []
+    for node in ast.walk(_parse(src)):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id == callee:
+            for kw in node.keywords:
+                if kw.arg == kwarg and isinstance(kw.value, ast.Dict):
+                    out.append(_dict_keys(kw.value))
+    return out
+
+
+def scored_return_dicts(src: str) -> list[ast.Dict]:
+    """The return dicts of `classify_with_profile` that are NOT a gate short-circuit —
+    i.e. the SCORED verdict."""
+    for node in _parse(src).body:
+        if isinstance(node, ast.FunctionDef) and node.name == "classify_with_profile":
+            return [n.value for n in ast.walk(node)
+                    if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict)]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def features_src() -> str:
+    return FEATURES.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def engine_src() -> str:
+    return ENGINE.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def detect_src() -> str:
+    return DETECT.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# INV-0 — the subjects exist. Without this every invariant below is vacuous.
+# ---------------------------------------------------------------------------
+
+def test_inv0_the_files_and_the_gates_are_actually_found(features_src):
+    for p in (FEATURES, ENGINE, DETECT):
+        assert p.exists(), f"floor pointed at a path that does not exist: {p}"
+    gates = find_gates(features_src)
+    assert len(gates) >= 2, (
+        f"expected at least the two known suppression gates, discovered {sorted(gates)} "
+        "— either they were renamed out of discovery or this floor is looking in the "
+        "wrong place, which is indistinguishable from a clean bill of health"
+    )
+    for name, fn in gates.items():
+        assert gate_return_dicts(fn), f"{name} returns no dict literal; nothing to check"
+
+
+# ---------------------------------------------------------------------------
+# INV-1 — every gate return states the full marker set
+# ---------------------------------------------------------------------------
+
+def test_inv1_every_gate_return_carries_the_required_keys(features_src):
+    checked = 0
+    for name, fn in find_gates(features_src).items():
+        for d in gate_return_dicts(fn):
+            keys = _dict_keys(d)
+            missing = REQUIRED_GATE_KEYS - keys
+            assert not missing, f"{name} suppression dict is missing {sorted(missing)}"
+            metrics = _dict_value(d, "metrics")
+            assert isinstance(metrics, ast.Dict), f"{name} metrics is not a dict literal"
+            mmissing = REQUIRED_GATE_METRIC_KEYS - _dict_keys(metrics)
+            assert not mmissing, f"{name} metrics is missing {sorted(mmissing)}"
+            checked += 1
+    assert checked >= 2, f"only {checked} gate returns examined"
+
+
+def test_inv1_negative_self_test():
+    """The pre-fix shape: a gate dict with no gate_action and no gate_reason."""
+    src = (
+        "def check_new_thing_gate(profile, signals):\n"
+        "    return {'risk': 'LOW', 'confidence': 0.0, 'evidence_depth_limited': True,\n"
+        "            'detection_method': 'x', 'metrics': {'features_used': 0}}\n"
+    )
+    fn = find_gates(src)["check_new_thing_gate"]
+    d = gate_return_dicts(fn)[0]
+    assert REQUIRED_GATE_KEYS - _dict_keys(d) == {"gate_action"}
+    assert REQUIRED_GATE_METRIC_KEYS - _dict_keys(_dict_value(d, "metrics")) == \
+        {"gate_reason"}
+
+
+# ---------------------------------------------------------------------------
+# INV-2 — the suppression vocabulary is closed
+# ---------------------------------------------------------------------------
+
+def test_inv2_every_gate_method_is_in_the_declared_closed_set(features_src):
+    declared = declared_suppressed_methods(features_src)
+    assert len(declared) >= 2, (
+        "SUPPRESSED_DETECTION_METHODS is missing or empty; the closed taxonomy is what "
+        "lets a consumer ask 'was this scored?' without string-matching"
+    )
+    checked = 0
+    for name, fn in find_gates(features_src).items():
+        for d in gate_return_dicts(fn):
+            v = _dict_value(d, "detection_method")
+            assert isinstance(v, ast.Constant), (
+                f"{name} builds detection_method dynamically; the taxonomy stops being "
+                "closed the moment it is computed"
+            )
+            assert v.value in declared, (
+                f"{name} emits detection_method={v.value!r}, not in {sorted(declared)}"
+            )
+            checked += 1
+    assert checked >= 2
+
+
+def test_inv2_negative_self_test():
+    src = (
+        "SUPPRESSED_DETECTION_METHODS = ('a', 'b')\n"
+        "def check_rogue_gate(profile, signals):\n"
+        "    return {'detection_method': 'quietly_dropped', 'metrics': {}}\n"
+    )
+    declared = declared_suppressed_methods(src)
+    d = gate_return_dicts(find_gates(src)["check_rogue_gate"])[0]
+    assert _dict_value(d, "detection_method").value not in declared
+
+
+# ---------------------------------------------------------------------------
+# INV-3 — a suppression can never carry block authority
+# ---------------------------------------------------------------------------
+
+def test_inv3_every_gate_states_gate_action_advise(features_src):
+    checked = 0
+    for name, fn in find_gates(features_src).items():
+        for d in gate_return_dicts(fn):
+            v = _dict_value(d, "gate_action")
+            assert isinstance(v, ast.Constant) and v.value == "advise", (
+                f"{name} does not state gate_action='advise'. The gates return BEFORE "
+                "resolve_gate_action is consulted, so containment would rest on every "
+                "consumer remembering a .get(..., 'advise') default."
+            )
+            checked += 1
+    assert checked >= 2
+
+
+def test_inv3_negative_self_test():
+    src = ("def check_bad_gate(p, s):\n"
+           "    return {'gate_action': 'block', 'metrics': {}}\n")
+    d = gate_return_dicts(find_gates(src)["check_bad_gate"])[0]
+    assert _dict_value(d, "gate_action").value != "advise"
+
+
+# ---------------------------------------------------------------------------
+# INV-4 — the marker survives to every consumer boundary
+# ---------------------------------------------------------------------------
+
+def test_inv4_the_marker_reaches_all_six_boundaries(engine_src, detect_src):
+    boundaries = {
+        "DetectionResult field":
+            MARKER in classdef_fields(engine_src, "DetectionResult"),
+        "DetectionResult(...) call":
+            any(MARKER in kws for kws in call_kwargs(engine_src, "DetectionResult")),
+        "VerifyResponse field":
+            MARKER in classdef_fields(detect_src, "VerifyResponse"),
+        "VerifyResponse(...) call":
+            any(MARKER in kws for kws in call_kwargs(detect_src, "VerifyResponse")),
+        "_audit_record() return":
+            any(MARKER in keys
+                for keys in function_return_dict_keys(detect_src, "_audit_record")),
+        "schedule_push(payload=...)":
+            any(MARKER in keys
+                for keys in call_dict_kwarg_keys(detect_src, "schedule_push", "payload")),
+    }
+    # Work-done: every boundary must have been LOCATED, not merely 'not violated'.
+    assert len(classdef_fields(engine_src, "DetectionResult")) > 0
+    assert len(classdef_fields(detect_src, "VerifyResponse")) > 0
+    assert function_return_dict_keys(detect_src, "_audit_record"), \
+        "_audit_record not found — this invariant examined nothing"
+    assert call_dict_kwarg_keys(detect_src, "schedule_push", "payload"), \
+        "no schedule_push(payload={...}) found — this invariant examined nothing"
+
+    missing = sorted(k for k, ok in boundaries.items() if not ok)
+    assert not missing, (
+        f"the suppression marker {MARKER!r} does not reach: {missing}. A gate decided "
+        "not to report something and that consumer cannot tell."
+    )
+
+
+def test_inv4_negative_self_test():
+    """The pre-fix shape at each of the four detect.py/engine.py boundaries."""
+    engine_pre = (
+        "class DetectionResult:\n"
+        "    risk_level: str\n"
+        "    evidence_depth_limited: bool = True\n"
+        "def f():\n"
+        "    return DetectionResult(risk_level='LOW', evidence_depth_limited=True)\n"
+    )
+    detect_pre = (
+        "class VerifyResponse:\n"
+        "    risk_level: str\n"
+        "def h():\n"
+        "    r = VerifyResponse(risk_level='LOW')\n"
+        "    schedule_push(payload={'risk_level': 'LOW'})\n"
+        "def _audit_record(a, b, c):\n"
+        "    return {'risk_level': 'LOW'}\n"
+    )
+    assert MARKER not in classdef_fields(engine_pre, "DetectionResult")
+    assert not any(MARKER in k for k in call_kwargs(engine_pre, "DetectionResult"))
+    assert MARKER not in classdef_fields(detect_pre, "VerifyResponse")
+    assert not any(MARKER in k for k in call_kwargs(detect_pre, "VerifyResponse"))
+    assert not any(MARKER in k
+                   for k in function_return_dict_keys(detect_pre, "_audit_record"))
+    assert not any(MARKER in k
+                   for k in call_dict_kwarg_keys(detect_pre, "schedule_push", "payload"))
+    # ...and the control: the analysers DO find it when it is there.
+    assert MARKER in classdef_fields(
+        engine_pre.replace("risk_level: str", f"risk_level: str\n    {MARKER}: str"),
+        "DetectionResult")
+
+
+# ---------------------------------------------------------------------------
+# INV-5 — the marker must DISCRIMINATE
+# ---------------------------------------------------------------------------
+
+def test_inv5_a_scored_verdict_never_carries_the_marker(features_src):
+    dicts = scored_return_dicts(features_src)
+    assert dicts, "classify_with_profile returns no dict literal; nothing examined"
+    checked = 0
+    for d in dicts:
+        keys = _dict_keys(d)
+        if "features_triggered" not in keys:
+            continue                      # a gate short-circuit re-returned, not scored
+        assert MARKER not in keys, "the SCORED verdict carries the suppression marker"
+        metrics = _dict_value(d, "metrics")
+        if isinstance(metrics, ast.Dict):
+            assert MARKER not in _dict_keys(metrics), (
+                "the SCORED verdict's metrics carry a gate_reason; the marker would "
+                "stop distinguishing 'not scored' from 'scored clean'"
+            )
+        checked += 1
+    assert checked >= 1, "no scored return examined"
+
+
+def test_inv5_negative_self_test():
+    src = ("def classify_with_profile(p, s):\n"
+           "    return {'risk': 'LOW', 'features_triggered': [],\n"
+           "            'metrics': {'gate_reason': 'token_count_below_80'}}\n")
+    d = scored_return_dicts(src)[0]
+    assert MARKER in _dict_keys(_dict_value(d, "metrics"))
+
+
+# ---------------------------------------------------------------------------
+# INV-6 — a gate never compares an unvalidated signal
+# ---------------------------------------------------------------------------
+
+def test_inv6_no_gate_compares_a_raw_get_result(features_src):
+    gates = find_gates(features_src)
+    assert gates, "no gate discovered; this invariant examined nothing"
+    offenders = {}
+    for name, fn in gates.items():
+        hits = raw_signal_comparisons(fn)
+        if hits:
+            offenders[name] = hits
+    assert not offenders, (
+        "a suppression gate compares the raw result of a .get() call: "
+        f"{offenders}. `signals.get('token_count', inf) < max_tokens` raises TypeError "
+        "for a None or string count and the raise reaches the caller mislabelled as "
+        "error='no_computable_features'. Route the value through the shared count "
+        "validator first."
+    )
+
+
+def test_inv6_negative_self_test():
+    """The verbatim pre-fix line."""
+    src = (
+        "def check_mode_gate(profile, signals):\n"
+        "    triggers = {}\n"
+        "    max_tokens = triggers.get('token_count_max', 80)\n"
+        "    if signals.get('token_count', float('inf')) < max_tokens:\n"
+        "        return {'risk': 'LOW'}\n"
+        "    return None\n"
+    )
+    hits = raw_signal_comparisons(find_gates(src)["check_mode_gate"])
+    assert len(hits) == 1
+    assert "signals.get('token_count'" in hits[0]
+
+
+def test_inv6_control_it_does_not_flag_a_validated_comparison():
+    """The control row that PASSES — otherwise INV-6 is a rule that forbids everything."""
+    src = (
+        "def check_mode_gate(profile, signals):\n"
+        "    tc = _usable_count(signals.get('token_count'))\n"
+        "    if tc is not None and tc < 80:\n"
+        "        return {'risk': 'LOW'}\n"
+        "    return None\n"
+    )
+    assert raw_signal_comparisons(find_gates(src)["check_mode_gate"]) == []
