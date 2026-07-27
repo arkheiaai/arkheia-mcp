@@ -162,7 +162,7 @@ write_arkheia_api_key_config() {
         return 0
     fi
 
-    ARKHEIA_INSTALL_API_KEY_PAYLOAD="$api_key" "$PYTHON_CMD" - "$config_file" "$hosted_url" <<'PY'
+    "$PYTHON_CMD" - "$config_file" "$hosted_url" 3<<<"$api_key" <<'PY'
 import json
 import os
 import stat
@@ -172,7 +172,8 @@ from pathlib import Path
 
 config_path = Path(sys.argv[1]).expanduser()
 hosted_url = sys.argv[2]
-api_key = os.environ.get("ARKHEIA_INSTALL_API_KEY_PAYLOAD", "")
+with os.fdopen(3, "r", encoding="utf-8") as secret_fh:
+    api_key = secret_fh.read().rstrip("\n")
 
 dir_mode = 0o700
 file_mode = 0o600
@@ -237,6 +238,42 @@ except Exception:
     raise
 
 print("updated")
+PY
+}
+
+verify_arkheia_api_key() {
+    local api_key="$1"
+    local hosted_url="$2"
+
+    "$PYTHON_CMD" - "$hosted_url" 3<<<"$api_key" <<'PY'
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+hosted_url = sys.argv[1].rstrip("/")
+with os.fdopen(3, "r", encoding="utf-8") as secret_fh:
+    api_key = secret_fh.read().rstrip("\n")
+
+payload = json.dumps({"model": "test", "response": "Hello world test."}).encode("utf-8")
+request = urllib.request.Request(
+    f"{hosted_url}/v1/detect",
+    data=payload,
+    headers={
+        "Content-Type": "application/json",
+        "X-Arkheia-Key": api_key,
+    },
+    method="POST",
+)
+
+try:
+    with urllib.request.urlopen(request, timeout=20) as response:
+        print(response.status)
+except urllib.error.HTTPError as exc:
+    print(exc.code)
+except Exception:
+    print("000")
 PY
 }
 
@@ -419,11 +456,7 @@ if [ -n "$API_KEY" ]; then
         info "Dry run: would verify API key."
     else
         info "Verifying API key..."
-        VERIFY_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
-            -X POST "${HOSTED_URL}/v1/detect" \
-            -H "Content-Type: application/json" \
-            -H "X-Arkheia-Key: ${API_KEY}" \
-            -d '{"model": "test", "response": "Hello world test."}' 2>&1) || true
+        VERIFY_CODE=$(verify_arkheia_api_key "$API_KEY" "$HOSTED_URL" 2>/dev/null || printf "000")
 
         case "$VERIFY_CODE" in
             200) ok "API key verified." ;;

@@ -184,18 +184,18 @@ function saveConfig(apiKey, options = {}) {
   return { changed: true, dryRun: false, configFile };
 }
 
-function readExistingApiKey(configFile) {
+function hasExistingApiKey(configFile) {
   try {
     const config = readJsonFile(configFile);
     if (config.api_key && config.api_key.length > 0) {
       chmodIfPossible(path.dirname(configFile), ARKHEIA_DIR_MODE);
       chmodIfPossible(configFile, ARKHEIA_CONFIG_MODE);
-      return config.api_key;
+      return true;
     }
   } catch {
     // Corrupt config: treat as missing.
   }
-  return null;
+  return false;
 }
 
 function checkApiKey(options = {}) {
@@ -203,18 +203,17 @@ function checkApiKey(options = {}) {
   const home = options.home || homeDir(env);
   const { configFile } = pathsForHome(home);
 
-  const existingKey = readExistingApiKey(configFile);
-  if (existingKey) {
-    return { apiKey: existingKey, source: "config", persisted: true, configFile };
+  if (hasExistingApiKey(configFile)) {
+    return { hasApiKey: true, source: "config", persisted: true, configFile };
   }
 
   if (!env.ARKHEIA_API_KEY) {
-    return { apiKey: null, source: null, persisted: false, configFile };
+    return { hasApiKey: false, source: null, persisted: false, configFile };
   }
 
   if (!options.persistApiKey) {
     return {
-      apiKey: env.ARKHEIA_API_KEY,
+      hasApiKey: true,
       source: "environment",
       persisted: false,
       configFile,
@@ -228,7 +227,7 @@ function checkApiKey(options = {}) {
       failAfterWrite: options.failAfterWrite,
     });
     return {
-      apiKey: env.ARKHEIA_API_KEY,
+      hasApiKey: true,
       source: "environment",
       persisted: !result.dryRun,
       dryRun: result.dryRun,
@@ -238,7 +237,7 @@ function checkApiKey(options = {}) {
   } catch (err) {
     console.error(`  [arkheia] Warning: Could not save config: ${err.message}`);
     return {
-      apiKey: env.ARKHEIA_API_KEY,
+      hasApiKey: true,
       source: "environment",
       persisted: false,
       error: err,
@@ -317,7 +316,7 @@ function main() {
 
   const keyState = checkApiKey(options);
 
-  if (keyState.apiKey) {
+  if (keyState.hasApiKey) {
     const persistence = keyState.persisted
       ? `Config: ${keyState.configFile}`
       : `Not persisted. Set ARKHEIA_PERSIST_API_KEY=1 to save it to ${keyState.configFile}.`;
