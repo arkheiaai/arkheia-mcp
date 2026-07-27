@@ -234,6 +234,17 @@ class TestTheCallerCanTellSuppressedFromScored:
         for this verdict is `LOW -- surface normally`. That is the defect this suite
         closes: a decision not to report was legible only to a reader who already knew
         the classifier's internals.
+
+        POST-MERGE UPDATE (sweep/mcp-f7-fp-suppression x master): the property under test
+        is "the caller can tell suppressed from scored by a STATEMENT, not by an absence" —
+        and merging origin/master's screening-transparency work made that MORE true, not
+        less. TWO fields now make the statement: `gate_reason` (this branch — names WHICH
+        suppression gate fired) and `detection_method` (master — names WHETHER anything was
+        scored at all). They are legitimate and complementary, not a collision; the original
+        exact-match on `{"gate_reason"}` alone was incidental over-specification of a
+        single-branch world, never the actual contract. The pin stays an EXACT set (not a
+        membership check) precisely so it still goes red the moment an unaccounted third
+        field starts naming the suppression.
         """
         supp = _verify(client, SHORT_RESPONSE).json()
         scored = _verify(client, LONG_RESPONSE).json()
@@ -241,12 +252,13 @@ class TestTheCallerCanTellSuppressedFromScored:
         # The inference that WAS available:
         assert supp["confidence"] == 0.0 and supp["features_triggered"] == []
         assert scored["confidence"] > 0.0 and scored["features_triggered"] != []
-        # ...and the statement that was not. Only the field added by this change names it.
+        # ...and the statement that was not. Exactly these two fields now name it —
+        # `gate_reason` (WHICH gate) and `detection_method` (WHETHER anything was scored).
         naming = {k: v for k, v in supp.items()
                   if isinstance(v, str) and ("suppress" in v or "gate" in v
                                              or "token_count_below" in v)}
-        assert set(naming) == {"gate_reason"}, (
-            "either the marker is missing (pre-fix) or a second, unregistered field "
+        assert set(naming) == {"gate_reason", "detection_method"}, (
+            "either a marker is missing (regression) or a third, unaccounted field "
             f"now also names the suppression: {naming}"
         )
 
