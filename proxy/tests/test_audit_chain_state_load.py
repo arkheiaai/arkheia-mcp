@@ -183,6 +183,78 @@ def test_no_malformed_seq_is_ever_adopted(tmp_path, hostile):
     )
 
 
+@pytest.mark.parametrize("hostile", [True, False, -1])
+def test_a_malformed_seq_is_never_adopted_even_with_no_valid_neighbour(tmp_path, hostile):
+    """
+    Mutation-campaign finding (hand-rolled campaign against
+    proxy/audit/writer.py, 2026-07-27, on top of PR #37's second-pass fix):
+    mutating ``_is_valid_seq`` to accept ``bool`` (isinstance(True, int) is
+    True) or negative ints SURVIVED against
+    ``test_no_malformed_seq_is_ever_adopted`` above. Root cause: that test's
+    fixture appends the hostile record AFTER two genuinely valid ones (seq 1,
+    2), and the backward walk takes the running MAX seq across the whole
+    tail -- so a wrongly-accepted hostile value (e.g. adopted as `1` for
+    ``True``) is silently overwritten by the real, larger seq of an older
+    record before the function returns, and the assertion passes for the
+    WRONG reason (a real record masked the bug, not the validator catching
+    it).
+
+    This test removes the mask: the hostile line is the ONLY line in the
+    log, so a wrongly-accepted value becomes ``highest_seq`` with nothing
+    left to overwrite it, and a validator bug is directly observable.
+    """
+    w = _writer(tmp_path)
+    w.log_path.write_text(
+        json.dumps({"seq": hostile, "prev_hash": GENESIS, "detection_id": "only"}) + "\n"
+    )
+
+    from proxy.audit.writer import _load_chain_state
+
+    state = _load_chain_state(w.log_path)
+    assert type(state.last_seq) is int and state.last_seq >= 0, (
+        f"a LONE malformed seq {hostile!r} was adopted as the chain's "
+        f"recovered seq: {state}"
+    )
+    # No valid this_hash either on this line -- recovery must say so.
+    assert state.ok is False, state
+
+
+def test_highest_valid_seq_in_the_tail_wins_even_when_not_the_newest_record(tmp_path):
+    """
+    Mutation-campaign finding: mutating the tail walk's ``highest_seq``
+    update from "take the max seen" to "take the first seen" (i.e. trust
+    that the newest/last-written record always carries the highest seq)
+    SURVIVED every existing test, because every fixture in this file writes
+    monotonically increasing seq numbers -- newest genuinely IS highest in
+    all of them, so the two implementations are indistinguishable there.
+
+    The module's own docstring is explicit that recovery adopts "the
+    HIGHEST valid seq seen in the tail" specifically so an attacker-crafted
+    (but individually well-formed and correctly hash-linked) tail cannot
+    walk a restart into re-issuing an already-used sequence number. This
+    constructs exactly that: two genuinely valid, correctly chained records
+    where the OLDER one carries the higher seq.
+    """
+    w = _writer(tmp_path)
+    prev = GENESIS
+    r1 = {"seq": 50, "prev_hash": prev, "detection_id": "older-higher-seq"}
+    h1 = _compute_hash(r1, prev)
+    r1["this_hash"] = h1
+    r2 = {"seq": 5, "prev_hash": h1, "detection_id": "newer-lower-seq"}
+    h2 = _compute_hash(r2, h1)
+    r2["this_hash"] = h2
+    w.log_path.write_text(json.dumps(r1) + "\n" + json.dumps(r2) + "\n")
+
+    from proxy.audit.writer import _load_chain_state
+
+    state = _load_chain_state(w.log_path)
+    assert state.last_seq == 50, (
+        f"recovered seq {state.last_seq}, expected the HIGHEST valid seq "
+        f"anywhere in the tail (50) -- not merely the newest record's own "
+        f"seq (5), which would let a restart re-issue seq 6..50: {state}"
+    )
+
+
 def test_a_non_object_last_line_is_not_adopted(tmp_path):
     """A JSON array/string parses fine and has no ``.get`` -- and must not be trusted."""
     w = _writer(tmp_path)
@@ -738,3 +810,43 @@ def test_startup_self_check_verdict_is_receipted_even_when_degraded(seeded_clien
     checks = [r for r in records if r.get("event_type") == "audit_chain_self_check"]
     assert len(checks) == 1, f"expected exactly one self-check receipt: {records}"
     assert checks[0]["ok"] is False, checks[0]
+
+
+def test_startup_self_check_receipt_carries_the_error_string(seeded_client_factory):
+    """
+    Mutation-campaign finding: dropping the ``"error"`` field from the
+    receipted record entirely SURVIVED every other receipted-axis test,
+    because none of them constructed a scenario where ``verify_chain()``
+    actually populates ``error`` (a break/gap-only degradation leaves it
+    ``None``). A fully unparseable log is the case that gives it real
+    content -- pin that the receipt carries the SAME message
+    ``app.state.audit_chain``/the WARNING log line report, not a
+    truncated or dropped one.
+    """
+    log_path, make_client = seeded_client_factory
+    log_path.write_text("not json\nalso not json\n{{{broken\n")
+
+    client = make_client()
+    with client:
+        health = client.get("/admin/health").json()
+
+    # The corrupt seed content itself is not valid JSONL, so re-read raw text
+    # and only parse lines the writer itself appended afterward (the seed
+    # lines above raise JSONDecodeError and are skipped, not counted).
+    all_lines = log_path.read_text(encoding="utf-8").splitlines()
+    checks = []
+    for ln in all_lines:
+        try:
+            rec = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(rec, dict) and rec.get("event_type") == "audit_chain_self_check":
+            checks.append(rec)
+    assert len(checks) == 1, f"expected exactly one self-check receipt: {all_lines}"
+    assert checks[0]["ok"] is False, checks[0]
+    assert checks[0]["error"], (
+        f"verify_chain() reported a real error string "
+        f"({health['audit_chain'].get('detail')!r}) but the receipted record "
+        f"carries none: {checks[0]}"
+    )
+    assert "parseable" in checks[0]["error"], checks[0]
