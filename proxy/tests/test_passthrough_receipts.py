@@ -264,7 +264,7 @@ async def test_the_refusal_row_is_chained_and_the_chain_verifies(probe):
     assert probe.recompute_this_hash(row) == row["this_hash"]
 
     chain = probe.verify_chain()
-    assert chain == {"ok": True, "verified": 1, "breaks": []}
+    assert chain == {"ok": True, "verified": 1, "breaks": [], "error": None}
 
 
 async def test_refusals_and_detections_share_one_unbroken_chain(probe):
@@ -306,7 +306,7 @@ async def test_refusals_and_detections_share_one_unbroken_chain(probe):
     assert [r["action_taken"] for r in rows] == ["refuse", "pass", "refuse"]
     for receipt_id in ids:
         assert probe.require(receipt_id)["action_taken"] == "refuse"
-    assert probe.verify_chain() == {"ok": True, "verified": 3, "breaks": []}
+    assert probe.verify_chain() == {"ok": True, "verified": 3, "breaks": [], "error": None}
 
 
 async def test_baseline_four_hundred_refusals_now_leave_four_hundred_rows(probe):
