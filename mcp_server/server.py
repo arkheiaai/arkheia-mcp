@@ -26,14 +26,17 @@ Transport: stdio (default — Claude Code / Claude Desktop)
 
 import os
 import logging
+from typing import Any
 
 import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from mcp_server.proxy_client import ProxyClient
 from mcp_server.tool_registry import (
+    REGISTRY,
     assert_registry_covers,
     check,
+    check_receipted,
     PolicyViolation,
 )
 from mcp_server.tools.providers import call_grok, call_gemini, call_ollama, call_together
@@ -46,7 +49,34 @@ ARKHEIA_PROXY_URL = os.environ.get("ARKHEIA_PROXY_URL", "http://localhost:8098")
 ARKHEIA_HOSTED_URL = os.environ.get("ARKHEIA_HOSTED_URL", "https://arkheia-proxy-production.up.railway.app")
 ARKHEIA_API_KEY = os.environ.get("ARKHEIA_API_KEY")
 
-mcp   = FastMCP("arkheia-trust")
+
+class GatedFastMCP(FastMCP):
+    """FastMCP with the policy gate at the orchestrator dispatch boundary."""
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]):
+        await check_receipted(
+            name,
+            call_site="dispatch",
+            argument_keys=list(arguments) if isinstance(arguments, dict) else None,
+        )
+        return await super().call_tool(name, arguments)
+
+    async def list_tools_ungated(self):
+        return await FastMCP.list_tools(self)
+
+    async def list_tools(self):
+        advertised = await FastMCP.list_tools(self)
+        governed = [tool for tool in advertised if tool.name in REGISTRY]
+        ungoverned = sorted(tool.name for tool in advertised if tool.name not in REGISTRY)
+        if ungoverned:
+            logger.error(
+                "withholding ungoverned MCP tools from tools/list: %s",
+                ungoverned,
+            )
+        return governed
+
+
+mcp   = GatedFastMCP("arkheia-trust")
 proxy = ProxyClient(
     base_url=ARKHEIA_PROXY_URL,
     hosted_url=ARKHEIA_HOSTED_URL,
@@ -437,7 +467,7 @@ def startup_policy_selfcheck() -> None:
     REGISTRY is loaded from a signed/remote policy store (the documented
     enterprise upgrade hook), where a static parse cannot see the contents.
     """
-    advertised = [t.name for t in anyio.run(mcp.list_tools)]
+    advertised = [t.name for t in anyio.run(mcp.list_tools_ungated)]
     assert_registry_covers(advertised)
     logger.info(
         "tool-registry policy self-check OK: %d advertised tools, all covered",

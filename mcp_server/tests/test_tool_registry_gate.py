@@ -48,6 +48,7 @@ from enum import Enum
 import pytest
 
 from mcp_server import server as srv
+from mcp_server import receipts
 from mcp_server.tool_registry import (
     REGISTRY,
     Permission,
@@ -57,6 +58,8 @@ from mcp_server.tool_registry import (
     ToolPolicy,
     assert_registry_covers,
     check,
+    check_receipted,
+    decide,
 )
 
 # The nine tools this server is expected to expose. Hard-coded on purpose: a set
@@ -86,13 +89,17 @@ DICT_RETURNING_TOOLS = {"run_grok", "run_gemini", "run_together", "run_ollama"}
 
 
 @pytest.fixture(autouse=True)
-def _isolate_memory_db(tmp_path, monkeypatch):
+def _isolate_memory_db_and_receipts(tmp_path, monkeypatch):
     """mcp_server/tools/memory.py defaults MEMORY_DB_PATH to the hard-coded
     Windows path 'C:/arkheia-mcp/data/memory.db', which on POSIX creates a literal
     './C:' directory under the CWD. Point it at tmp_path so this suite never
     writes outside its sandbox. (The hard-coded default is a separate defect,
     named in the PR body — it belongs to the memory flow, not the gate.)"""
     monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "memory.db"))
+    monkeypatch.setenv(
+        "ARKHEIA_TOOL_GATE_RECEIPT_LOG",
+        str(tmp_path / "tool-gate-receipts.jsonl"),
+    )
 
 
 @pytest.fixture
@@ -807,6 +814,108 @@ class TestRegistryCoverage:
         """So an existing `except PolicyViolation` handler cannot let a coverage
         failure through as an unrelated crash."""
         assert issubclass(RegistryCoverageError, PolicyViolation)
+
+
+# ---------------------------------------------------------------------------
+# Receipted gate — allow and deny decisions leave attributable evidence
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+class TestReceiptedGate:
+
+    async def test_allowed_dispatch_decision_is_written_to_the_audit_rail(
+        self, tmp_path
+    ):
+        log_path = tmp_path / "gate.jsonl"
+        decision = await decide(
+            "memory_retrieve",
+            call_site="unit",
+            argument_keys=["query", "limit"],
+            log_path=log_path,
+        )
+
+        assert decision.allowed is True
+        assert decision.policy is REGISTRY["memory_retrieve"]
+        assert decision.receipt_status == receipts.STATUS_RECORDED
+        assert decision.receipt_id
+
+        row = receipts.find_receipt(log_path, decision.receipt_id)
+        assert row is not None
+        assert row["event_type"] == "mcp.tool_gate"
+        assert row["tool"] == "memory_retrieve"
+        assert row["decision"] == receipts.DECISION_ALLOWED
+        assert row["control"] == "tool_registry_gate"
+        assert row["call_site"] == "unit"
+        assert row["permissions_applied"] == ["read"]
+        assert row["argument_keys"] == ["limit", "query"]
+        assert row["deny_code"] is None
+        assert row["seq"] == 1
+        assert row["prev_hash"] == "0" * 64
+        assert row["this_hash"]
+
+    async def test_denied_dispatch_decision_is_written_before_refusal_reaches_caller(
+        self, tmp_path
+    ):
+        log_path = tmp_path / "gate.jsonl"
+
+        with pytest.raises(PolicyViolation) as exc:
+            await check_receipted("exfiltrate_secrets", log_path=log_path)
+
+        assert exc.value.tool_name == "exfiltrate_secrets"
+        assert exc.value.code == "not_registered"
+        assert exc.value.receipt_status == receipts.STATUS_RECORDED
+        assert exc.value.receipt_id in str(exc.value)
+
+        row = receipts.find_receipt(log_path, exc.value.receipt_id)
+        assert row is not None
+        assert row["decision"] == receipts.DECISION_DENIED
+        assert row["tool"] == "exfiltrate_secrets"
+        assert row["deny_code"] == "not_registered"
+        assert "default deny" in row["deny_reason"]
+        assert row["permissions_applied"] is None
+
+    async def test_dispatch_chokepoint_receipts_an_unknown_name(self, tmp_path, monkeypatch):
+        log_path = tmp_path / "dispatch.jsonl"
+        monkeypatch.setenv("ARKHEIA_TOOL_GATE_RECEIPT_LOG", str(log_path))
+
+        with pytest.raises(PolicyViolation) as exc:
+            await srv.mcp.call_tool("exfiltrate_secrets", {})
+
+        assert exc.value.receipt_status == receipts.STATUS_RECORDED
+        row = receipts.find_receipt(log_path, exc.value.receipt_id)
+        assert row is not None
+        assert row["call_site"] == "dispatch"
+        assert row["decision"] == receipts.DECISION_DENIED
+        assert row["tool"] == "exfiltrate_secrets"
+
+    async def test_argument_values_do_not_enter_the_policy_receipt(self, tmp_path):
+        log_path = tmp_path / "gate.jsonl"
+        secret = "sk-ant-VERYSECRETTOOLARGUMENTVALUE1234567890"
+
+        decision = await decide(
+            "memory_store",
+            argument_keys=["name", "observations"],
+            log_path=log_path,
+        )
+
+        assert decision.receipt_status == receipts.STATUS_RECORDED
+        assert secret.encode() not in log_path.read_bytes()
+        row = receipts.find_receipt(log_path, decision.receipt_id)
+        assert row is not None
+        assert row["argument_keys"] == ["name", "observations"]
+        assert "argument_values" not in row
+
+    async def test_receipt_failure_does_not_change_the_gate_decision(self, tmp_path):
+        denied = await decide("exfiltrate_secrets", log_path="relative.jsonl")
+        assert denied.allowed is False
+        assert denied.violation is not None
+        assert denied.receipt_status == receipts.STATUS_UNRECORDED
+        assert denied.violation.receipt_status == receipts.STATUS_UNRECORDED
+
+        allowed = await decide("memory_retrieve", log_path="relative.jsonl")
+        assert allowed.allowed is True
+        assert allowed.policy is REGISTRY["memory_retrieve"]
+        assert allowed.receipt_status == receipts.STATUS_UNRECORDED
 
 
 # ---------------------------------------------------------------------------
