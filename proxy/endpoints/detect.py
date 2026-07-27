@@ -84,6 +84,20 @@ class VerifyResponse(BaseModel):
     evidence_depth_limited: bool = True
     detection_method: Optional[str] = None
     profile_model_id: Optional[str] = None
+    # SUPPRESSION MARKER. Which false-positive suppression gate produced this verdict,
+    # and against which threshold — one of the closed values in
+    # proxy/detection/features.py (SUPPRESSION_REASONS), e.g. "token_count_below_80",
+    # "output_tokens_below_1", "function_call_part". None means the verdict was
+    # actually SCORED.
+    #
+    # A suppressed verdict is LOW with confidence 0.0 and no features triggered, which
+    # is a couldn't-assess, NOT a clean bill of health. Before this field the reason
+    # died inside features.py: a caller could only infer suppression from a conjunction
+    # of two absences (confidence == 0.0 AND features_triggered == []) that nothing
+    # documents, and the MCP tool consuming this endpoint tells its agent
+    # `LOW -- surface normally`. ALWAYS emitted, null when scored: an absent field is
+    # indistinguishable from an older proxy that never set it.
+    gate_reason: Optional[str] = None
     # Which detection path served this verdict. ProxyClient.verify() serves callers
     # from the local proxy OR the hosted API and the caller does not choose;
     # _verify_hosted already stamps source="hosted", so the local path must declare
@@ -247,6 +261,10 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
         evidence_depth_limited=bool(getattr(result, "evidence_depth_limited", True)),
         detection_method=getattr(result, "detection_method", None),
         profile_model_id=getattr(result, "profile_model_id", None),
+        # Read via getattr so an engine built before the field existed degrades to None
+        # rather than raising inside a path contracted never to crash the pipeline it
+        # monitors.
+        gate_reason=getattr(result, "gate_reason", None),
     )
 
     # Async audit write -- does not block; never crashes the response pipeline
@@ -268,6 +286,10 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
             "confidence": response.confidence,
             "features_triggered": response.features_triggered,
             "profile_version": response.profile_version,
+            # Which suppression gate produced this LOW, if any. Without it the
+            # governance plane records a never-scored response and an assessed clean
+            # one as the same event.
+            "gate_reason": response.gate_reason,
             "prompt_hash": hashlib.sha256(req.prompt.encode()).hexdigest(),
             "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
             "action_taken": action,
@@ -309,6 +331,11 @@ def _audit_record(response: VerifyResponse, req: VerifyRequest, action: str) -> 
         "evidence_depth_limited": response.evidence_depth_limited,
         "detection_method": response.detection_method,
         "profile_model_id": response.profile_model_id,
+        # The suppression marker in the FORENSIC record too. This log is the compliance
+        # artefact: a row reading "LOW" for a response nothing was measured on records a
+        # screening that did not happen. Structural metadata only — a gate reason names
+        # a threshold, never prompt or response text, so the log's contract holds.
+        "gate_reason": response.gate_reason,
         "prompt_hash": hashlib.sha256(req.prompt.encode()).hexdigest(),
         "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
         "response_length": len(req.response),

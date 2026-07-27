@@ -40,6 +40,17 @@ class DetectionResult:
     # e.g. "grok-3" resolves to the "grok-3-mini-fast" fingerprint. None when no
     # profile matched. Compare against model_id to detect a substitution.
     profile_model_id: Optional[str] = None
+    # WHICH false-positive suppression gate fired, and against WHICH threshold — a value
+    # from the closed vocabulary in proxy/detection/features.py (SUPPRESSION_REASONS),
+    # or None when the verdict was actually SCORED.
+    #
+    # A suppression is a decision NOT to report something, so it is the decision whose
+    # evidence trail matters most; before this field existed the reason died inside
+    # features.py and no consumer — caller, audit record or governance push — could say
+    # why a LOW was a LOW. Non-None is the positive marker for "nothing was measured";
+    # None is the marker for "measured, and clean". It must never be set on a scored
+    # verdict or it stops discriminating.
+    gate_reason: Optional[str] = None
     # Gate eligibility (2026-06-28 containment). Consumers MUST only hard-block when this
     # is "block"; default "advise" so an unvalidated/UNKNOWN profile can never block.
     gate_action: str = "advise"
@@ -140,6 +151,7 @@ class DetectionEngine:
             evidence_depth_limited=result.get("evidence_depth_limited", True),
             detection_method=result.get("detection_method"),
             profile_model_id=profile_model_id,
+            gate_reason=(result.get("metrics") or {}).get("gate_reason"),
             gate_action=result.get("gate_action", "advise"),
             metrics=result.get("metrics", {}),
         )
