@@ -421,6 +421,8 @@ def _forward_headers(headers: Headers) -> list[tuple[str, str]]:
                 )
         if lowered not in FORWARDABLE_HEADERS:
             continue
+        if lowered in nominated:
+            continue
         out.append((name, value))
     return out
 
