@@ -216,9 +216,11 @@ def wire():
     # Only the base URL constant moves. Everything the gate verifies against is
     # derived from `base`, so the provider stays internally consistent, and
     # `replace` copies whatever fields the dataclass has — pre-fix or post-fix.
-    originals = {name: getattr(pt, name) for name in ("GROK", "ANTHROPIC", "GEMINI")}
+    originals = {name: getattr(pt, name)
+                 for name in ("GROK", "TOGETHER", "ANTHROPIC", "GEMINI")}
     local = f"http://127.0.0.1:{sink.port}"
     pt.GROK = dataclasses.replace(originals["GROK"], base=local + "/v1")
+    pt.TOGETHER = dataclasses.replace(originals["TOGETHER"], base=local + "/v1")
     pt.ANTHROPIC = dataclasses.replace(originals["ANTHROPIC"], base=local + "/v1")
     pt.GEMINI = dataclasses.replace(originals["GEMINI"], base=local + "/v1beta")
 
@@ -430,4 +432,210 @@ def test_gemini_still_receives_its_own_query_key(wire):
     assert len(delivered) == 1
     assert f"key={FAKE_GOOGLE_KEY}" in delivered[0]["request_line"], (
         f"Google's own credential parameter was dropped: {delivered[0]['request_line']}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# CRED-3 — the multiplicity is per DESTINATION, across every channel
+#
+# WHAT EARNED THIS (2026-07-27, found by a second vendor — Codex, gpt-5.5, on
+# the fix for the round-2 defect above)
+# ---------------------------------------------------------------------------
+# Round 2's own stated lesson was "a per-header rule cannot see a cross-header
+# interaction". It then shipped a gate that counts credential HEADERS — so it
+# cannot see a header ⇄ QUERY-PARAMETER interaction either, nor a repeated query
+# parameter. Gemini is the destination where that is reachable, because Google
+# genuinely accepts three credential FORMS (`authorization`, `x-goog-api-key`,
+# `?key=`), and the round-2 screen looked at exactly one channel.
+#
+# Codex proved both, at a real socket, against the round-2 code:
+#
+#   POST /v1beta/models/…:generateContent?key=<google>   + Authorization: Bearer …
+#       -> 200, and the destination received BOTH the bearer header AND the key
+#          in its request line: two credentials forwarded on one request.
+#   POST /v1beta/models/…:generateContent?key=FIRST&key=SECOND
+#       -> 200, and the destination received ONE key — SECOND. The query-string
+#          twin of the `Authorization` last-wins defect round 1 fixed: the
+#          caller's first credential was silently discarded.
+#
+# The invariant is therefore over the SHAPE OF THE CREDENTIAL SET FOR A
+# DESTINATION — how many credentials are addressed to it, whatever channel each
+# arrives on — not over any one channel's contents.
+#
+# The nuance that must survive: Gemini accepts more than one credential FORM,
+# and exactly one of them by ANY channel must still work. The defect is more
+# than one AT ONCE. The control rows below are what make this a boundary rather
+# than a ban.
+
+
+def test_gemini_never_receives_a_header_credential_and_a_query_credential(wire):
+    """
+    CODEX'S EXACT CASE 1. A bearer in the header AND Google's key in the query,
+    both credentials this destination legitimately accepts — one at a time.
+
+    Round-2 code, measured on this sink: 200, and the destination received the
+    authorization header AND `key=` in its request line.
+    """
+    port, sink = wire
+    before = len(sink.received)
+
+    status, body = raw_call(
+        port,
+        f"/v1beta/models/gemini-2.5-flash:generateContent?key={FAKE_GOOGLE_KEY}",
+        [f"Authorization: {FAKE_BEARER}"],
+    )
+
+    delivered = sink.received[before:]
+    both = [
+        entry for entry in delivered
+        if "authorization" in {k for k, _ in entry["headers"]}
+        and "key=" in entry["request_line"]
+    ]
+    assert not both, (
+        "the destination received TWO credentials on one request — a header one "
+        f"and a query one: {[e['request_line'] for e in both]}"
+    )
+    assert status == 400, (
+        f"a request carrying two credentials for one destination was accepted: {body!r}"
+    )
+    assert delivered == [], "a refused request produced upstream traffic"
+
+
+def test_gemini_never_silently_collapses_a_repeated_query_credential(wire):
+    """
+    CODEX'S EXACT CASE 2. `?key=FIRST&key=SECOND`.
+
+    Round-2 code, measured on this sink: 200, and the request line that reached
+    the destination carried SECOND and not FIRST — a credential the caller sent
+    was discarded without anyone being told. That is the query-string twin of
+    the `Authorization` last-wins defect this branch already refused for
+    headers, and it is refused here for the same reason: a silent drop trades an
+    integrity bug for an honesty bug.
+    """
+    port, sink = wire
+    before = len(sink.received)
+
+    first = FAKE_GOOGLE_KEY + "-FIRST"
+    second = FAKE_GOOGLE_KEY + "-SECOND"
+    status, body = raw_call(
+        port,
+        "/v1beta/models/gemini-2.5-flash:generateContent"
+        f"?key={first}&key={second}",
+        [],
+    )
+
+    collapsed = [
+        entry for entry in sink.received[before:]
+        if second in entry["request_line"] and first not in entry["request_line"]
+    ]
+    assert not collapsed, (
+        "the destination received the LAST of two credentials and the first was "
+        f"silently dropped: {[e['request_line'] for e in collapsed]}"
+    )
+    assert status == 400, f"a repeated credential parameter was accepted: {body!r}"
+    assert sink.received[before:] == [], "a refused request produced upstream traffic"
+
+
+# ---------------------------------------------------------------------------
+# CRED-4 — the control rows. Gemini accepts three credential FORMS; each of
+# them, alone, must still reach Google verbatim. A screen that refused these
+# would have traded a disclosure for an outage.
+# ---------------------------------------------------------------------------
+
+def test_gemini_receives_its_own_header_key_alone(wire):
+    port, sink = wire
+    before = len(sink.received)
+
+    status, _body = raw_call(
+        port, "/v1beta/models/gemini-2.5-flash:generateContent",
+        [f"X-Goog-Api-Key: {FAKE_GOOGLE_KEY}"],
+    )
+
+    assert status == 200
+    delivered = sink.received[before:]
+    assert len(delivered) == 1
+    seen = {k for k, _ in delivered[0]["headers"]} & CREDENTIAL_HEADER_NAMES
+    assert seen == {"x-goog-api-key"}, f"destination saw credential headers {sorted(seen)}"
+    assert sink.header_value("x-goog-api-key") == FAKE_GOOGLE_KEY
+
+
+def test_gemini_receives_its_own_oauth_bearer_alone(wire):
+    port, sink = wire
+    before = len(sink.received)
+
+    status, _body = raw_call(
+        port, "/v1beta/models/gemini-2.5-flash:generateContent",
+        [f"Authorization: {FAKE_BEARER}"],
+    )
+
+    assert status == 200
+    delivered = sink.received[before:]
+    assert len(delivered) == 1
+    seen = {k for k, _ in delivered[0]["headers"]} & CREDENTIAL_HEADER_NAMES
+    assert seen == {"authorization"}, f"destination saw credential headers {sorted(seen)}"
+    assert sink.header_value("authorization") == FAKE_BEARER
+    assert "key=" not in delivered[0]["request_line"]
+
+
+def test_together_receives_exactly_its_own_credential(wire):
+    """The fourth destination. Enumerated so no provider is proved by analogy."""
+    port, sink = wire
+    before = len(sink.received)
+
+    status, _body = raw_call(port, "/proxy/together/v1/chat/completions", [
+        f"Authorization: {FAKE_BEARER}",
+    ])
+
+    assert status == 200
+    delivered = sink.received[before:]
+    assert len(delivered) == 1
+    seen = {k for k, _ in delivered[0]["headers"]} & CREDENTIAL_HEADER_NAMES
+    assert seen == {"authorization"}, f"destination saw credential headers {sorted(seen)}"
+    assert sink.header_value("authorization") == FAKE_BEARER
+
+
+def test_anthropic_receives_its_own_oauth_bearer_alone(wire):
+    """
+    Anthropic's second accepted FORM, alone. Round 2 proved x-api-key alone;
+    a destination that accepts either must be shown to accept either.
+    """
+    port, sink = wire
+    before = len(sink.received)
+
+    status, _body = raw_call(port, "/v1/messages", [
+        f"Authorization: {FAKE_BEARER}",
+        "Anthropic-Version: 2023-06-01",
+    ])
+
+    assert status == 200
+    delivered = sink.received[before:]
+    assert len(delivered) == 1
+    seen = {k for k, _ in delivered[0]["headers"]} & CREDENTIAL_HEADER_NAMES
+    assert seen == {"authorization"}, f"destination saw credential headers {sorted(seen)}"
+    assert sink.header_value("authorization") == FAKE_BEARER
+
+
+def test_a_repeated_ordinary_parameter_is_not_collapsed(wire):
+    """
+    The counterpart to the ruling: multiplicity is preserved for parameters that
+    are NOT credentials, rather than the whole query string being flattened.
+    `dict(request.query_params)` dropped the first of any repeated parameter —
+    a silent alteration of the caller's request, credential or not.
+    """
+    port, sink = wire
+    before = len(sink.received)
+
+    status, _body = raw_call(
+        port,
+        "/v1beta/models/gemini-2.5-flash:generateContent"
+        f"?key={FAKE_GOOGLE_KEY}&alt=sse&alt=json",
+        [],
+    )
+
+    assert status == 200
+    delivered = sink.received[before:]
+    assert len(delivered) == 1
+    line = delivered[0]["request_line"]
+    assert "alt=sse" in line and "alt=json" in line, (
+        f"a repeated non-credential parameter was collapsed: {line}"
     )
