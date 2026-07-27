@@ -27,10 +27,7 @@ Add to your agent config (Claude Code, Claude Desktop, Cursor, or any MCP-compat
   "mcpServers": {
     "arkheia": {
       "command": "npx",
-      "args": ["-y", "@arkheia/mcp-server"],
-      "env": {
-        "ARKHEIA_API_KEY": "<arkheia-api-key>"
-      }
+      "args": ["-y", "@arkheia/mcp-server"]
     }
   }
 }
@@ -40,6 +37,9 @@ The npm launcher runs the Python server bundled in the package. It verifies the
 bundle before creating `~/.arkheia/venv` and installs dependencies only from the
 package-owned `python/requirements.txt`; it does not clone the GitHub repo at
 runtime.
+
+Launch your MCP client with `ARKHEIA_API_KEY` already present in its process
+environment, or opt in to the installer-managed private config file.
 
 Restart your agent. Then ask it:
 
