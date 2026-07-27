@@ -220,3 +220,90 @@ class ReceiptProbe:
 def contains(haystack: bytes, needle: Any) -> bool:
     """Substring test against the raw on-disk bytes, not a parsed view."""
     return str(needle).encode("utf-8") in haystack
+
+
+def assert_decision_identity(
+    row: dict, *, branch: str, expect_source: Optional[str] = None
+) -> None:
+    """
+    Every governance row on the rail carries the identity of the decision it
+    describes — asserted on the row AS READ BACK OFF DISK.
+
+    Why this is its own helper rather than three lines in each test: a
+    hash-chained row with no ``decision_id``, no ``decided_at`` and
+    ``receipt_deferred_ms: null`` is a record that LOOKS like evidence and is
+    not one — worse than no row, because it counts. Codex reproduced exactly
+    that on the production key-load branches of ``proxy/main.py`` (PR #34) while
+    the covering tests asserted only row existence, ``outcome`` and count, and
+    therefore could not see it.
+
+    Every assertion below pins a positively computed value. ``receipt_deferred_ms``
+    in particular is checked against the difference between the two timestamps in
+    the same row, so a hard-coded zero cannot satisfy it.
+    """
+    import uuid as _uuid
+    from datetime import datetime
+
+    decision_id = row.get("decision_id")
+    assert decision_id, (
+        f"{branch}: the row on disk carries no decision_id "
+        f"({decision_id!r}). A hash-chained row that cannot be tied to the "
+        f"decision it describes is not a receipt. Fields present on the row: "
+        # NAMES, never values. Every field on a decision record is built from
+        # arguments whose lineage includes key material, so a diagnostic that
+        # dumps the row is one careless future field away from printing it —
+        # the same reasoning that produced _label()/_uuid_label() after CodeQL
+        # flagged this module. The shape is what a red run needs anyway.
+        f"{sorted(row)}"
+    )
+    assert str(_uuid.UUID(hex=str(decision_id))) == str(decision_id), (
+        f"{branch}: decision_id {decision_id!r} is not a canonical UUID"
+    )
+
+    decided_at = row.get("decided_at")
+    assert decided_at, (
+        f"{branch}: the row on disk carries no decided_at ({decided_at!r}). "
+        f"Without it nothing states WHEN the decision was taken, and the "
+        f"deferral this flow exists to disclose cannot be computed at all"
+    )
+    decided = datetime.fromisoformat(str(decided_at))
+    assert decided.tzinfo is not None, (
+        f"{branch}: decided_at {decided_at!r} carries no timezone"
+    )
+
+    enqueued_at = row.get("receipt_enqueued_at")
+    assert enqueued_at, f"{branch}: the row carries no receipt_enqueued_at"
+    enqueued = datetime.fromisoformat(str(enqueued_at))
+
+    deferred = row.get("receipt_deferred_ms")
+    assert isinstance(deferred, (int, float)) and not isinstance(deferred, bool), (
+        f"{branch}: receipt_deferred_ms is {deferred!r}, not a number. The "
+        f"deferral-as-a-field mechanism reports null exactly when the record "
+        f"never had a decided_at to defer from — a null here means the branch "
+        f"never reached the mechanism"
+    )
+    assert deferred >= 0, f"{branch}: receipt_deferred_ms is negative ({deferred})"
+
+    expected = round((enqueued - decided).total_seconds() * 1000.0, 3)
+    assert abs(deferred - expected) < 1.0, (
+        f"{branch}: receipt_deferred_ms={deferred} does not describe the gap "
+        f"between decided_at and receipt_enqueued_at in the same row "
+        f"({expected}). A constant would satisfy 'is a number'; it must not "
+        f"satisfy this"
+    )
+
+    source = row.get("decided_at_source")
+    assert source in ("journalled_at_decision", "stamped_at_emit"), (
+        f"{branch}: decided_at_source is {source!r}. A reader must be able to "
+        f"tell a decided_at recorded AT the decision from one stamped when the "
+        f"record reached the rail; an unlabelled timestamp claims the first "
+        f"while possibly being the second"
+    )
+    if expect_source is not None:
+        assert source == expect_source, (
+            f"{branch}: decided_at_source is {source!r}, expected "
+            f"{expect_source!r}. A record journalled at the decision and one "
+            f"stamped when it reached the rail describe different facts, and a "
+            f"row that reports the wrong one is telling a reader the deferral "
+            f"was something it was not"
+        )

@@ -139,7 +139,31 @@ def harness(tmp_path, mock_engine):
 
 
 def _lines(content: str) -> list[dict]:
-    return [json.loads(ln) for ln in content.splitlines() if ln.strip()]
+    """
+    Records this test's own POSTs produced -- not the whole audit log.
+
+    The real lifespan this harness boots (proxy.main.create_app) receipts its
+    own startup decisions before the first request ever lands: F20's
+    _resolve_profile_key() unconditionally journals a profile_key.load record
+    for every boot, including the benign "no encrypted profiles" branch, on
+    the principle that a decision is a decision even when it is not a
+    failure. That record is legitimate and expected on every harness run in
+    this file -- it is not something this write-path/redaction test is about,
+    and asserting a raw len(records) against it would make every test here
+    fragile to any future startup-time record, legitimate or not.
+
+    /detect/verify's _audit_record() (proxy/endpoints/detect.py) is the one
+    write site under test here and it always stamps "source": "proxy",
+    including on every fail-safe branch (model_id_missing,
+    engine_unavailable, ...). Startup governance records use other source
+    values (profile_key_loader, profile_router, profile_decision_journal), so
+    filtering on "proxy" isolates exactly the records this test caused,
+    while still asserting an exact count on the exact right subject.
+    """
+    return [
+        r for r in (json.loads(ln) for ln in content.splitlines() if ln.strip())
+        if r.get("source") == "proxy"
+    ]
 
 
 # ---------------------------------------------------------------------------
