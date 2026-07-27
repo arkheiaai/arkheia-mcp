@@ -4,10 +4,8 @@ import json
 import os
 import shlex
 import shutil
-import stat
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,13 +17,6 @@ def _fixture_key(label: str) -> str:
 
 
 PRIMARY_VALUE = _fixture_key("primary")
-SECONDARY_VALUE = _fixture_key("secondary")
-
-
-def _mode(path: Path) -> int:
-    return stat.S_IMODE(path.stat().st_mode)
-
-
 def _combined(result: subprocess.CompletedProcess[str]) -> str:
     return result.stdout + result.stderr
 
@@ -152,7 +143,7 @@ def _run_install(
     )
 
 
-def test_npm_postinstall_requires_explicit_key_persistence_and_skips_global_claude_md(tmp_path: Path):
+def test_npm_postinstall_does_not_persist_keys_or_global_claude_md(tmp_path: Path):
     result = _run_setup(tmp_path)
 
     assert PRIMARY_VALUE not in _combined(result)
@@ -162,20 +153,11 @@ def test_npm_postinstall_requires_explicit_key_persistence_and_skips_global_clau
     assert "Global Claude instructions not modified" in result.stdout
 
 
-def test_npm_persist_opt_in_writes_private_config_and_is_idempotent(tmp_path: Path):
-    first = _run_setup(tmp_path, env_extra={"ARKHEIA_PERSIST_API_KEY": "1"})
-    config_file = tmp_path / ".arkheia" / "config.json"
+def test_npm_persist_opt_in_is_noop_for_api_key_storage(tmp_path: Path):
+    result = _run_setup(tmp_path, env_extra={"ARKHEIA_PERSIST_API_KEY": "1"})
 
-    assert PRIMARY_VALUE not in _combined(first)
-    assert _mode(tmp_path / ".arkheia") == 0o700
-    assert _mode(config_file) == 0o600
-    assert json.loads(config_file.read_text(encoding="utf-8"))["api_key"] == PRIMARY_VALUE
-    first_contents = config_file.read_text(encoding="utf-8")
-
-    second = _run_setup(tmp_path, env_extra={"ARKHEIA_PERSIST_API_KEY": "1"})
-
-    assert PRIMARY_VALUE not in _combined(second)
-    assert config_file.read_text(encoding="utf-8") == first_contents
+    assert PRIMARY_VALUE not in _combined(result)
+    assert not (tmp_path / ".arkheia" / "config.json").exists()
     assert not (tmp_path / ".claude" / "CLAUDE.md").exists()
 
 
@@ -193,48 +175,6 @@ def test_npm_dry_run_writes_nothing_even_with_opt_ins(tmp_path: Path):
     assert not (tmp_path / ".arkheia").exists()
     assert not (tmp_path / ".claude").exists()
     assert "Would install Claude protocol" in result.stdout
-
-
-def test_npm_config_write_rolls_back_and_keeps_private_modes(tmp_path: Path):
-    arkheia_dir = tmp_path / ".arkheia"
-    arkheia_dir.mkdir(mode=0o755)
-    config_file = arkheia_dir / "config.json"
-    original = {
-        "api_key": PRIMARY_VALUE,
-        "proxy_url": "https://old.example",
-        "provisioned_at": "2026-01-01T00:00:00+00:00",
-    }
-    config_file.write_text(json.dumps(original, indent=2) + "\n", encoding="utf-8")
-    config_file.chmod(0o644)
-
-    probe = textwrap.dedent(
-        f"""
-        const setup = require({json.dumps(str(SETUP_JS))});
-        try {{
-          setup.saveConfig(process.env.NEW_VALUE, {{
-            home: process.env.HOME,
-            failAfterWrite: true,
-          }});
-          process.exit(20);
-        }} catch (err) {{
-          process.stdout.write(err.message);
-        }}
-        """
-    )
-    result = subprocess.run(
-        ["node", "-e", probe],
-        cwd=ROOT,
-        env={**_base_env(tmp_path), "NEW_VALUE": SECONDARY_VALUE},
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=True,
-    )
-
-    assert SECONDARY_VALUE not in _combined(result)
-    assert json.loads(config_file.read_text(encoding="utf-8")) == original
-    assert _mode(arkheia_dir) == 0o700
-    assert _mode(config_file) == 0o600
 
 
 def test_install_sh_dry_run_writes_nothing_and_does_not_echo_key(tmp_path: Path):
@@ -255,7 +195,7 @@ def test_install_sh_dry_run_writes_nothing_and_does_not_echo_key(tmp_path: Path)
     assert "Dry run" in result.stdout
 
 
-def test_install_sh_persist_opt_in_private_modes_secret_free_configs_and_idempotence(tmp_path: Path):
+def test_install_sh_configures_clients_without_persisting_api_key(tmp_path: Path):
     home = tmp_path / "home"
     home.mkdir()
     claude_code_dir = home / ".claude"
@@ -270,13 +210,10 @@ def test_install_sh_persist_opt_in_private_modes_secret_free_configs_and_idempot
         env_extra={"ARKHEIA_API_KEY": PRIMARY_VALUE},
     )
 
-    config_file = home / ".arkheia" / "config.json"
     desktop_config = _claude_desktop_config(home)
 
     assert PRIMARY_VALUE not in _combined(first)
-    assert json.loads(config_file.read_text(encoding="utf-8"))["api_key"] == PRIMARY_VALUE
-    assert _mode(home / ".arkheia") == 0o700
-    assert _mode(config_file) == 0o600
+    assert not (home / ".arkheia" / "config.json").exists()
 
     desktop = json.loads(desktop_config.read_text(encoding="utf-8"))
     code = json.loads(claude_settings.read_text(encoding="utf-8"))
@@ -286,7 +223,6 @@ def test_install_sh_persist_opt_in_private_modes_secret_free_configs_and_idempot
     assert PRIMARY_VALUE not in claude_settings.read_text(encoding="utf-8")
     assert not (claude_code_dir / "CLAUDE.md").exists()
 
-    first_config = config_file.read_text(encoding="utf-8")
     first_desktop = desktop_config.read_text(encoding="utf-8")
     first_code = claude_settings.read_text(encoding="utf-8")
 
@@ -298,7 +234,7 @@ def test_install_sh_persist_opt_in_private_modes_secret_free_configs_and_idempot
     )
 
     assert PRIMARY_VALUE not in _combined(second)
-    assert config_file.read_text(encoding="utf-8") == first_config
+    assert not (home / ".arkheia" / "config.json").exists()
     assert desktop_config.read_text(encoding="utf-8") == first_desktop
     assert claude_settings.read_text(encoding="utf-8") == first_code
 

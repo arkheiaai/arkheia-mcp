@@ -12,8 +12,8 @@
 #   3. Installs @arkheia/mcp-server via npx
 #   4. Writes Claude Desktop / Claude Code MCP config
 #
-# API keys are not persisted unless you pass --persist-api-key or explicitly
-# opt in at the interactive prompt.
+# This installer does not persist API keys. Start your MCP client with
+# ARKHEIA_API_KEY in its process environment.
 # ============================================================================
 
 set -euo pipefail
@@ -25,12 +25,6 @@ API_KEY="${ARKHEIA_API_KEY:-}"
 unset ARKHEIA_API_KEY
 EMAIL=""
 DRY_RUN=0
-PERSIST_API_KEY="${ARKHEIA_PERSIST_API_KEY:-}"
-if [ "${ARKHEIA_PERSIST_API_KEY+x}" = "x" ]; then
-    PERSIST_API_KEY_SET=1
-else
-    PERSIST_API_KEY_SET=0
-fi
 
 # ---------------------------------------------------------------------------
 # Colours (disabled if not a terminal)
@@ -76,13 +70,10 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --persist-api-key)
-            PERSIST_API_KEY=1
-            PERSIST_API_KEY_SET=1
+            warn "--persist-api-key is deprecated; this installer does not write API keys to disk."
             shift
             ;;
         --no-persist-api-key)
-            PERSIST_API_KEY=0
-            PERSIST_API_KEY_SET=1
             shift
             ;;
         --dry-run)
@@ -94,8 +85,8 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options (pass via: bash -s -- --option value):"
             echo "  --email EMAIL          Email for free-tier key provisioning"
-            echo "  --persist-api-key      Save ARKHEIA_API_KEY to ~/.arkheia/config.json"
-            echo "  --no-persist-api-key   Do not save ARKHEIA_API_KEY"
+            echo "  --persist-api-key      Deprecated no-op; API keys are not written by this installer"
+            echo "  --no-persist-api-key   Deprecated no-op; retained for compatibility"
             echo "  --dry-run              Print planned actions without writing files or calling network services"
             exit 0
             ;;
@@ -151,95 +142,6 @@ if [ -z "$PYTHON_CMD" ]; then
     fail "Python 3.10+ is required but not found. Install from https://python.org"
 fi
 ok "Python $($PYTHON_CMD --version 2>&1)"
-
-write_arkheia_api_key_config() {
-    local config_file="$1"
-    local api_key="$2"
-    local hosted_url="$3"
-
-    if [ "$DRY_RUN" -eq 1 ]; then
-        info "Dry run: would save API key to ${config_file} with private file modes."
-        return 0
-    fi
-
-    env -u ARKHEIA_API_KEY "$PYTHON_CMD" - "$config_file" "$hosted_url" 3<<<"$api_key" <<'PY'
-import json
-import os
-import stat
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
-
-config_path = Path(sys.argv[1]).expanduser()
-hosted_url = sys.argv[2]
-with os.fdopen(3, "r", encoding="utf-8") as secret_fh:
-    api_key = secret_fh.read().rstrip("\n")
-
-dir_mode = 0o700
-file_mode = 0o600
-
-config_path.parent.mkdir(parents=True, exist_ok=True, mode=dir_mode)
-os.chmod(config_path.parent, dir_mode)
-
-existing = {}
-if config_path.exists():
-    try:
-        existing = json.loads(config_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f"refusing to overwrite invalid JSON in {config_path}: {exc}") from exc
-
-next_config = dict(existing)
-next_config["api_key"] = api_key
-next_config["proxy_url"] = next_config.get("proxy_url") or hosted_url
-if existing.get("api_key") != api_key or not next_config.get("provisioned_at"):
-    next_config["provisioned_at"] = datetime.now(timezone.utc).isoformat()
-
-serialized = json.dumps(next_config, indent=2) + "\n"
-current = config_path.read_text(encoding="utf-8") if config_path.exists() else None
-if current == serialized:
-    os.chmod(config_path, file_mode)
-    print("unchanged")
-    raise SystemExit(0)
-
-tmp_path = config_path.with_name(f".{config_path.name}.{os.getpid()}.tmp")
-previous = config_path.read_bytes() if config_path.exists() else None
-
-try:
-    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, file_mode)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(serialized)
-    os.chmod(tmp_path, file_mode)
-    os.replace(tmp_path, config_path)
-    os.chmod(config_path, file_mode)
-
-    # Test-only exact-path failure injection for rollback coverage.
-    fail_after = os.environ.get("ARKHEIA_INSTALL_TEST_FAIL_AFTER_WRITE")
-    if fail_after and os.path.abspath(fail_after) == os.path.abspath(str(config_path)):
-        raise RuntimeError("simulated write failure after replace")
-except Exception:
-    try:
-        if tmp_path.exists():
-            tmp_path.unlink()
-    except OSError:
-        pass
-    try:
-        if previous is None:
-            if config_path.exists():
-                config_path.unlink()
-        else:
-            fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, file_mode)
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(previous)
-            os.chmod(tmp_path, file_mode)
-            os.replace(tmp_path, config_path)
-            os.chmod(config_path, file_mode)
-    except OSError:
-        pass
-    raise
-
-print("updated")
-PY
-}
 
 verify_arkheia_api_key() {
     local api_key="$1"
@@ -418,7 +320,7 @@ if [ -z "$API_KEY" ]; then
                     fail "Provisioning succeeded but could not parse API key from response."
                 fi
                 ok "Free-tier API key provisioned."
-                warn "The full API key is not printed. Persist it with --persist-api-key or manage keys at https://hermes.arkheia.ai."
+                warn "The full API key is not printed. Store it outside this installer and start Claude with ARKHEIA_API_KEY set."
                 ;;
             409)
                 fail "This email already has a free-tier key. Log in at https://hermes.arkheia.ai to manage your keys, or pass --api-key."
@@ -431,21 +333,6 @@ if [ -z "$API_KEY" ]; then
                 ;;
         esac
     fi
-fi
-
-if [ -n "$API_KEY" ] && [ "$PERSIST_API_KEY_SET" -eq 0 ] && [ -t 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-    printf "%bStore API key in ~/.arkheia/config.json with mode 0600? [y/N] %b" "$BOLD" "$NC"
-    read -r PERSIST_REPLY
-    case "$PERSIST_REPLY" in
-        y|Y|yes|YES|Yes)
-            PERSIST_API_KEY=1
-            PERSIST_API_KEY_SET=1
-            ;;
-        *)
-            PERSIST_API_KEY=0
-            PERSIST_API_KEY_SET=1
-            ;;
-    esac
 fi
 
 # ---------------------------------------------------------------------------
@@ -468,28 +355,8 @@ else
     warn "No API key available; hosted detection will require ARKHEIA_API_KEY at runtime."
 fi
 
-# ---------------------------------------------------------------------------
-# Persist API key only after explicit opt-in
-# ---------------------------------------------------------------------------
-ARKHEIA_CONFIG_DIR="${HOME}/.arkheia"
-ARKHEIA_CONFIG_FILE="${ARKHEIA_CONFIG_DIR}/config.json"
-
 if [ -n "$API_KEY" ]; then
-    if truthy "$PERSIST_API_KEY"; then
-        if [ "$DRY_RUN" -eq 1 ]; then
-            write_arkheia_api_key_config "$ARKHEIA_CONFIG_FILE" "$API_KEY" "$HOSTED_URL"
-        elif WRITE_RESULT=$(write_arkheia_api_key_config "$ARKHEIA_CONFIG_FILE" "$API_KEY" "$HOSTED_URL"); then
-            if [ "$WRITE_RESULT" = "unchanged" ]; then
-                ok "API key config already current at ${ARKHEIA_CONFIG_FILE}"
-            else
-                ok "Saved API key to ${ARKHEIA_CONFIG_FILE}"
-            fi
-        else
-            warn "Could not save API key config; continuing without persisting the key."
-        fi
-    else
-        warn "API key was not persisted. Rerun with --persist-api-key to save it to ${ARKHEIA_CONFIG_FILE}."
-    fi
+    warn "API key was not persisted by this installer. Start Claude with ARKHEIA_API_KEY set."
 fi
 
 # ---------------------------------------------------------------------------
@@ -584,7 +451,7 @@ echo ""
 echo "  What's next:"
 echo "  1. Restart Claude Desktop (or Claude Code)"
 echo "  2. The arkheia_verify tool is now available in your conversations"
-echo "  3. If you did not persist a key, start Claude with ARKHEIA_API_KEY set"
+echo "  3. Start Claude with ARKHEIA_API_KEY set for hosted detection"
 echo "  4. Dashboard: https://hermes.arkheia.ai"
 echo "  5. Docs: https://arkheia.ai/docs"
 echo ""

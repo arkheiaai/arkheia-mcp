@@ -8,7 +8,6 @@ const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
-const DEFAULT_PROXY_URL = "https://arkheia-proxy-production.up.railway.app";
 const CONFIG_FILE_NAME = "config.json";
 const ARKHEIA_DIR_MODE = 0o700;
 const ARKHEIA_CONFIG_MODE = 0o600;
@@ -68,10 +67,6 @@ function truthy(value) {
 function parseOptions(argv = process.argv.slice(2), env = process.env) {
   return {
     dryRun: argv.includes("--dry-run") || truthy(env.ARKHEIA_SETUP_DRY_RUN),
-    persistApiKey:
-      argv.includes("--persist-api-key") ||
-      truthy(env.ARKHEIA_PERSIST_API_KEY) ||
-      truthy(env.npm_config_arkheia_persist_api_key),
     installClaudeMd:
       argv.includes("--install-claude-md") ||
       truthy(env.ARKHEIA_INSTALL_CLAUDE_MD) ||
@@ -95,99 +90,9 @@ function childEnvWithoutApiKey(env = process.env) {
   return childEnv;
 }
 
-function ensurePrivateArkheiaDir(arkheiaDir, { dryRun = false } = {}) {
-  if (dryRun) return;
-  if (!fs.existsSync(arkheiaDir)) {
-    fs.mkdirSync(arkheiaDir, { recursive: true, mode: ARKHEIA_DIR_MODE });
-  }
-  chmodIfPossible(arkheiaDir, ARKHEIA_DIR_MODE);
-}
-
 function readJsonFile(file) {
   if (!fs.existsSync(file)) return {};
   return JSON.parse(fs.readFileSync(file, "utf-8"));
-}
-
-function writeFileAtomicWithRollback(file, data, mode, { failAfterWrite = false } = {}) {
-  const dir = path.dirname(file);
-  const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.tmp`);
-  const existed = fs.existsSync(file);
-  const previous = existed ? fs.readFileSync(file) : null;
-
-  try {
-    fs.writeFileSync(tmp, data, { encoding: "utf-8", mode });
-    chmodIfPossible(tmp, mode);
-    fs.renameSync(tmp, file);
-    chmodIfPossible(file, mode);
-
-    if (failAfterWrite) {
-      throw new Error("simulated write failure after replace");
-    }
-  } catch (err) {
-    try {
-      if (fs.existsSync(tmp)) fs.rmSync(tmp, { force: true });
-    } catch {
-      // Best effort cleanup; preserve the original error.
-    }
-
-    try {
-      if (previous !== null) {
-        fs.writeFileSync(tmp, previous, { mode });
-        chmodIfPossible(tmp, mode);
-        fs.renameSync(tmp, file);
-        chmodIfPossible(file, mode);
-      } else if (fs.existsSync(file)) {
-        fs.rmSync(file, { force: true });
-      }
-    } catch {
-      // Preserve the original write failure. A failed rollback is surfaced by
-      // the remaining filesystem state in tests and by the original warning.
-    }
-
-    throw err;
-  }
-}
-
-function stableConfigString(config) {
-  return `${JSON.stringify(config, null, 2)}\n`;
-}
-
-function saveConfig(apiKey, options = {}) {
-  const home = options.home || homeDir(options.env);
-  const { arkheiaDir, configFile } = pathsForHome(home);
-
-  if (options.dryRun) {
-    return { changed: false, dryRun: true, configFile };
-  }
-
-  ensurePrivateArkheiaDir(arkheiaDir);
-
-  const existing = readJsonFile(configFile);
-  const next = {
-    ...existing,
-    api_key: apiKey,
-    proxy_url: existing.proxy_url || DEFAULT_PROXY_URL,
-    provisioned_at:
-      existing.api_key === apiKey && existing.provisioned_at
-        ? existing.provisioned_at
-        : new Date().toISOString(),
-  };
-
-  const current = fs.existsSync(configFile)
-    ? fs.readFileSync(configFile, "utf-8")
-    : null;
-  const serialized = stableConfigString(next);
-
-  if (current === serialized) {
-    chmodIfPossible(configFile, ARKHEIA_CONFIG_MODE);
-    return { changed: false, dryRun: false, configFile };
-  }
-
-  writeFileAtomicWithRollback(configFile, serialized, ARKHEIA_CONFIG_MODE, {
-    failAfterWrite: options.failAfterWrite,
-  });
-
-  return { changed: true, dryRun: false, configFile };
 }
 
 function hasExistingApiKey(configFile) {
@@ -217,39 +122,12 @@ function checkApiKey(options = {}) {
     return { hasApiKey: false, source: null, persisted: false, configFile };
   }
 
-  if (!options.persistApiKey) {
-    return {
-      hasApiKey: true,
-      source: "environment",
-      persisted: false,
-      configFile,
-    };
-  }
-
-  try {
-    const result = saveConfig(env.ARKHEIA_API_KEY, {
-      home,
-      dryRun: options.dryRun,
-      failAfterWrite: options.failAfterWrite,
-    });
-    return {
-      hasApiKey: true,
-      source: "environment",
-      persisted: !result.dryRun,
-      dryRun: result.dryRun,
-      changed: result.changed,
-      configFile,
-    };
-  } catch (err) {
-    console.error(`  [arkheia] Warning: Could not save config: ${err.message}`);
-    return {
-      hasApiKey: true,
-      source: "environment",
-      persisted: false,
-      error: err,
-      configFile,
-    };
-  }
+  return {
+    hasApiKey: true,
+    source: "environment",
+    persisted: false,
+    configFile,
+  };
 }
 
 function checkPython() {
@@ -327,7 +205,7 @@ function main() {
   if (keyState.hasApiKey) {
     const persistence = keyState.persisted
       ? `Config: ${keyState.configFile}`
-      : `Not persisted. Set ARKHEIA_PERSIST_API_KEY=1 to save it to ${keyState.configFile}.`;
+      : "Not persisted by postinstall. Start your MCP client with ARKHEIA_API_KEY set.";
     console.log(`
   ============================================================
   API key configured.
@@ -344,10 +222,9 @@ function main() {
     1. Get a free API key at: https://arkheia.ai/mcp
     2. Set it in your environment:
        export ARKHEIA_API_KEY=<arkheia-api-key>
-    3. To save it locally, opt in explicitly:
-       ARKHEIA_PERSIST_API_KEY=1 npx @arkheia/mcp-server
+    3. Start your MCP client with ARKHEIA_API_KEY in its environment
 
-  Saved keys are written to ${keyState.configFile} with private file modes.
+  This postinstall does not write API keys to ${keyState.configFile}.
   The server will work without a key, but encrypted profiles
   and hosted detection will be unavailable.
   ============================================================
@@ -375,8 +252,6 @@ module.exports = {
   main,
   parseOptions,
   pathsForHome,
-  saveConfig,
-  writeFileAtomicWithRollback,
 };
 
 if (require.main === module) {
