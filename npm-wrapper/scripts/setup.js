@@ -342,7 +342,7 @@ function main() {
 
     1. Get a free API key at: https://arkheia.ai/mcp
     2. Set it in your environment:
-       export ARKHEIA_API_KEY=ak_live_...
+       export ARKHEIA_API_KEY=<arkheia-api-key>
     3. To save it locally, opt in explicitly:
        ARKHEIA_PERSIST_API_KEY=1 npx @arkheia/mcp-server
 

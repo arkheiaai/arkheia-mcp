@@ -4,7 +4,7 @@
 #
 # Usage:
 #   curl -fsSL https://arkheia.ai/install-mcp | bash
-#   curl -fsSL https://arkheia.ai/install-mcp | bash -s -- --api-key ak_live_...
+#   curl -fsSL https://arkheia.ai/install-mcp | bash -s -- --api-key <arkheia-api-key>
 #
 # What it does:
 #   1. Checks prerequisites (Node.js 18+, Python 3.10+)
