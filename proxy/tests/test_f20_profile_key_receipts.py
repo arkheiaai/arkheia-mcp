@@ -33,12 +33,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import http.server
 import json
 import os
 import secrets
 import stat
-import threading
 from pathlib import Path
 
 import pytest
@@ -70,88 +68,21 @@ from proxy.audit.decision_journal import (
     key_id,
 )
 from proxy.crypto.profile_crypto import DynamicKeyLoader
-from proxy.tests._receipt_probe import ReceiptProbe, contains
+from proxy.tests._receipt_probe import (
+    ReceiptProbe,
+    assert_decision_identity,
+    contains,
+)
 
 pytestmark = pytest.mark.asyncio
 
 
 # ---------------------------------------------------------------------------
-# A real HTTP server. Not a transport mock — a socket.
+# ``key_server`` (a real HTTP server on a real socket, not a transport mock) and
+# ``isolated_key_cache`` live in ``proxy/tests/conftest.py`` — the startup
+# ordering suite drives the same endpoint, and one definition cannot drift from
+# itself.
 # ---------------------------------------------------------------------------
-
-class _KeyEndpoint(http.server.BaseHTTPRequestHandler):
-    #: Set per-test by ``key_server``.
-    payload: bytes = b"{}"
-    status: int = 200
-
-    def do_POST(self):  # noqa: N802 — http.server's naming
-        self.send_response(type(self).status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(type(self).payload)))
-        self.end_headers()
-        self.wfile.write(type(self).payload)
-
-    def log_message(self, *args):  # silence the default stderr chatter
-        pass
-
-
-class _Server:
-    def __init__(self, handler_cls):
-        self._httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
-        self._thread = threading.Thread(target=self._httpd.serve_forever, daemon=True)
-        self._thread.start()
-
-    @property
-    def url(self) -> str:
-        host, port = self._httpd.server_address[:2]
-        return f"http://{host}:{port}"
-
-    def close(self):
-        self._httpd.shutdown()
-        self._httpd.server_close()
-        self._thread.join(timeout=5)
-
-
-@pytest.fixture
-def key_server():
-    """A live endpoint. ``serve(key_bytes)`` / ``fail(status)`` reconfigure it."""
-    server = _Server(_KeyEndpoint)
-
-    class _Control:
-        url = server.url
-
-        @staticmethod
-        def serve(key: bytes):
-            _KeyEndpoint.status = 200
-            _KeyEndpoint.payload = json.dumps(
-                {"profile_key": base64.b64encode(key).decode()}
-            ).encode()
-
-        @staticmethod
-        def fail(status: int = 503):
-            _KeyEndpoint.status = status
-            _KeyEndpoint.payload = b'{"error":"unavailable"}'
-
-    try:
-        yield _Control
-    finally:
-        server.close()
-
-
-@pytest.fixture(autouse=True)
-def isolated_key_cache(tmp_path, monkeypatch):
-    """
-    Point ``DynamicKeyLoader``'s cache at a temp dir for EVERY test in this file.
-
-    Autouse and unconditional: ``fetch_key`` writes the cache on a successful
-    hosted fetch, and a test suite that writes into the developer's real
-    ``~/.arkheia`` is a test suite that has side effects on the machine it runs
-    on. Also makes the cache branch drivable, which it otherwise is not.
-    """
-    cache_dir = tmp_path / "keycache"
-    monkeypatch.setattr(DynamicKeyLoader, "CACHE_DIR", cache_dir)
-    monkeypatch.setattr(DynamicKeyLoader, "CACHE_FILE", cache_dir / "profile_key.cache")
-    return cache_dir
 
 
 @pytest.fixture
@@ -659,6 +590,12 @@ async def test_a_deployment_with_no_encrypted_profiles_still_leaves_a_row(probe,
     assert len(rows) == 1
     assert rows[0]["outcome"] == KEY_LOAD_NO_ENCRYPTED_PROFILES
     assert rows[0]["encrypted_profile_count"] == 0
+    assert_decision_identity(rows[0], branch=KEY_LOAD_NO_ENCRYPTED_PROFILES)
+    assert probe.require(rows[0]["decision_id"]) == rows[0]
+    assert probe.find("00000000-0000-4000-8000-000000000000") is None, (
+        "vacuity guard: if a fabricated id also found a row, the lookup above "
+        "would prove nothing about identity"
+    )
 
 
 async def test_encrypted_profiles_without_an_api_key_leave_a_row(probe, tmp_path, monkeypatch):
@@ -680,6 +617,7 @@ async def test_encrypted_profiles_without_an_api_key_leave_a_row(probe, tmp_path
     assert rows[0]["outcome"] == KEY_LOAD_NO_API_KEY
     assert rows[0]["encrypted_profile_count"] == 2
     assert rows[0]["key_source"] == KEY_SOURCE_NONE
+    assert_decision_identity(rows[0], branch=KEY_LOAD_NO_API_KEY)
 
 
 async def test_a_preconfigured_key_is_recorded_as_such(probe, tmp_path):
@@ -700,6 +638,7 @@ async def test_a_preconfigured_key_is_recorded_as_such(probe, tmp_path):
     assert rows[0]["outcome"] == KEY_LOAD_KEY_PRECONFIGURED
     assert rows[0]["key_source"] == KEY_SOURCE_PRECONFIGURED
     assert rows[0]["key_id"] == key_id(key)
+    assert_decision_identity(rows[0], branch=KEY_LOAD_KEY_PRECONFIGURED)
 
 
 async def test_a_loader_that_explodes_leaves_a_row_naming_the_failure(
@@ -730,6 +669,7 @@ async def test_a_loader_that_explodes_leaves_a_row_naming_the_failure(
     assert len(rows) == 1
     assert rows[0]["outcome"] == KEY_LOAD_LOADER_ERROR
     assert rows[0]["error_type"] == "RuntimeError"
+    assert_decision_identity(rows[0], branch=KEY_LOAD_LOADER_ERROR)
     assert "boom" not in json.dumps(rows[0]), (
         "an exception MESSAGE can echo whatever the code choked on; only the "
         "class name is structural enough to record"

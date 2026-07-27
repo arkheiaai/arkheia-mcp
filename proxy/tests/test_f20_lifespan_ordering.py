@@ -40,13 +40,15 @@ import yaml
 from proxy.audit.decision_journal import (
     EVENT_KEY_LOAD,
     EVENT_PROFILE_AUTH,
+    KEY_LOAD_FETCHED_HOSTED,
     KEY_LOAD_NO_API_KEY,
     KEY_LOAD_NO_ENCRYPTED_PROFILES,
     PROFILE_AUTH_AUTHENTICATED,
     PROFILE_AUTH_FAILED,
+    PROFILE_AUTH_SKIPPED_NO_KEY,
 )
 from proxy.crypto.profile_crypto import encrypt_profile
-from proxy.tests._receipt_probe import ReceiptProbe
+from proxy.tests._receipt_probe import ReceiptProbe, assert_decision_identity
 
 
 @pytest.fixture
@@ -133,11 +135,8 @@ def test_a_real_boot_records_the_profile_authentication_verdicts(
     corrupt[-1] ^= 0x01
     (profiles / "bad.yaml.enc").write_bytes(bytes(corrupt))
 
-    # A key IS available, via the local cache the loader already trusts.
-    from proxy.crypto.profile_crypto import DynamicKeyLoader
-    cache_dir = tmp_path / "keycache"
-    monkeypatch.setattr(DynamicKeyLoader, "CACHE_DIR", cache_dir)
-    monkeypatch.setattr(DynamicKeyLoader, "CACHE_FILE", cache_dir / "profile_key.cache")
+    # No API key and no cache (``isolated_key_cache`` points it at an empty temp
+    # dir), so key loading is conclusively unavailable — the genuinely dark case.
     monkeypatch.setenv("ARKHEIA_API_KEY", "")
 
     probe = booted(profiles)
@@ -153,6 +152,85 @@ def test_a_real_boot_records_the_profile_authentication_verdicts(
         "dark surfaces, never two fabricated verdicts"
     )
     assert auth_rows[0]["skipped_count"] == 2
+
+
+def test_a_real_boot_that_fetches_its_key_never_reports_the_surfaces_dark(
+    booted, key_server, tmp_path, monkeypatch
+):
+    """
+    THE FALSE-ALARM CASE (Codex, PR #34).
+
+    ``ProfileRouter`` was constructed at step 1 and the key fetched at step 1b, so
+    the router's first ``load_all()`` ran with no key and journalled
+    ``skipped_no_key`` — *these surfaces went dark* — for a startup that then
+    fetched the key and authenticated every one of them. Codex's TestClient boot
+    produced ``skipped_no_key -> fetched_from_hosted -> authenticated``.
+
+    This is the inverse of the usual failure: the rail received a too-ALARMING
+    value rather than a too-reassuring one. Both are the same defect — the record
+    does not describe what happened — and a false alarm erodes an audit trail
+    exactly as much as a false all-clear.
+
+    The assertion is on the SEQUENCE the boot wrote, not on the presence of the
+    good row: a suite that only asserts ``authenticated`` is present passes
+    against the broken state, because the broken state emits it too.
+    """
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    key = _key()
+    _seal(profiles, "good", key)
+
+    key_server.serve(key)
+    monkeypatch.setenv("ARKHEIA_API_KEY", "an-api-key")
+    monkeypatch.setenv("ARKHEIA_HOSTED_URL", key_server.url)
+
+    probe = booted(profiles)
+
+    key_rows = [r for r in probe.rows() if r["event_type"] == EVENT_KEY_LOAD]
+    assert [r["outcome"] for r in key_rows] == [KEY_LOAD_FETCHED_HOSTED], (
+        "control: this boot must actually have fetched a key over the socket, or "
+        "'no skipped row' would be proved by a startup that had nothing to skip"
+    )
+
+    auth = [r["outcome"] for r in probe.rows() if r["event_type"] == EVENT_PROFILE_AUTH]
+    assert PROFILE_AUTH_SKIPPED_NO_KEY not in auth, (
+        f"the boot journalled {PROFILE_AUTH_SKIPPED_NO_KEY!r} for a startup that "
+        f"fetched its key and authenticated the profile. The rail says the "
+        f"surfaces went dark; they never did. Sequence written: {auth}"
+    )
+    assert auth == [PROFILE_AUTH_AUTHENTICATED], (
+        f"one encrypted profile, one authentication decision. Got {auth} — a "
+        f"second load_all() over the same file is a second verdict about one "
+        f"decision, and the audit rail counts rows"
+    )
+    assert_decision_identity(key_rows[0], branch=KEY_LOAD_FETCHED_HOSTED)
+
+
+def test_a_genuinely_keyless_boot_still_says_the_surfaces_went_dark(
+    booted, key_server, tmp_path, monkeypatch
+):
+    """
+    The control row for the test above (DONE.md v1.15 clause 5).
+
+    The fix must be ORDERING, never suppression: when key loading is
+    conclusively unavailable — the issuer answers 503 and no cache exists — the
+    dark surfaces must still be named. A table whose every row asserts absence
+    cannot discriminate between a fixed ordering and a deleted event.
+    """
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    _seal(profiles, "good", _key())
+
+    key_server.fail(503)
+    monkeypatch.setenv("ARKHEIA_API_KEY", "an-api-key")
+    monkeypatch.setenv("ARKHEIA_HOSTED_URL", key_server.url)
+
+    probe = booted(profiles)
+
+    auth = [r for r in probe.rows() if r["event_type"] == EVENT_PROFILE_AUTH]
+    assert [r["outcome"] for r in auth] == [PROFILE_AUTH_SKIPPED_NO_KEY]
+    assert auth[0]["skipped_profile_names"] == ["good.yaml.enc"]
+    assert auth[0]["skipped_count"] == 1
 
 
 def test_a_real_boot_with_a_preconfigured_key_receipts_a_TAMPER(
