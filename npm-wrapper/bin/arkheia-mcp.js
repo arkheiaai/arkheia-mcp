@@ -53,6 +53,22 @@ const BOOTSTRAP_ENV_ALLOWLIST = [
   "LOCALAPPDATA",
   "ARKHEIA_TEST_LOG",
 ];
+const SERVER_ENV_ALLOWLIST = [
+  ...BOOTSTRAP_ENV_ALLOWLIST,
+  "ARKHEIA_API_KEY",
+  "ARKHEIA_PROXY_URL",
+  "ARKHEIA_HOSTED_URL",
+  "MEMORY_DB_PATH",
+  "XAI_API_KEY",
+  "GOOGLE_API_KEY",
+  "TOGETHER_API_KEY",
+  "OLLAMA_BASE_URL",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "SSL_CERT_FILE",
+  "REQUESTS_CA_BUNDLE",
+];
 
 function fail(message) {
   process.stderr.write(`[arkheia] Error: ${message}\n`);
@@ -134,6 +150,16 @@ function findExecutableOnPath(command) {
 function bootstrapEnv(extra = {}) {
   const env = {};
   for (const name of BOOTSTRAP_ENV_ALLOWLIST) {
+    if (process.env[name]) {
+      env[name] = process.env[name];
+    }
+  }
+  return { ...env, ...extra };
+}
+
+function serverEnv(extra = {}) {
+  const env = {};
+  for (const name of SERVER_ENV_ALLOWLIST) {
     if (process.env[name]) {
       env[name] = process.env[name];
     }
@@ -494,11 +520,10 @@ function main() {
     {
       cwd: BUNDLED_PYTHON_DIR,
       stdio: ["pipe", "pipe", "inherit"], // stdin/stdout piped, stderr inherited
-      env: {
-        ...process.env,
+      env: serverEnv({
         PYTHONPATH: BUNDLED_PYTHON_DIR,
         PYTHONDONTWRITEBYTECODE: "1",
-      },
+      }),
     }
   );
 

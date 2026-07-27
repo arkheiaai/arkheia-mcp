@@ -55,6 +55,7 @@ def _base_env(tmp_path: Path, fakebin: Path, log: Path) -> dict[str, str]:
         "HOME": str(home),
         "USERPROFILE": str(home),
         "ARKHEIA_API_KEY": _fixture_arkheia_key(),
+        "AWS_SECRET_ACCESS_KEY": "fixture-bootstrap-secret",
         "ARKHEIA_TEST_LOG": str(log),
         "PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", ""),
     }
@@ -110,6 +111,7 @@ def _write_fake_python(fakebin: Path) -> None:
                         "PYTHONPATH": os.environ.get("PYTHONPATH"),
                         "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE"),
                         "ARKHEIA_API_KEY": os.environ.get("ARKHEIA_API_KEY"),
+                        "AWS_SECRET_ACCESS_KEY": os.environ.get("AWS_SECRET_ACCESS_KEY"),
                     }},
                 }}) + "\\n")
 
@@ -230,6 +232,7 @@ def test_dependency_install_is_bounded_to_verified_package_requirements(tmp_path
 
     create_venv_event = next(e for e in events if e["kind"] == "create_venv")
     assert create_venv_event["env"]["ARKHEIA_API_KEY"] is None
+    assert create_venv_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
 
     pip_event = next(e for e in events if e["kind"] == "pip_install")
     pip_args = pip_event["argv"]
@@ -242,12 +245,14 @@ def test_dependency_install_is_bounded_to_verified_package_requirements(tmp_path
     assert pip_event["env"]["PIP_NO_INPUT"] == "1"
     assert pip_event["env"]["PIP_REQUIRE_VIRTUALENV"] == "1"
     assert pip_event["env"]["ARKHEIA_API_KEY"] is None
+    assert pip_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
 
     server_event = next(e for e in events if e["kind"] == "server")
     assert Path(server_event["cwd"]) == package / "python"
     assert Path(server_event["env"]["PYTHONPATH"]) == package / "python"
     assert server_event["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
     assert server_event["env"]["ARKHEIA_API_KEY"] == _fixture_arkheia_key()
+    assert server_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
 
     provenance = json.loads(
         (package / "python" / _PROVENANCE).read_text(encoding="utf-8")
@@ -308,3 +313,6 @@ def test_launcher_recreates_unmarked_existing_venv_before_execution(tmp_path):
     assert create_venv_event["env"]["ARKHEIA_API_KEY"] is None
     assert pip_event["env"]["ARKHEIA_API_KEY"] is None
     assert server_event["env"]["ARKHEIA_API_KEY"] == _fixture_arkheia_key()
+    assert create_venv_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
+    assert pip_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
+    assert server_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
