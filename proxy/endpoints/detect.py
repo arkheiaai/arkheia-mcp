@@ -163,7 +163,7 @@ def _signal(
     so signalling is best-effort -- a malformed action must not 500 an advisory 200 response.
     """
     action = str(action)
-    gate_action = str(gate_action)
+    gate_action = _normalize_gate_action(gate_action)
     verify.action = action
     verify.gate_action = gate_action
     try:
@@ -184,6 +184,14 @@ def _signal(
     except Exception as e:  # pragma: no cover - defensive; headers are best-effort
         logger.error("Failed to set Arkheia signal headers (body fields still set): %s", e)
     return verify
+
+
+def _normalize_gate_action(value) -> str:
+    """Fail-safe gate authority: only an explicit block may authorize a block."""
+    try:
+        return "block" if str(value).lower() == "block" else "advise"
+    except Exception:
+        return "advise"
 
 
 @router.post("/detect/verify", response_model=VerifyResponse)
@@ -214,19 +222,19 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
     if not req.model_id:
         r = _unknown(error="model_id_missing")
         if audit:
-            await audit.write(_audit_record(r, req, "pass"))
+            await audit.write(_audit_record(r, req, "pass", "advise"))
         return _signal(http_response, r, "pass", "advise")
 
     if not req.response:
         r = _unknown(model_id=req.model_id, error="response_empty")
         if audit:
-            await audit.write(_audit_record(r, req, "pass"))
+            await audit.write(_audit_record(r, req, "pass", "advise"))
         return _signal(http_response, r, "pass", "advise")
 
     if engine is None:
         r = _unknown(model_id=req.model_id, error="engine_unavailable")
         if audit:
-            await audit.write(_audit_record(r, req, "pass"))
+            await audit.write(_audit_record(r, req, "pass", "advise"))
         return _signal(http_response, r, "pass", "advise")
 
     try:
@@ -236,14 +244,15 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
         r = _unknown(model_id=req.model_id, error="engine_error")
         if audit:
             try:
-                await audit.write(_audit_record(r, req, "pass"))
+                await audit.write(_audit_record(r, req, "pass", "advise"))
             except Exception as ae:
                 logger.error("Audit write failed after engine error: %s", ae)
         return _signal(http_response, r, "pass", "advise")
 
     # Determine action taken
     settings = getattr(request.app.state, "settings", None)
-    action = _determine_action(result.risk_level, settings)
+    action = str(_determine_action(result.risk_level, settings))
+    gate_action = _normalize_gate_action(getattr(result, "gate_action", "advise"))
 
     response = VerifyResponse(
         risk_level=result.risk_level,
@@ -265,12 +274,14 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
         # rather than raising inside a path contracted never to crash the pipeline it
         # monitors.
         gate_reason=getattr(result, "gate_reason", None),
+        action=action,
+        gate_action=gate_action,
     )
 
     # Async audit write -- does not block; never crashes the response pipeline
     if audit:
         try:
-            await audit.write(_audit_record(response, req, action))
+            await audit.write(_audit_record(response, req, action, gate_action))
         except Exception as e:
             logger.error("Audit write failed (detection result unaffected): %s", e)
 
@@ -293,6 +304,7 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
             "prompt_hash": hashlib.sha256(req.prompt.encode()).hexdigest(),
             "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
             "action_taken": action,
+            "gate_action": gate_action,
         },
         risk_level=response.risk_level if response.risk_level in ("LOW", "MEDIUM", "HIGH", "CRITICAL") else "LOW",
     )
@@ -300,7 +312,7 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
     # Surface the governance decision to the caller: policy `action` (mirrors action_taken in
     # the audit) + profile-earned `gate_action`. Keeps HTTP 200; blocking-at-transport stays the
     # job of proxy/middleware/interception.py. Consumers hard-block only when gate_action=="block".
-    return _signal(http_response, response, action, getattr(result, "gate_action", "advise"))
+    return _signal(http_response, response, action, gate_action)
 
 
 def _determine_action(risk_level: str, settings) -> str:
@@ -313,7 +325,12 @@ def _determine_action(risk_level: str, settings) -> str:
     return "pass"
 
 
-def _audit_record(response: VerifyResponse, req: VerifyRequest, action: str) -> dict:
+def _audit_record(
+    response: VerifyResponse,
+    req: VerifyRequest,
+    action: str,
+    gate_action: str = "advise",
+) -> dict:
     return {
         "detection_id": response.detection_id,
         "timestamp": response.timestamp,
@@ -340,6 +357,7 @@ def _audit_record(response: VerifyResponse, req: VerifyRequest, action: str) -> 
         "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
         "response_length": len(req.response),
         "action_taken": action,
+        "gate_action": _normalize_gate_action(gate_action),
         "source": "proxy",
         "error": response.error,
     }
