@@ -29,8 +29,37 @@ Cython>=3.0
 setuptools>=83.0.0  # CVE-2025-47273 (PackageIndex path traversal) + CVE-2026-59890 (MANIFEST.in NFD/NFC exclude bypass, medium; fixed 83.0.0) fixes -- imported by setup_cython.py
 
 # Testing
+#
+# THIS is the file that declares the repo's test/tooling environment. The other
+# three requirements files here do not, and the "code under X/ is governed by
+# X/requirements.txt" reflex is wrong three times out of four in this repo:
+#   * mcp_server/requirements.txt  — runtime only (mcp/httpx/pydantic/anyio); it
+#     declares no runner at all, and mcp_server/Dockerfile installs the ROOT file.
+#   * npm-wrapper/python/requirements.txt — what a CUSTOMER's venv installs to run
+#     the published bundle. Test tooling there would ship pytest to every `npx`
+#     user.
+#   * proxy/requirements.txt — the one case where it does hold, and it carries its
+#     own pytest/pytest-asyncio.
+# Everything else — `tools/*` (no requirements file of its own), `scripts/*`,
+# `tests/*`, and every CI job, all of which install THIS file first — lands here.
 pytest>=8.0
 pytest-asyncio>=0.23
+
+# Provides `--timeout=`, which four consumers pass and NOTHING declared:
+# tools/mutate_f18_integrity_manifest.py (--timeout=180) and
+# tools/mutate_f1_tool_gate.py, .github/workflows/unit-tests.yml (--timeout=120)
+# and .github/workflows/smoke-test.yml (--timeout=60). Both workflows carried a
+# bare `pip install pytest-timeout` line, so CI was green while a fresh install of
+# our own declared environment could not run the harness at all:
+#   pytest: error: unrecognized arguments: --timeout=180
+# An evidence-reproducibility defect rather than a runtime one — the proof that
+# 19/19 mutants are killed cannot be re-derived from what we declare. The ad-hoc
+# pip lines are the masking, exactly as they were for `cryptography`.
+pytest-timeout>=2.3
+
+# Transport mock imported by tests/test_detection_adapter.py. Undeclared for the
+# same reason and found by the same sweep; unit-tests.yml installed it ad hoc.
+respx>=0.21
 
 # Load testing (optional, Phase 2)
 # locust>=2.20.0
