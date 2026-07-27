@@ -71,6 +71,26 @@ def _is_valid_seq(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _safe_detection_id(clean_record: object) -> str:
+    """
+    Return a bounded detection_id only from an already-sanitised/redacted record.
+
+    Failure-path diagnostics and placeholders must not go back to the original
+    caller record: if the original id carried a credential, that would bypass
+    the boundary redaction that the audit rail exists to enforce.
+    """
+    if not isinstance(clean_record, dict):
+        return "?"
+    value = clean_record.get("detection_id")
+    if value is None:
+        return "?"
+    if isinstance(value, str):
+        return value[:200] if value else "?"
+    if isinstance(value, (int, float, bool)):
+        return str(value)[:200]
+    return f"<non-scalar detection_id:{type(value).__name__}>"
+
+
 class ChainState(NamedTuple):
     """
     Chain head recovered from disk, plus whether recovering it was clean.
@@ -570,6 +590,7 @@ class AuditWriter:
                 continue
 
             try:
+                safe_detection_id = "?"
                 # 1. Guarantee JSON-serialisability FIRST -- before the
                 #    redactor ever sees the record. A `set` is not a
                 #    container the redactor descends into, and an arbitrary
@@ -586,19 +607,20 @@ class AuditWriter:
                 #    (Regression found in review, 2026-07-27: sanitize-after-
                 #    redact shipped a leak in this same PR.)
                 clean, degraded = _sanitize_for_json(record)
-                if degraded:
-                    logger.warning(
-                        "AuditWriter: record %s contained non-JSON-serialisable "
-                        "field(s) — writing a degraded-but-present form instead "
-                        "of dropping it",
-                        record.get("detection_id", "?"),
-                    )
 
                 # 2. Redact secrets before anything touches disk. Runs on the
                 #    now fully JSON-native (all-string-shaped) record, so
                 #    every string it needs to scan -- including ones that did
                 #    not exist before step 1 -- is actually visible to it.
                 clean = redact(clean)
+                safe_detection_id = _safe_detection_id(clean)
+                if degraded:
+                    logger.warning(
+                        "AuditWriter: record %s contained non-JSON-serialisable "
+                        "field(s) — writing a degraded-but-present form instead "
+                        "of dropping it",
+                        safe_detection_id,
+                    )
 
                 # 3. Compute the NEXT chain position without committing to it
                 #    yet. seq/last_hash are only written into self._seq /
@@ -655,14 +677,14 @@ class AuditWriter:
                     self._degraded_writes += 1
                     self.mark_chain_degraded(
                         "DEGRADED_RECORD",
-                        f"record {record.get('detection_id', '?')} could not be "
+                        f"record {safe_detection_id} could not be "
                         f"hashed or serialised ({type(hash_exc).__name__}: "
                         f"{hash_exc}); a placeholder was written in its place",
                     )
                     payload = {
                         "seq": next_seq,
                         "prev_hash": self._last_hash,
-                        "detection_id": str(record.get("detection_id", "?"))[:200],
+                        "detection_id": safe_detection_id,
                         "risk_level": "UNKNOWN",
                         "audit_record_degraded": True,
                         "degraded_reason": f"{type(hash_exc).__name__}: {hash_exc}"[:500],
@@ -692,7 +714,7 @@ class AuditWriter:
                 self._write_failures += 1
                 self.mark_chain_degraded(
                     "WRITE_FAILED",
-                    f"record {record.get('detection_id', '?')} could not be "
+                    f"record {safe_detection_id} could not be "
                     f"written ({type(e).__name__}: {e}) — sequence NOT advanced "
                     f"(chain state unchanged, no gap created)",
                 )
@@ -763,7 +785,8 @@ class AuditWriter:
 
         Returns {"ok": bool, "complete": bool, "verified": n,
         "breaks": [{seq, expected, got}],
-        "gaps": [{after_seq, expected_seq, got_seq}], "error": str|None}
+        "gaps": [{after_seq, expected_seq, got_seq}],
+        "seq_errors": [{line, got_type, reason}], "error": str|None}
 
         "ok" is only True for a chain that was actually walked, IN FULL,
         without incident (including the legitimate case of a log that does
@@ -827,10 +850,14 @@ class AuditWriter:
         startup path's "ok").
         """
         if not self.log_path.exists():
-            return {"ok": True, "complete": True, "verified": 0, "breaks": [], "gaps": [], "error": None}
+            return {
+                "ok": True, "complete": True, "verified": 0,
+                "breaks": [], "gaps": [], "seq_errors": [], "error": None,
+            }
 
         breaks = []
         gaps = []
+        seq_errors = []
         prev_hash = "0" * 64
         expected_seq: Optional[int] = None
         verified = 0
@@ -887,6 +914,11 @@ class AuditWriter:
                             })
                         expected_seq = seq + 1
                     else:
+                        seq_errors.append({
+                            "line": total_lines,
+                            "got_type": type(seq).__name__,
+                            "reason": "seq is not a non-negative int",
+                        })
                         # No usable seq on this record -- stop asserting
                         # continuity until we see a real one again rather
                         # than compare against a stale expectation.
@@ -919,7 +951,8 @@ class AuditWriter:
             # chain's integrity, so this must not be reported as ok=True.
             return {
                 "ok": False, "complete": False, "verified": verified,
-                "breaks": breaks, "gaps": gaps, "error": error,
+                "breaks": breaks, "gaps": gaps, "seq_errors": seq_errors,
+                "error": error,
             }
 
         if total_lines > 0 and verified == 0:
@@ -933,16 +966,23 @@ class AuditWriter:
                 "verified": 0,
                 "breaks": breaks,
                 "gaps": gaps,
+                "seq_errors": seq_errors,
                 "error": f"{unparseable} log line(s) present but none parseable "
                          f"-- cannot verify chain integrity",
             }
 
         return {
-            "ok": len(breaks) == 0 and len(gaps) == 0 and complete,
+            "ok": (
+                len(breaks) == 0
+                and len(gaps) == 0
+                and len(seq_errors) == 0
+                and complete
+            ),
             "complete": complete,
             "verified": verified,
             "breaks": breaks,
             "gaps": gaps,
+            "seq_errors": seq_errors,
             "error": (
                 None if complete
                 else f"stopped at limit={limit} with more of the log unread -- "

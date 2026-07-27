@@ -27,6 +27,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from proxy.audit.writer import AuditWriter, _compute_hash
 
 
@@ -68,6 +70,14 @@ def _write_chain_with_seq_gap(path: Path) -> None:
         lines.append(json.dumps(record))
         prev = this_hash
     path.write_text("\n".join(lines) + "\n")
+
+
+def _write_one_record_with_seq(path: Path, seq: object) -> None:
+    prev = "0" * 64
+    record = {"seq": seq, "prev_hash": prev, "event": "detect"}
+    this_hash = _compute_hash(record, prev)
+    record["this_hash"] = this_hash
+    path.write_text(json.dumps(record) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +204,37 @@ def test_verify_chain_detects_a_sequence_gap_even_when_hashes_are_intact(tmp_pat
         f"a sequence gap (seq 1, 2, 4 -- 3 never written) verified as ok=True: {report} "
         f"-- a verifier cannot tell this apart from a chain with nothing missing."
     )
+
+
+@pytest.mark.parametrize("seq", [True, False, "1", -1, None, 1.5, [], {}])
+def test_verify_chain_rejects_malformed_seq_values_even_when_hashes_match(
+    tmp_path, seq
+):
+    """
+    A malformed seq is itself corrupted chain metadata, even if the row's hash
+    was computed over exactly that malformed value. It must not reset
+    continuity and still report ok=True.
+    """
+    w = _writer(tmp_path)
+    _write_one_record_with_seq(w.log_path, seq)
+
+    report = w.verify_chain()
+
+    assert report["verified"] == 1, report
+    assert report["breaks"] == [], (
+        "test setup invalid -- the hash should match the malformed on-disk "
+        f"seq so this is testing seq validation, not hash validation: {report}"
+    )
+    assert report["gaps"] == [], report
+    assert report["ok"] is False, (
+        f"malformed seq {seq!r} ({type(seq).__name__}) verified as ok=True: "
+        f"{report}"
+    )
+    assert report["seq_errors"] == [{
+        "line": 1,
+        "got_type": type(seq).__name__,
+        "reason": "seq is not a non-negative int",
+    }]
 
 
 # ---------------------------------------------------------------------------

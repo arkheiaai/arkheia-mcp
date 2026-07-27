@@ -504,6 +504,54 @@ async def test_a_write_that_cannot_be_hashed_is_surfaced_not_vanished(
     assert w.chain_status()["ok"] is False, w.chain_status()
 
 
+async def test_degraded_placeholder_does_not_bypass_redacted_detection_id(
+    tmp_path, monkeypatch, caplog
+):
+    """
+    The degraded placeholder path runs after sanitize/redact has produced a
+    safe record. It must not reach back into the original caller record for
+    detection_id, because that bypasses the redaction boundary for both disk
+    and the degraded-chain log line.
+    """
+    secret_detection_id = "sk-ant-api03-" + "Qx7Az9Bw2Ck4Dm6Fn8" * 3
+    head = secret_detection_id[: len(secret_detection_id) // 2]
+    tail = secret_detection_id[len(secret_detection_id) // 2 :]
+    w = _writer(tmp_path)
+
+    import proxy.audit.writer as writer_mod
+
+    real = writer_mod._compute_hash
+    calls = {"n": 0}
+
+    def _boom(record, prev_hash):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TypeError("synthetic hashing failure")
+        return real(record, prev_hash)
+
+    monkeypatch.setattr(writer_mod, "_compute_hash", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="proxy.audit.writer"):
+        await _start_write_stop(w, [{
+            "detection_id": secret_detection_id,
+            "risk_level": "HIGH",
+        }])
+
+    raw = w.log_path.read_text(encoding="utf-8")
+    messages = "\n".join(r.getMessage() for r in caplog.records)
+    for sink_name, sink in (("audit log", raw), ("logger", messages)):
+        assert secret_detection_id not in sink, f"{sink_name}: full id leaked"
+        assert head not in sink, f"{sink_name}: id head leaked"
+        assert tail not in sink, f"{sink_name}: id tail leaked"
+
+    records = _records(w.log_path)
+    assert records and records[0].get("audit_record_degraded") is True, records
+    assert records[0].get("detection_id") != "?", (
+        "positive control failed: the placeholder lost the cleaned detection_id "
+        "instead of using the redacted one"
+    )
+
+
 # ===========================================================================
 # RED (b) -- a DETECTED break must not be survivable in silence
 # ===========================================================================
