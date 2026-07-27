@@ -31,6 +31,7 @@ const ARKHEIA_HOME = path.join(
 );
 const BUNDLED_PYTHON_DIR = path.join(__dirname, "..", "python");
 const VENV_DIR = path.join(ARKHEIA_HOME, "venv");
+const VENV_MARKER = path.join(VENV_DIR, ".arkheia-venv.json");
 const ENTRY_MODULE = "mcp_server.server";
 const SERVER_RELATIVE = "mcp_server/server.py";
 const REQUIREMENTS_RELATIVE = "requirements.txt";
@@ -38,6 +39,7 @@ const PROVENANCE_RELATIVE = ".arkheia-bundle-provenance.json";
 const PROVENANCE_PATH = path.join(BUNDLED_PYTHON_DIR, PROVENANCE_RELATIVE);
 const REQUIREMENTS = path.join(BUNDLED_PYTHON_DIR, REQUIREMENTS_RELATIVE);
 const PROVENANCE_SCHEMA = "arkheia.npm.bundle-provenance.v1";
+const VENV_SCHEMA = "arkheia.npm.venv.v1";
 
 function fail(message) {
   process.stderr.write(`[arkheia] Error: ${message}\n`);
@@ -80,6 +82,40 @@ function readJson(filePath, label) {
   } catch (err) {
     fail(`could not read ${label} at ${filePath}: ${err.message}`);
   }
+}
+
+function executableNames(command) {
+  if (process.platform !== "win32") {
+    return [command];
+  }
+  const extensions = (process.env.PATHEXT || ".EXE;.CMD;.BAT")
+    .split(";")
+    .filter(Boolean);
+  const hasExtension = /\.[A-Za-z0-9]+$/.test(command);
+  if (hasExtension) {
+    return [command];
+  }
+  return [command, ...extensions.map((ext) => `${command}${ext.toLowerCase()}`)];
+}
+
+function findExecutableOnPath(command) {
+  const pathValue = process.env.PATH || "";
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (!dir) continue;
+    const resolvedDir = path.resolve(dir);
+    for (const name of executableNames(command)) {
+      const candidate = path.join(resolvedDir, name);
+      try {
+        const stat = fs.statSync(candidate);
+        if (stat.isFile()) {
+          return fs.realpathSync(candidate);
+        }
+      } catch {
+        // Try the next PATH entry.
+      }
+    }
+  }
+  return null;
 }
 
 function collectBundleFiles(dir, relative = "") {
@@ -214,8 +250,10 @@ function verifyBundle() {
 function findPython() {
   const candidates = ["python3", "python"];
   for (const cmd of candidates) {
+    const resolved = findExecutableOnPath(cmd);
+    if (!resolved) continue;
     try {
-      const version = execFileSync(cmd, ["--version"], {
+      const version = execFileSync(resolved, ["--version"], {
         encoding: "utf-8",
         timeout: 5000,
         stdio: ["ignore", "pipe", "pipe"],
@@ -225,7 +263,7 @@ function findPython() {
         const major = parseInt(match[1], 10);
         const minor = parseInt(match[2], 10);
         if (major > 3 || (major === 3 && minor >= 10)) {
-          return cmd;
+          return resolved;
         }
       }
     } catch {
@@ -235,21 +273,69 @@ function findPython() {
   return null;
 }
 
-function ensureVenv(python) {
+function venvMarkerMatches(bundle) {
+  if (!fs.existsSync(VENV_MARKER)) {
+    return false;
+  }
+  try {
+    const data = JSON.parse(fs.readFileSync(VENV_MARKER, "utf-8"));
+    return (
+      data &&
+      data.schema === VENV_SCHEMA &&
+      data.package_name === bundle.packageName &&
+      data.package_version === bundle.packageVersion &&
+      data.requirements_sha256 === bundle.requirementsSha256
+    );
+  } catch {
+    return false;
+  }
+}
+
+function writeVenvMarker(bundle) {
+  fs.writeFileSync(
+    VENV_MARKER,
+    JSON.stringify(
+      {
+        schema: VENV_SCHEMA,
+        package_name: bundle.packageName,
+        package_version: bundle.packageVersion,
+        requirements_sha256: bundle.requirementsSha256,
+        created_at: new Date().toISOString(),
+      },
+      null,
+      2
+    ) + "\n"
+  );
+}
+
+function ensureVenv(python, bundle) {
   const venvPython =
     process.platform === "win32"
       ? path.join(VENV_DIR, "Scripts", "python.exe")
       : path.join(VENV_DIR, "bin", "python");
 
-  if (!fs.existsSync(venvPython)) {
-    process.stderr.write("[arkheia] Creating virtual environment...\n");
-    execFileSync(python, ["-m", "venv", VENV_DIR], {
-      stdio: "inherit",
-      timeout: 120000,
-    });
+  if (fs.existsSync(venvPython)) {
+    if (venvMarkerMatches(bundle)) {
+      return fs.realpathSync(venvPython);
+    }
+    process.stderr.write("[arkheia] Recreating unverified virtual environment...\n");
+    fs.rmSync(VENV_DIR, { recursive: true, force: true });
   }
 
-  return venvPython;
+  if (!fs.existsSync(ARKHEIA_HOME)) {
+    fs.mkdirSync(ARKHEIA_HOME, { recursive: true, mode: 0o700 });
+  }
+
+  process.stderr.write("[arkheia] Creating virtual environment...\n");
+  execFileSync(python, ["-m", "venv", VENV_DIR], {
+    stdio: "inherit",
+    timeout: 120000,
+  });
+  if (!fs.existsSync(venvPython)) {
+    fail(`virtual environment did not create expected interpreter at ${venvPython}`);
+  }
+  writeVenvMarker(bundle);
+  return fs.realpathSync(venvPython);
 }
 
 function depsMarkerMatches(marker, bundle) {
@@ -369,7 +455,7 @@ function main() {
 
   let venvPython;
   try {
-    venvPython = ensureVenv(python);
+    venvPython = ensureVenv(python, bundle);
     installDeps(venvPython, bundle);
   } catch (err) {
     process.stderr.write(

@@ -256,3 +256,43 @@ def test_dependency_install_is_bounded_to_verified_package_requirements(tmp_path
     assert marker_data["requirements_sha256"] == req_hash
     assert marker_data["package_name"] == provenance["package"]["name"]
     assert marker_data["package_version"] == provenance["package"]["version"]
+
+    venv_marker = tmp_path / "home" / ".arkheia" / "venv" / ".arkheia-venv.json"
+    venv_marker_data = json.loads(venv_marker.read_text(encoding="utf-8"))
+    assert venv_marker_data["requirements_sha256"] == req_hash
+    assert venv_marker_data["package_name"] == provenance["package"]["name"]
+    assert venv_marker_data["package_version"] == provenance["package"]["version"]
+
+
+def test_launcher_recreates_unmarked_existing_venv_before_execution(tmp_path):
+    package = _packed_package(tmp_path)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "events.jsonl"
+    _write_fake_python(fakebin)
+
+    home = tmp_path / "home"
+    stale_python = home / ".arkheia" / "venv" / (
+        "Scripts/python.exe" if os.name == "nt" else "bin/python"
+    )
+    stale_python.parent.mkdir(parents=True)
+    stale_python.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, sys\n"
+        "log = pathlib.Path(os.environ['ARKHEIA_TEST_LOG'])\n"
+        "log.parent.mkdir(parents=True, exist_ok=True)\n"
+        "with log.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps({'kind': 'stale_venv_executed', 'argv': sys.argv[1:]}) + '\\n')\n"
+        "sys.exit(77)\n",
+        encoding="utf-8",
+    )
+    stale_python.chmod(stale_python.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    result = _run_launcher(package, _base_env(tmp_path, fakebin, log))
+
+    assert result.returncode == 0, result.stderr
+    events = _events(log)
+    assert "stale_venv_executed" not in [e["kind"] for e in events]
+    assert [e["kind"] for e in events].count("create_venv") == 1
+    assert [e["kind"] for e in events].count("pip_install") == 1
+    assert [e["kind"] for e in events].count("server") == 1
