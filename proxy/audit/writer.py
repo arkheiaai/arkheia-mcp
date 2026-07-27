@@ -476,6 +476,46 @@ class AuditWriter:
                 self._degraded_writes,
             )
 
+    async def receipt_self_check(self, chain: dict) -> None:
+        """
+        Write the verify_chain() startup self-check's VERDICT as a durable,
+        chained record -- not only a log line that scrolls away and in-memory
+        state (chain_status()) that resets on the next restart (Codex
+        adversarial review of PR #37, second pass, 2026-07-27: "does the
+        decision leave a durable, tamper-evident artifact?").
+
+        Deliberately a METHOD on AuditWriter, not an inline
+        ``await audit_writer.write(...)`` in proxy/main.py: proxy/main.py is
+        on F20's "governance path" (it imports proxy.audit.decision_journal),
+        and tests/test_f20_profile_key_floor.py's INV-10 fails the build if
+        anything on that path calls the rail's ``.write()`` directly rather
+        than through ``decision_journal.emit()`` -- the chokepoint that
+        stamps a record with decision identity. This record is not one of
+        F20's D1/D2 decisions (it has no key/profile-auth outcome and does
+        not belong in that module's closed taxonomies), so routing it
+        through ``emit()`` would be the wrong door, not merely an unstamped
+        one. Keeping the write here, inside the module that already owns
+        chain_status()/mark_chain_degraded() for this exact concern, keeps
+        it off the governance path entirely and keeps INV-10 meaningful
+        rather than papering over it with a taxonomy that does not fit.
+
+        Only counts, not the full ``breaks``/``gaps`` lists: this is a
+        receipt of the DECISION ("a check ran, verdict was X"), not a
+        duplicate of the live detail chain_status() already publishes.
+        Fire-and-forget like every other write on this rail -- never raises,
+        because a receipt failure must not turn a startup self-check into a
+        crashed boot.
+        """
+        await self.write({
+            "event_type": "audit_chain_self_check",
+            "ok": chain.get("ok"),
+            "complete": chain.get("complete"),
+            "verified": chain.get("verified"),
+            "breaks_count": len(chain.get("breaks", [])),
+            "gaps_count": len(chain.get("gaps", [])),
+            "error": chain.get("error"),
+        })
+
     async def start(self) -> None:
         """Start the background writer task. Call from app lifespan startup."""
         self.log_path.parent.mkdir(parents=True, exist_ok=True)

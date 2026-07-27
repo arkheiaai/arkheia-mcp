@@ -270,6 +270,23 @@ async def lifespan(app: FastAPI):
         # #37, second pass, 2026-07-27). See AuditWriter.verify_chain's
         # docstring for the measured cost of a full walk (~6us/record).
         chain = audit_writer.verify_chain()
+
+        # RECEIPT the verdict itself, not just a log line that scrolls away
+        # and in-memory state that resets on restart (Codex adversarial
+        # review of PR #37, second pass, 2026-07-27: "does the decision
+        # leave a durable, tamper-evident artifact?"). Delegated to
+        # AuditWriter.receipt_self_check() rather than writing here directly
+        # -- proxy/main.py is on F20's governance path (it imports
+        # proxy.audit.decision_journal below) and INV-10
+        # (tests/test_f20_profile_key_floor.py) fails the build on any
+        # direct .write() call site here; this verdict is not one of F20's
+        # D1/D2 decisions and does not belong in that module's closed
+        # taxonomy, so the write lives inside AuditWriter itself instead
+        # (see that method's docstring). Deliberately unconditional -- the
+        # receipted record is "a check ran, verdict was X" every boot, not
+        # only present when something was already wrong.
+        await audit_writer.receipt_self_check(chain)
+
         if not chain.get("ok", True):
             audit_writer.mark_chain_degraded(
                 "CHAIN_VERIFY_FAILED",

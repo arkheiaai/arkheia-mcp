@@ -677,3 +677,64 @@ def test_startup_past_the_old_1000_limit_still_catches_a_tail_tamper(seeded_clie
             f"the real app reported top-level status 'ok' over a chain "
             f"tampered past the old 1000-record limit: {body}"
         )
+
+
+# ===========================================================================
+# RECEIPTED -- the self-check's VERDICT is written as a durable, chained
+# record, not only a log line and in-process state that both vanish on
+# restart. Codex adversarial review of PR #37, second pass, 2026-07-27.
+# ===========================================================================
+
+def test_startup_self_check_verdict_is_a_durable_chained_receipt(seeded_client_factory):
+    """
+    POSITIVE CONTROL (clean chain): after boot, the audit log itself contains
+    an ``audit_chain_self_check`` record naming the verdict -- an auditor
+    reading the log file (not the live process) can see "the check ran at
+    this boot and concluded ok=True," which app.state.audit_chain alone
+    cannot provide once the process has restarted.
+    """
+    log_path, make_client = seeded_client_factory
+    _write_valid_chain(log_path, 3)
+
+    client = make_client()
+    with client:
+        client.get("/admin/health")  # ensure the app is fully up
+
+    records = _records(log_path)
+    checks = [r for r in records if r.get("event_type") == "audit_chain_self_check"]
+    assert len(checks) == 1, f"expected exactly one self-check receipt: {records}"
+    assert checks[0]["ok"] is True, checks[0]
+    assert checks[0]["complete"] is True, checks[0]
+    assert checks[0]["verified"] == 3, checks[0]
+    assert checks[0]["breaks_count"] == 0, checks[0]
+
+    # And the receipt is itself part of the tamper-evident chain -- not a
+    # side-channel write that bypasses the guarantee it is reporting on. (Not
+    # asserting an exact total count: other decisions on this same startup
+    # path -- e.g. F20's profile_key.load -- also receipt into this log, and
+    # pinning their count here would coincidentally couple this test to an
+    # unrelated flow.)
+    report = AuditWriter(log_path=str(log_path), retention_days=365).verify_chain()
+    assert report["ok"] is True, report
+    assert report["verified"] >= 4, report  # >= 3 seeded + the self-check receipt
+
+
+def test_startup_self_check_verdict_is_receipted_even_when_degraded(seeded_client_factory):
+    """
+    RED-shape control: a degraded verdict is ALSO receipted, not only a
+    clean one -- "the check ran and found a problem" must survive the
+    process, not live solely in a WARNING line and in-memory state that a
+    restart discards.
+    """
+    log_path, make_client = seeded_client_factory
+    _write_valid_chain(log_path, 2)
+    _append_tampered(log_path, this_hash=None)
+
+    client = make_client()
+    with client:
+        client.get("/admin/health")
+
+    records = _records(log_path)
+    checks = [r for r in records if r.get("event_type") == "audit_chain_self_check"]
+    assert len(checks) == 1, f"expected exactly one self-check receipt: {records}"
+    assert checks[0]["ok"] is False, checks[0]
