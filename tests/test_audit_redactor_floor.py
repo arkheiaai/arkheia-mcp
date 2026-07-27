@@ -86,6 +86,20 @@ def _qp(s: str) -> str:
     return quopri.encodestring(s.encode()).decode()
 
 
+def _hexenc(s: str) -> str:
+    return s.encode().hex()
+
+
+def _b32(s: str) -> str:
+    return base64.b32encode(s.encode()).decode()
+
+
+def _b64_wrapped(s: str) -> str:
+    """MIME base64 — the body split across 76-column lines. What `base64(1)`,
+    `openssl base64` and every email/attachment pipeline emit by default."""
+    return base64.encodebytes(s.encode()).decode()
+
+
 # ---------------------------------------------------------------------------
 # The corpus: shapes that ACTUALLY OCCUR in this system.
 #
@@ -192,6 +206,104 @@ SECRET_SHAPES: list[tuple[str, str]] = [
 ]
 
 # ---------------------------------------------------------------------------
+# EXPLICIT-BODY corpus (Codex review round 3, PR #16).
+#
+# `_secret_body()` below derives "the part that must not reach disk" as the
+# LONGEST high-entropy run in the value. That derivation is right for a plain
+# credential and WRONG for the three classes here, and it fails SILENTLY —
+# it reports `ok` for a value that is on disk in full:
+#
+#   * a line-wrapped base64 body — the longest run is one 76-column fragment,
+#     and redacting only the fragment that happens to carry the prefix leaves
+#     every other fragment (i.e. most of the credential) on disk;
+#   * a data-URI-poisoned line — the longest run is the PNG payload, which is
+#     audit content and is supposed to survive, so the check reads `ok` while
+#     the credential beside it leaks;
+#   * a URI inline password — the password is split by the very characters
+#     (`/ : ? #`) the run regex uses as boundaries.
+#
+# So each entry names its own forbidden bodies. `bodies` is a tuple because a
+# split credential must be checked HALF BY HALF: asserting only on the whole
+# password passes when half of it survives.
+#
+#   (shape, value, bodies-that-must-not-reach-disk)
+# ---------------------------------------------------------------------------
+
+_ANT = "sk-ant-api03-" + _rnd(60, seed=80)
+_OPAQUE = _rnd(20, _ALNUM, seed=81) + "/" + _rnd(19, _ALNUM, seed=82)
+_DATA_URI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg" + _rnd(48, _B64STD, seed=83)
+
+_PW_A = _rnd(12, seed=84)
+_PW_B = _rnd(12, seed=85)
+
+EXPLICIT_BODY_LEAKS: list[tuple[str, str, tuple[str, ...]]] = [
+    # --- CLASS A: encoding normalisation is SHALLOW, PARTIAL and TOKEN-LOCAL.
+    # `_decoded_views()` decodes a token exactly once per codec and knows only
+    # percent and base64. Every gap below is a reversible transform a grep
+    # undoes for free — the value reaches disk fully recoverable.
+    #
+    # A.1 no recursion: a decoded view is never itself decoded, so COMPOSING
+    #     two encodings (or repeating one) restores nothing to scan.
+    ("b64-double-wrapped",
+     "payload=" + _b64(_b64(_ANT)),
+     (_b64(_b64(_ANT)).rstrip("="),)),
+    ("b64-triple-wrapped",
+     "p=" + _b64(_b64(_b64(_ANT))),
+     (_b64(_b64(_b64(_ANT))).rstrip("="),)),
+    ("b64-of-percent-encoded",
+     "payload=" + _b64(_pct(_ANT)),
+     (_b64(_pct(_ANT)).rstrip("="),)),
+    ("percent-of-b64",
+     "cb=" + _pct(_b64(_ANT)),
+     (_pct(_b64(_ANT)),)),
+    # A.2 only two codecs: hex and base32 are ordinary transport encodings and
+    #     neither is decoded at all.
+    ("hex-encoded-lowercase", "blob=" + _hexenc(_ANT), (_hexenc(_ANT),)),
+    ("hex-encoded-uppercase", "blob=" + _hexenc(_ANT).upper(), (_hexenc(_ANT).upper(),)),
+    ("base32-encoded", "blob=" + _b32(_ANT), (_b32(_ANT).rstrip("="),)),
+
+    # --- CLASS B: a BENIGN marker disables the whole line's protection.
+    # `_redact_encoded_and_opaque` skips an entire line when it contains a data
+    # URI. The exemption is right about the PNG payload and wrong about its
+    # blast radius: every other token on that line loses the encoding pass AND
+    # the opaque-entropy pass. One legitimate token must not switch off a
+    # control for everything beside it.
+    ("data-uri-poisons-line-opaque-value",
+     "====AWS PROD==== " + _DATA_URI + " " + _OPAQUE,
+     (_OPAQUE,)),
+    ("data-uri-poisons-line-encoded-value",
+     _DATA_URI + " callback=" + _pct(_ANT),
+     (_pct(_ANT),)),
+    ("data-uri-poisons-line-multiline",
+     "detection complete\n" + _DATA_URI + " cb=" + _pct(_ANT),
+     (_pct(_ANT),)),
+
+    # --- CLASS C: the URI inline-password rule cannot see its own subject.
+    # `conn_password`'s secret class is `[^\s:/?#@]{6,}`, so a password holding
+    # any URI-reserved character never matches, and its user class is `+`, so
+    # the empty-userinfo form (`redis://:pw@host`) never matches either. The
+    # opaque-entropy rule cannot rescue either: `_CREDENTIAL_CONTEXT` has no
+    # URI/DSN term, so a bare DSN line carries no credential context at all.
+    # Generated DB passwords routinely contain `/` and `+`.
+    ("conn-password-containing-slash",
+     "postgresql://svc:" + _PW_A + "/" + _PW_B + "@db.internal:5432/arkheia",
+     (_PW_A, _PW_B)),
+    ("conn-password-containing-colon",
+     "mongodb://svc:" + _PW_A + ":" + _PW_B + "@db.internal:27017/arkheia",
+     (_PW_A, _PW_B)),
+    ("conn-password-containing-hash",
+     "amqp://svc:" + _PW_A + "#" + _PW_B + "@mq.internal:5672/vhost",
+     (_PW_A, _PW_B)),
+    ("conn-password-containing-question",
+     "redis://svc:" + _PW_A + "?" + _PW_B + "@cache.internal:6379/0",
+     (_PW_A, _PW_B)),
+    ("conn-password-empty-userinfo",
+     "redis://:" + _rnd(24, seed=86) + "@cache.internal:6379/0",
+     (_rnd(24, seed=86),)),
+]
+
+
+# ---------------------------------------------------------------------------
 # Near-misses: audit content that MUST survive verbatim. Over-redaction that
 # eats audit content is also a defect — an audit log scrubbed to uselessness
 # fails its own purpose.
@@ -257,6 +369,38 @@ MUST_SURVIVE: list[tuple[str, str]] = [
      "secret chain 9F8e7D6c5B4a39281706F5e4D3c2B1a098765432abcd1234abcd1234"),
     ("mixed-case-uuid-near-token",
      "token id 3F2504e0-4F89-11d3-9A0c-0305E82c3301"),
+
+    # --- Over-redaction guards for the round-3 fix (Codex review, PR #16) ---
+    # Recursive multi-codec decoding and line de-wrapping widen what the
+    # redactor LOOKS at. What it looks at must not become what it eats: a
+    # decoded view may only trigger redaction when the DECODED text itself
+    # holds a credential. These are the shapes that decode cleanly and hold
+    # nothing, sitting in credential context so the entropy gate is open.
+    ("hex-of-prose-near-secret",
+     "secret note " + _hexenc("the quick brown fox jumps over the lazy dog")),
+    ("base32-of-prose-near-token",
+     "token note " + _b32("the quick brown fox jumps over the lazy dog")),
+    ("nested-b64-of-prose-near-credentials",
+     "credentials note " + _b64(_b64("the quick brown fox jumps over the lazy dog"))),
+    # Line de-wrapping joins consecutive base64-ish lines. Wrapped BINARY
+    # payloads and wrapped digests are exactly the audit content it must not
+    # eat once it starts reassembling runs of lines.
+    ("wrapped-base64-png-lines",
+     "\n".join(("iVBORw0KGgoAAAANSUhEUg" + _rnd(228, _B64STD, seed=90))[i:i + 76]
+               for i in range(0, 228, 76))),
+    ("wrapped-hex-digest-lines-near-secret",
+     "secret chain\n" + _rnd(64, _HEX, seed=91) + "\n" + _rnd(64, _HEX, seed=92)),
+    # The URI inline-password rule is widened to accept URI-reserved characters
+    # in the password. It must still not fire on a URL whose `:` is a PORT and
+    # whose `@` is in the path — the shape that widening most easily eats.
+    ("url-with-port-and-at-in-path",
+     "http://localhost:8000/reports/user@example.com"),
+    ("npm-scoped-package-url",
+     "https://cdn.jsdelivr.net/npm/@vue/cli/dist/index.js"),
+    # The data-URI exemption narrows from "skip the line" to "skip the payload".
+    # The payload itself must still survive, including alongside other content.
+    ("data-uri-beside-audit-content",
+     "det_01HQ8X7Y6Z5W4V3U2T1S0R9Q8P " + _DATA_URI + " commit " + _rnd(40, _HEX, seed=93)),
 ]
 
 # A stable non-secret token written alongside every record. Its presence on
@@ -371,6 +515,97 @@ def _secret_body(secret: str) -> str:
     runs = re.findall(r'[A-Za-z0-9+/_-]{16,}', secret)
     assert runs, f"corpus entry has no high-entropy body to check: {len(secret)} chars"
     return max(runs, key=len)
+
+
+def test_explicit_body_leak_classes_do_not_reach_disk(tmp_path):
+    """
+    The three classes the derived-body check above cannot see.
+
+    Each entry names the exact bytes that must be absent, half by half where
+    the credential is split, so a partial survival cannot read as a pass.
+    """
+    assert EXPLICIT_BODY_LEAKS, "corpus is empty — this test would assert nothing"
+
+    log_path = tmp_path / "audit.jsonl"
+    records = [_record(shape, value) for shape, value, _bodies in EXPLICIT_BODY_LEAKS]
+    content = _drive_real_write_path(records, log_path)
+
+    # --- POSITIVE CONTROLS ---
+    lines = [ln for ln in content.splitlines() if ln.strip()]
+    assert len(lines) == len(EXPLICIT_BODY_LEAKS), (
+        f"POSITIVE CONTROL FAILED: expected {len(EXPLICIT_BODY_LEAKS)} records on disk, "
+        f"found {len(lines)} — records were dropped, so 'secret absent' proves nothing."
+    )
+    assert content.count(SENTINEL) == len(EXPLICIT_BODY_LEAKS), (
+        "POSITIVE CONTROL FAILED: audit content is missing, not just the secret."
+    )
+    for shape, _v, _b in EXPLICIT_BODY_LEAKS:
+        assert f"det-{shape}" in content, (
+            f"POSITIVE CONTROL FAILED: record for shape {shape!r} is not on disk."
+        )
+    first = json.loads(lines[0])
+    assert first["seq"] == 1 and len(first["this_hash"]) == 64, (
+        "POSITIVE CONTROL FAILED: hash-chain fields absent — not the real write path."
+    )
+
+    # --- THE ACTUAL CHECK ---
+    leaked = []
+    for shape, _value, bodies in EXPLICIT_BODY_LEAKS:
+        assert bodies, f"corpus entry {shape!r} names no forbidden body"
+        for i, body in enumerate(bodies):
+            assert len(body) >= 8, (
+                f"corpus entry {shape!r} body #{i} is only {len(body)} chars — too "
+                f"short to be evidence of anything."
+            )
+            if body in content:
+                leaked.append(shape if len(bodies) == 1 else f"{shape}[{i}]")
+    assert not leaked, (
+        "secret material reached disk UNREDACTED through the production audit write "
+        f"path ({len(leaked)} of {sum(len(b) for _s, _v, b in EXPLICIT_BODY_LEAKS)} "
+        f"checked bodies): {sorted(leaked)}. Values deliberately not printed."
+    )
+
+
+def test_line_wrapped_base64_credential_does_not_survive_in_fragments(tmp_path):
+    """
+    MIME base64 wraps a body at 76 columns. The redactor decodes TOKENS inside
+    a single line, so only the fragment carrying the credential's prefix is
+    recognised — every later fragment decodes to an anonymous middle slice of
+    the key, survives, and the surviving fragments concatenate back into most
+    of the credential.
+
+    Checked FRAGMENT BY FRAGMENT. A whole-blob check passes here while the
+    credential is on disk, because the blob as written contains newlines.
+    """
+    secret = "sk-ant-api03-" + _rnd(120, seed=94)
+    wrapped = _b64_wrapped(secret)
+    fragments = [ln for ln in wrapped.split("\n") if ln]
+    assert len(fragments) >= 3, (
+        f"the case is not actually wrapped ({len(fragments)} fragment(s)) — it would "
+        f"test the single-line path instead of the one it names."
+    )
+
+    log_path = tmp_path / "audit.jsonl"
+    content = _drive_real_write_path(
+        [{"detection_id": "det-wrapped-b64", "source": SENTINEL,
+          "value": "payload=\n" + wrapped}],
+        log_path,
+    )
+
+    assert SENTINEL in content and "det-wrapped-b64" in content, (
+        "POSITIVE CONTROL FAILED: the record did not reach disk, so every 'absent' "
+        "assertion below would pass vacuously."
+    )
+    assert REDACTION_MARKER in content, (
+        "POSITIVE CONTROL FAILED: nothing was redacted at all on this record."
+    )
+
+    survivors = [i for i, frag in enumerate(fragments) if frag in content]
+    assert not survivors, (
+        f"{len(survivors)} of {len(fragments)} base64 fragments of a credential reached "
+        f"disk (fragment indices {survivors}); concatenated they decode back to the "
+        f"credential body. Values deliberately not printed."
+    )
 
 
 def test_near_miss_audit_content_survives_verbatim(tmp_path):
