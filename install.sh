@@ -4,7 +4,7 @@
 #
 # Usage:
 #   curl -fsSL https://arkheia.ai/install-mcp | bash
-#   ARKHEIA_API_KEY=<arkheia-api-key> curl -fsSL https://arkheia.ai/install-mcp | bash
+#   export ARKHEIA_API_KEY before starting Claude for hosted detection
 #
 # What it does:
 #   1. Checks prerequisites (Node.js 18+, Python 3.10+)
@@ -62,7 +62,7 @@ require_value() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --api-key)
-            fail "--api-key KEY is not supported because command-line arguments can leak. Set ARKHEIA_API_KEY in the environment instead."
+            fail "--api-key is not supported because command-line arguments can leak. Use environment-based runtime configuration instead."
             ;;
         --email)
             require_value "$1" "${2:-}"
@@ -142,42 +142,6 @@ if [ -z "$PYTHON_CMD" ]; then
     fail "Python 3.10+ is required but not found. Install from https://python.org"
 fi
 ok "Python $($PYTHON_CMD --version 2>&1)"
-
-verify_arkheia_api_key() {
-    local api_key="$1"
-    local hosted_url="$2"
-
-    env -u ARKHEIA_API_KEY "$PYTHON_CMD" - "$hosted_url" 3<<<"$api_key" <<'PY'
-import json
-import os
-import sys
-import urllib.error
-import urllib.request
-
-hosted_url = sys.argv[1].rstrip("/")
-with os.fdopen(3, "r", encoding="utf-8") as secret_fh:
-    api_key = secret_fh.read().rstrip("\n")
-
-payload = json.dumps({"model": "test", "response": "Hello world test."}).encode("utf-8")
-request = urllib.request.Request(
-    f"{hosted_url}/v1/detect",
-    data=payload,
-    headers={
-        "Content-Type": "application/json",
-        "X-Arkheia-Key": api_key,
-    },
-    method="POST",
-)
-
-try:
-    with urllib.request.urlopen(request, timeout=20) as response:
-        print(response.status)
-except urllib.error.HTTPError as exc:
-    print(exc.code)
-except Exception:
-    print("000")
-PY
-}
 
 write_mcp_client_config() {
     local config_file="$1"
@@ -323,7 +287,7 @@ if [ -z "$API_KEY" ]; then
                 warn "The full API key is not printed. Store it outside this installer and start Claude with ARKHEIA_API_KEY set."
                 ;;
             409)
-                fail "This email already has a free-tier key. Log in at https://hermes.arkheia.ai to manage your keys, or pass --api-key."
+                fail "This email already has a free-tier key. Log in at https://hermes.arkheia.ai to manage your keys."
                 ;;
             429)
                 fail "Rate limit exceeded. Try again later or pass --api-key."
@@ -335,23 +299,7 @@ if [ -z "$API_KEY" ]; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# Verify the key works
-# ---------------------------------------------------------------------------
-if [ -n "$API_KEY" ]; then
-    if [ "$DRY_RUN" -eq 1 ]; then
-        info "Dry run: would verify API key."
-    else
-        info "Verifying API key..."
-        VERIFY_CODE=$(verify_arkheia_api_key "$API_KEY" "$HOSTED_URL" 2>/dev/null || printf "000")
-
-        case "$VERIFY_CODE" in
-            200) ok "API key verified." ;;
-            401) fail "API key is invalid. Check your key and try again." ;;
-            *)   warn "Could not verify key (HTTP $VERIFY_CODE); continuing anyway." ;;
-        esac
-    fi
-else
+if [ -z "$API_KEY" ]; then
     warn "No API key available; hosted detection will require ARKHEIA_API_KEY at runtime."
 fi
 
@@ -387,8 +335,7 @@ fi
 CONFIG_FILE="${CONFIG_DIR}/claude_desktop_config.json"
 
 # Build the MCP server entry as a temp file. The raw API key is deliberately not
-# embedded in Claude config; the Node wrapper loads ~/.arkheia/config.json when
-# the user explicitly persisted a key.
+# embedded in Claude config.
 if [ "$DRY_RUN" -eq 0 ]; then
     ARKHEIA_CONFIG_TMP=$(mktemp)
     trap 'rm -f "$ARKHEIA_CONFIG_TMP"' EXIT
