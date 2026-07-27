@@ -525,3 +525,255 @@ def test_inv7_negative_self_test():
              if isinstance(t, ast.Name) and t.id.startswith("DENY_")
              and t.id != "DENY_TAXONOMY"}
     assert codes - _taxonomy_keys(orphan) == {"DENY_B"}
+
+
+# ---------------------------------------------------------------------------
+# INV-8 — no credential travels on a set shared by every destination
+#
+# WHAT EARNED THIS (2026-07-27, found by a second vendor — Codex, gpt-5.5)
+# ------------------------------------------------------------------------
+# The forwarded-header allowlist was one GLOBAL set containing both
+# `authorization` and `x-api-key`, applied to all four providers. An accepted
+# request carrying both delivered BOTH to whichever single destination the route
+# resolved to: Grok received a Bearer token and an Anthropic-style x-api-key. A
+# customer routing two vendors through this proxy had one vendor's key delivered
+# to the other, on the ordinary path, in a request authorised for something else.
+#
+# The previous round's duplicate-credential check could not see it: that check
+# counts repeated instances of ONE header name, and this is two DIFFERENT header
+# names each appearing once. A PER-HEADER RULE CANNOT SEE A CROSS-HEADER
+# INTERACTION — which is why the invariant below is about the SHAPE of the
+# allowlist rather than about any header in it. It fails the build on the
+# structure that made the leak expressible, not on the instance that leaked.
+# ---------------------------------------------------------------------------
+
+#: Header names that carry a caller secret, whoever the caller is. Written down
+#: here, in the checker, rather than read from the module under test: a list
+#: taken from the subject agrees with the subject by construction, and the
+#: subject is exactly what is suspected.
+CREDENTIAL_BEARING_HEADERS = {
+    "authorization", "proxy-authorization", "cookie", "x-api-key",
+    "x-goog-api-key", "api-key", "x-auth-token", "x-access-token",
+    "authentication", "x-amz-security-token", "x-goog-iam-authorization-token",
+}
+
+
+def _module_level_string_sets(tree: ast.Module) -> dict[str, set[str]]:
+    """
+    Every module-level ``NAME = {…}`` / ``frozenset({…})`` / ``set([…])`` whose
+    elements are string literals. Discovery, not enumeration: a set added next
+    year is covered without anyone remembering this file exists.
+    """
+    found: dict[str, set[str]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        elements = None
+        if isinstance(value, (ast.Set, ast.List, ast.Tuple)):
+            elements = value
+        elif (isinstance(value, ast.Call)
+              and isinstance(value.func, ast.Name)
+              and value.func.id in ("frozenset", "set")
+              and value.args
+              and isinstance(value.args[0], (ast.Set, ast.List, ast.Tuple))):
+            elements = value.args[0]
+        if elements is None:
+            continue
+        literals = {e.value.lower() for e in elements.elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+        if literals:
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    found[target.id] = literals
+    return found
+
+
+#: The one module-level set that legitimately NAMES credential headers: the
+#: vocabulary the foreign-credential screen recognises. It is a screen, not a
+#: forward list — nothing is forwarded because it appears here.
+_CREDENTIAL_VOCABULARY_NAMES = {"_CREDENTIAL_HEADERS"}
+
+
+def _violations_shared_credential_list(sets: dict[str, set[str]]) -> list[str]:
+    """
+    A module-level header set that is applied to every destination may not name
+    a credential. Per-destination credential sets live on the provider rows, not
+    at module level, so any module-level set carrying one is by definition shared.
+    """
+    bad = []
+    for name, members in sets.items():
+        if name in _CREDENTIAL_VOCABULARY_NAMES:
+            continue
+        if name == "_HOP_BY_HOP_HEADERS":
+            # A STRIP list: naming proxy-authorization there removes it. The
+            # opposite of forwarding it.
+            continue
+        leaked = sorted(members & CREDENTIAL_BEARING_HEADERS)
+        if leaked:
+            bad.append(
+                f"{name} is a module-level (therefore shared) header set naming "
+                f"credential header(s) {leaked}; a set shared by every "
+                f"destination cannot express which vendor a secret belongs to — "
+                f"this is the shape that delivered an Anthropic key to xAI"
+            )
+    return bad
+
+
+def test_inv8_no_credential_header_in_a_shared_forward_allowlist(tree):
+    sets = _module_level_string_sets(tree)
+    assert len(sets) >= 3, (
+        f"discovered only {sorted(sets)} module-level string sets — the "
+        f"discovery is looking in the wrong place, which is indistinguishable "
+        f"from a clean run"
+    )
+    assert _violations_shared_credential_list(sets) == []
+
+
+def test_inv8_negative_self_test():
+    """The exact pre-fix set must be reported."""
+    pre_fix = {"_FORWARDED_HEADERS": {
+        "authorization", "content-type", "accept", "x-api-key",
+        "anthropic-version",
+    }}
+    violations = _violations_shared_credential_list(pre_fix)
+    assert violations, "the invariant does not catch the defect that earned it"
+    assert "authorization" in violations[0] and "x-api-key" in violations[0]
+
+    # Every other spelling of the same mistake.
+    assert _violations_shared_credential_list({"_EXTRA": {"cookie"}})
+    assert _violations_shared_credential_list({"_HEADERS": {"x-goog-api-key"}})
+
+    # Control rows: the shipped shape is clean, so the check discriminates.
+    assert _violations_shared_credential_list(
+        {"_SAFE_TRANSPORT_HEADERS": {"content-type", "accept", "user-agent"}}
+    ) == []
+    assert _violations_shared_credential_list(
+        {"_CREDENTIAL_HEADERS": {"authorization", "x-api-key"}}
+    ) == []
+    assert _violations_shared_credential_list(
+        {"_HOP_BY_HOP_HEADERS": {"proxy-authorization", "connection"}}
+    ) == []
+
+
+# ---------------------------------------------------------------------------
+# INV-9 — every destination states its own credentials, explicitly
+# ---------------------------------------------------------------------------
+
+def _provider_constructions(tree: ast.Module) -> list[ast.Call]:
+    """Every module-level ``NAME = Provider(...)`` construction."""
+    out = []
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        value = node.value
+        if (isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id == "Provider"):
+            out.append(value)
+    return out
+
+
+def _violations_provider_credentials(calls: list[ast.Call]) -> list[str]:
+    """
+    Each provider must name ``credential_headers`` at its construction, as a
+    literal set of literal strings.
+
+    Explicit, because the field's default is empty and an empty default is a
+    silent forward-nothing — safe, but a fifth provider that silently forwards
+    no credential looks like a broken vendor rather than a missing decision.
+    Literal, because a credential set computed from a shared global is the
+    shared allowlist wearing a per-provider costume.
+    """
+    bad = []
+    for call in calls:
+        kwargs = {kw.arg: kw.value for kw in call.keywords}
+        if "credential_headers" not in kwargs:
+            bad.append(
+                f"line {call.lineno}: Provider(...) does not state "
+                f"credential_headers; the credential a destination receives must "
+                f"be a decision, not a default"
+            )
+            continue
+        value = kwargs["credential_headers"]
+        inner = value.args[0] if (isinstance(value, ast.Call)
+                                  and isinstance(value.func, ast.Name)
+                                  and value.func.id in ("frozenset", "set")
+                                  and value.args) else value
+        if not isinstance(inner, (ast.Set, ast.List, ast.Tuple)):
+            bad.append(
+                f"line {call.lineno}: credential_headers is not a literal set; "
+                f"a set derived from a shared global is the shared allowlist "
+                f"under another name"
+            )
+            continue
+        if not all(isinstance(e, ast.Constant) and isinstance(e.value, str)
+                   for e in inner.elts):
+            bad.append(f"line {call.lineno}: credential_headers holds a "
+                       f"non-literal member")
+    return bad
+
+
+def test_inv9_every_provider_states_its_own_credential_headers(tree):
+    calls = _provider_constructions(tree)
+    assert len(calls) >= 4, (
+        f"discovered only {len(calls)} Provider constructions — discovery failure"
+    )
+    assert _violations_provider_credentials(calls) == []
+
+
+def test_inv9_negative_self_test():
+    absent = ast.parse('GROK = Provider("grok", BASE, RE, ALLOWED)').body[0].value
+    shared = ast.parse(
+        'GROK = Provider("grok", BASE, RE, ALLOWED, '
+        'credential_headers=_FORWARDED_HEADERS)'
+    ).body[0].value
+    computed = ast.parse(
+        'GROK = Provider("grok", BASE, RE, ALLOWED, '
+        'credential_headers=_CREDENTIAL_HEADERS | EXTRA)'
+    ).body[0].value
+    ok = ast.parse(
+        'GROK = Provider("grok", BASE, RE, ALLOWED, '
+        'credential_headers=frozenset({"authorization"}))'
+    ).body[0].value
+
+    assert _violations_provider_credentials([absent])
+    assert _violations_provider_credentials([shared])
+    assert _violations_provider_credentials([computed])
+    assert _violations_provider_credentials([ok]) == []
+
+
+def test_inv9_provider_credentials_are_a_subset_of_the_screened_vocabulary(tree):
+    """
+    A credential a provider accepts but the screen does not recognise is
+    invisible everywhere ELSE — it could never be called foreign at another
+    destination, which is precisely the hole this mapping closes.
+
+    Static, so it holds on a branch that never imports the module (the runtime
+    guard in the module itself covers the imported case).
+    """
+    sets = _module_level_string_sets(tree)
+    vocabulary = sets.get("_CREDENTIAL_HEADERS")
+    assert vocabulary, "_CREDENTIAL_HEADERS not found — discovery failure"
+    param_vocabulary = sets.get("_CREDENTIAL_QUERY_PARAMS")
+    assert param_vocabulary, "_CREDENTIAL_QUERY_PARAMS not found — discovery failure"
+
+    unknown = []
+    for call in _provider_constructions(tree):
+        kwargs = {kw.arg: kw.value for kw in call.keywords}
+        for field, allowed in (("credential_headers", vocabulary),
+                               ("credential_query_params", param_vocabulary)):
+            node = kwargs.get(field)
+            if node is None:
+                continue
+            inner = node.args[0] if (isinstance(node, ast.Call) and node.args) else node
+            if not isinstance(inner, (ast.Set, ast.List, ast.Tuple)):
+                continue
+            members = {e.value.lower() for e in inner.elts
+                       if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+            if members - allowed:
+                unknown.append(
+                    f"line {call.lineno}: {field} names {sorted(members - allowed)}, "
+                    f"which the screen's vocabulary does not recognise"
+                )
+    assert unknown == []
