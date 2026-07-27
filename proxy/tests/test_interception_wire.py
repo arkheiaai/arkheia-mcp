@@ -438,6 +438,114 @@ class TestForwardHeaders:
         assert int(lengths[0]) == len(req.body) == len(BODY)
 
 
+class TestForwardHeaderAllowList:
+    """
+    Measured where it matters: at a raw TCP sink, which records the header list
+    byte-for-byte. A deny-list forwards everything nobody enumerated, and these
+    three were exactly that — reproduced by a second vendor on an ACCEPTED
+    ``/v1/chat/completions`` call, i.e. on the ordinary success path, not an
+    attack.
+
+    Each leak carries a marker token httpx would never emit itself, so the
+    assertion distinguishes "the CALLER's value survived" from "httpx set its
+    own". ``user-agent`` and ``accept-encoding`` are checked that way precisely
+    because httpx supplies both.
+    """
+
+    #: name -> the caller's value. All carry -MARK.
+    LEAKS = {
+        "cookie": "session=CALLER-MARK",
+        "x-forwarded-for": "10.1.2.3-MARK",
+        "x-arkheia-internal": "internal-token-MARK",
+        "x-forwarded-host": "proxy.internal.corp-MARK",
+        "x-real-ip": "10.1.2.3-MARK",
+        "forwarded": "for=10.1.2.3-MARK",
+        "referer": "https://internal.corp/admin-MARK",
+        "origin": "https://internal.corp-MARK",
+        "user-agent": "internal-tooling/9.9-MARK",
+        "accept-encoding": "identity-MARK",
+        "x-stainless-lang": "python-MARK",
+        "x-invented-2026-07-27": "surprise-MARK",
+    }
+
+    def test_no_internal_or_proxy_domain_header_reaches_the_upstream(
+        self, proxy, sinks
+    ):
+        upstream, _ = sinks
+        n0 = len(upstream.requests)
+        raw_request(proxy.port, "/v1/chat/completions", body=BODY,
+                    extra_headers=list(self.LEAKS.items()))
+        assert len(upstream.requests) == n0 + 1, "the request was not forwarded"
+        req = upstream.requests[-1]
+        leaked = [(k, v) for k, v in req.header_pairs if "MARK" in v]
+        assert leaked == [], (
+            f"the caller's own header values reached the configured upstream: "
+            f"{leaked}"
+        )
+
+    def test_positive_control_the_sink_does_see_the_headers_we_do_forward(
+        self, proxy, sinks
+    ):
+        """
+        Without this, the absence above could mean the sink records nothing —
+        the "looked in the wrong place" failure DONE.md v1.19 names.
+        """
+        upstream, _ = sinks
+        n0 = len(upstream.requests)
+        raw_request(proxy.port, "/v1/chat/completions", body=BODY,
+                    extra_headers=[("Authorization", "Bearer KEEP-MARK"),
+                                   ("Anthropic-Version", "2023-06-01-MARK"),
+                                   ("Accept", "text/event-stream-MARK")])
+        req = upstream.requests[-1]
+        assert req.header_values("authorization") == ["Bearer KEEP-MARK"]
+        assert req.header_values("anthropic-version") == ["2023-06-01-MARK"]
+        assert req.header_values("accept") == ["text/event-stream-MARK"]
+
+    def test_the_cookie_is_gone_entirely_not_merely_renamed(self, proxy, sinks):
+        """
+        ``cookie`` is the sharpest of the three: it is a bearer credential for a
+        DIFFERENT origin than the one we are forwarding to, and httpx never
+        supplies one, so its presence at the sink is unambiguous.
+        """
+        upstream, _ = sinks
+        raw_request(proxy.port, "/v1/chat/completions", body=BODY,
+                    extra_headers=[("Cookie", "session=abc123")])
+        assert upstream.requests[-1].header_values("cookie") == []
+
+
+# ---------------------------------------------------------------------------
+# gate_action, on the wire
+# ---------------------------------------------------------------------------
+
+class TestGateActionOnTheWire:
+    """
+    The block decision, driven end to end. The unit-level suite proves the
+    branch; this proves the deployed process behaves that way, because a
+    middleware that is never reached decides nothing.
+    """
+
+    def test_an_unearned_profile_does_not_block_at_transport(self, sinks):
+        upstream, _ = sinks
+        with ProxyServer(ARKH_T_UPSTREAM=upstream.origin, ARKH_T_RISK="HIGH",
+                         ARKH_T_ACTION="block", ARKH_T_GATE="advise") as px:
+            _, status, hdrs, body = raw_request(px.port, "/v1/chat/completions",
+                                                body=BODY)
+        assert b"arkheia_blocked" not in body
+        assert resp_header(hdrs, "x-arkheia-action") == "warn"
+        assert resp_header(hdrs, "x-arkheia-gate-action") == "advise"
+        assert resp_header(hdrs, "x-arkheia-policy-action") == "block"
+
+    def test_an_earned_profile_blocks_at_transport(self, sinks):
+        upstream, _ = sinks
+        with ProxyServer(ARKH_T_UPSTREAM=upstream.origin, ARKH_T_RISK="HIGH",
+                         ARKH_T_ACTION="block", ARKH_T_GATE="block") as px:
+            _, status, hdrs, body = raw_request(px.port, "/v1/chat/completions",
+                                                body=BODY)
+        assert b"arkheia_blocked" in body
+        assert b"Paris" not in body
+        assert resp_header(hdrs, "x-arkheia-gate-action") == "block"
+
+
 # ---------------------------------------------------------------------------
 # Response relay
 # ---------------------------------------------------------------------------

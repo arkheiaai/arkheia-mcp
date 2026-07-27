@@ -30,16 +30,22 @@ from proxy.tests.test_interception_correctness import REQ, UPSTREAM_BODY, build,
 ACTION_TAXONOMY = {"block", "warn", "pass", "refused", "unavailable", "error"}
 
 
-async def drive(risk="HIGH", action="block", n=1, tmp_path=None, **kw):
+async def drive(risk="HIGH", action="block", n=1, tmp_path=None,
+                gate_action="block", **kw):
     """
     Drive N requests through the middleware with a LIVE AuditWriter attached,
     and hand back the probe plus the responses.
+
+    ``gate_action`` defaults to ``"block"`` — the profile-EARNED gate — because
+    a hard block is now authorised only by that signal. Passing ``"advise"``
+    here drives the downgrade path instead.
     """
     log = tmp_path / "audit.jsonl"
     writer = AuditWriter(str(log))
     await writer.start()
     try:
-        app, eng = build(risk=risk, action=action, audit=writer, **kw)
+        app, eng = build(risk=risk, action=action, audit=writer,
+                         gate_action=gate_action, **kw)
         responses = []
         async with client(app) as c:
             for _ in range(n):
@@ -153,7 +159,8 @@ class TestRecordContent:
         writer = AuditWriter(str(log))
         await writer.start()
         try:
-            app, _ = build(risk="HIGH", action="block", audit=writer)
+            app, _ = build(risk="HIGH", action="block", gate_action="block",
+                           audit=writer)
             async with client(app) as c:
                 await c.post("/v1/chat/completions", json={
                     "model": "gpt-4o",
@@ -201,6 +208,70 @@ class TestStatusDoesNotOverclaim:
         probe, responses = await drive(n=1, tmp_path=tmp_path)
         assert json.loads(responses[0].content)["receipt"] == "enqueued"
 
+    async def test_the_status_is_derived_from_the_call_not_asserted(self, tmp_path):
+        """
+        The same block, driven twice against the SAME code path, must produce
+        two different statuses — because two different things happened. A
+        hard-coded literal cannot do that, and that is the whole defect: the
+        word was chosen carefully and then written where nothing had happened.
+        """
+        _, with_rail = await drive(n=1, tmp_path=tmp_path)
+        app, _ = build(risk="HIGH", action="block", gate_action="block")
+        async with client(app) as c:
+            without_rail = await c.post("/v1/chat/completions", json=REQ)
+
+        assert json.loads(with_rail[0].content)["receipt"] == "enqueued"
+        assert json.loads(without_rail.content)["receipt"] == "no_audit_writer"
+
+    async def test_a_full_queue_still_reports_enqueued_and_that_gap_is_pinned(
+        self, tmp_path
+    ):
+        """
+        THE REMAINING GAP, MEASURED AND PINNED RATHER THAN CLAIMED CLOSED.
+
+        ``AuditWriter.write()`` catches its own ``QueueFull`` and drops the
+        record, returning normally. So on a genuinely saturated rail — no
+        monkeypatch, no stand-in, the shipped class with its real 10,000-slot
+        queue filled — the caller is told ``enqueued`` for a record that was
+        dropped on the floor.
+
+        Closing this needs ``AuditWriter.write()`` to report its own outcome,
+        which is a change to a rail CO-OWNED with another branch. Not taken
+        here; reported, and pinned so it cannot be mistaken for solved.
+
+        The writer's drain loop is deliberately NOT started, so the saturation
+        is a fact for the whole test rather than a race against a drainer — the
+        first draft of this test raced and said so, which is why it says this.
+        """
+        log = tmp_path / "audit.jsonl"
+        writer = AuditWriter(str(log))
+
+        n = 0
+        while True:                            # saturate the REAL queue
+            try:
+                writer._queue.put_nowait({"detection_id": f"filler-{n}"})
+            except Exception:
+                break
+            n += 1
+        assert n >= 1000, f"the queue accepted only {n} records; wrong premise"
+
+        # The shipped write() swallows its own QueueFull and returns normally.
+        # No monkeypatch: this is the production method on a saturated queue.
+        await writer.write({"detection_id": "dropped-on-the-floor"})
+
+        app, _ = build(risk="HIGH", action="block", gate_action="block",
+                       audit=writer)
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        surfaced = r.headers["x-arkheia-detection-id"]
+        assert json.loads(r.content)["receipt"] == "enqueued", (
+            "if this now reports a dropped write, the gap is CLOSED and this "
+            "test should be replaced by the assertion that it is"
+        )
+        assert ReceiptProbe(log).find(surfaced) is None, (
+            "the record landed after all — the premise of this gap is wrong"
+        )
+
     async def test_a_real_filesystem_failure_does_not_break_the_block(self, tmp_path):
         """
         The gap the wording admits to, pinned with a GENUINE filesystem failure
@@ -216,7 +287,8 @@ class TestStatusDoesNotOverclaim:
         writer = AuditWriter(str(log))
         await writer.start()
         try:
-            app, _ = build(risk="HIGH", action="block", audit=writer)
+            app, _ = build(risk="HIGH", action="block", gate_action="block",
+                           audit=writer)
             async with client(app) as c:
                 r = await c.post("/v1/chat/completions", json=REQ)
         finally:

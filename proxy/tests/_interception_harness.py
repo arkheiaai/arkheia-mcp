@@ -235,6 +235,10 @@ def make_app():
 
       ARKH_T_UPSTREAM  — detection.upstream_url ("" => standalone mode)
       ARKH_T_RISK      — risk level the stub engine returns
+      ARKH_T_GATE      — DetectionResult.gate_action ("block" = the profile has
+                         EARNED a hard block; "advise" = it has not). Defaults to
+                         "advise", which is what every unvalidated profile
+                         resolves to (features.py::resolve_gate_action).
       ARKH_T_ACTION    — detection.high_risk_action
       ARKH_T_ENGINE    — "none" to leave app.state.engine unset,
                          "raise" to make verify() blow up
@@ -270,6 +274,7 @@ def make_app():
     app.add_middleware(AIInterceptionMiddleware)
 
     risk = os.environ.get("ARKH_T_RISK", "LOW")
+    gate = os.environ.get("ARKH_T_GATE", "advise")
 
     class _Engine:
         async def verify(self, prompt, response, model_id):
@@ -283,6 +288,7 @@ def make_app():
                 profile_version="1.0",
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 detection_id=str(_uuid.uuid4()),
+                gate_action=gate,
             )
 
     class _Detection:

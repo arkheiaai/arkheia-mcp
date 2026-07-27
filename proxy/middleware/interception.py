@@ -40,6 +40,43 @@ path used to re-enter ``call_next``, which serves the proxy's OWN local routes �
 so a detector crash returned content the model never produced, at HTTP 200. For
 a fabrication-detection product that is the worst available failure mode. The
 response is now obtained once and relayed unchanged if scoring fails.
+
+THE BLOCK IS AUTHORISED BY ``gate_action``, NOT BY POLICY INTENT
+---------------------------------------------------------------
+``proxy/endpoints/detect.py`` documents two non-interchangeable signals and
+states the rule in terms: *"a consumer MUST hard-block ONLY when gate_action ==
+'block'"*. ``gate_action`` is the profile-EARNED gate — "block" only where the
+profile declares it AND carries non-null precision + f1 within the false-positive
+ceiling (``features.py::resolve_gate_action``); everything else is "advise".
+``high_risk_action`` is the customer's POLICY INTENT and authorises nothing.
+
+This middleware is the ONLY place in the product that blocks transport, and it
+used to key entirely off ``high_risk_action`` — the one enforcing site enforcing
+on the one signal the codebase says must not be enforced on. Both are now
+required: policy asks, the gate authorises. Anything that is not exactly the
+token ``"block"`` — absent, empty, mis-cased, novel — fails closed to advise.
+
+BEHAVIOUR CHANGE: a deployment configured ``high_risk_action: block`` against a
+profile that has not earned the gate now WARNS. The verdict, the receipt and the
+headers all still fire; the answer is delivered. Both signals are surfaced
+(``X-Arkheia-Gate-Action`` / ``X-Arkheia-Policy-Action``) and recorded, so a
+downgraded block is legible rather than silent.
+
+THE RECEIPT STATUS IS DERIVED, NEVER ASSERTED
+---------------------------------------------
+``_emit`` returns silently when no audit writer is configured and swallows a
+write that raises — both deliberate (the halt must not depend on the record
+landing). The block and refusal bodies nonetheless hard-coded
+``"receipt": "enqueued"``, so a response asserted an evidence trail that did not
+exist. ``_emit`` now RETURNS what happened and the payload carries that value.
+
+FORWARD HEADERS ARE AN ALLOW-LIST
+---------------------------------
+A deny-list forwards every header nobody thought of, and the failure is silent
+and permissive: ``cookie``, ``x-forwarded-for`` and ``x-arkheia-internal`` all
+reached the configured upstream on an ordinary accepted call. The forward leg
+now names what a provider API needs and drops everything else, so an unknown
+header — including one that does not exist yet — is not forwarded.
 """
 
 import hashlib
@@ -92,10 +129,63 @@ SINGLE_VALUED_CREDENTIAL_HEADERS = frozenset({
     "api-key",
 })
 
-#: Framing and negotiation headers we own rather than relay. ``host`` is set by
-#: httpx from the resolved URL; ``content-length`` is recomputed from the body
-#: we actually send.
-REQUEST_OWNED_HEADERS = frozenset({"host", "content-length"})
+#: THE FORWARD LEG IS AN ALLOW-LIST, NOT A DENY-LIST.
+#:
+#: A deny-list of forbidden headers forwards anything nobody thought of, and the
+#: failure is silent and in the permissive direction — the same shape as the
+#: enumerated deny-list that let ``unverifiable`` skip a halt on a sibling flow.
+#: This names what a provider API genuinely needs; everything else is dropped,
+#: including headers that do not exist yet.
+#:
+#: What is deliberately EXCLUDED, and why (report any of these that a real
+#: upstream turns out to need — the answer is to add it here with a reason, not
+#: to go back to a deny-list):
+#:   cookie                        a bearer credential for a DIFFERENT origin
+#:   x-forwarded-*, forwarded,
+#:   x-real-ip                     caller network topology; provider APIs ignore
+#:                                 them and they are an internal-estate leak
+#:   x-arkheia-*                   proxy-domain signalling; ours, not the
+#:                                 upstream's, and one of them is internal-only
+#:   user-agent, referer, origin   caller fingerprinting; httpx supplies its own
+#:                                 user-agent
+#:   accept-encoding               httpx negotiates and transparently DECODES;
+#:                                 relaying the caller's breaks the framing
+#:                                 invariant this module holds on the way back
+#:   x-stainless-*                 provider-SDK client telemetry, not required
+#:   cache/conditional headers     (if-none-match, range, …) meaningless for a
+#:                                 completion POST and a cache-poisoning surface
+#:   host, content-length          FRAMING WE OWN. ``host`` is set by httpx from
+#:                                 the resolved URL — httpx honours an explicit
+#:                                 one while still connecting to the URL's
+#:                                 authority, so relaying the caller's addresses
+#:                                 the provider to somewhere else.
+#:                                 ``content-length`` is recomputed from the body
+#:                                 we actually send; two framing headers are a
+#:                                 smuggling primitive even when they agree.
+#:                                 (These had their own deny-set before; the
+#:                                 allow-list subsumes it — they are simply not
+#:                                 forwardable, so there is one decision site.)
+#:   hop-by-hop (RFC 9110 §7.6.1)  addressed to this hop, never the endpoint.
+#:                                 Also subsumed; ``HOP_BY_HOP_HEADERS`` remains
+#:                                 the deny-set for the RESPONSE leg, where a
+#:                                 relay-everything default is correct.
+FORWARDABLE_HEADERS = frozenset({
+    # Credentials the provider authenticates with.
+    "authorization",          # OpenAI and most providers
+    "x-api-key",              # Anthropic
+    "api-key",                # Azure OpenAI
+    # Provider-required API negotiation.
+    "anthropic-version",      # REQUIRED by the Anthropic messages API
+    "anthropic-beta",
+    "openai-organization",
+    "openai-project",
+    "openai-beta",
+    # Payload and response negotiation.
+    "content-type",
+    "accept",                 # incl. text/event-stream for streaming
+    # Safe request semantics the caller owns.
+    "idempotency-key",
+})
 
 #: Response headers we own. ``content-encoding`` and ``content-length`` are a
 #: pair: httpx already decoded the body, so both describe bytes that no longer
@@ -144,6 +234,29 @@ DENY_CODES = {
 #: ``proxy/endpoints/detect.py`` so ``/audit/log`` reads as one stream.
 ACTION_TAKEN_VALUES = frozenset({
     "block", "warn", "pass", "refused", "unavailable", "error",
+})
+
+#: The ONE token that authorises a hard block, per
+#: ``proxy/detection/features.py::resolve_gate_action``. Compared exactly:
+#: absent, empty, mis-cased or novel values all fail closed to advisory, because
+#: that is the direction an unvalidated profile arrives from.
+GATE_ACTION_BLOCK = "block"
+
+#: What the caller is told about the evidence trail, DERIVED from what happened
+#: at the emission site — never asserted. ``enqueued`` is deliberately weaker
+#: than ``recorded``: ``AuditWriter.write()`` hands the record to a queue that a
+#: background loop drains, and that loop swallows its own I/O errors, so the
+#: most this flow can honestly support is that the rail accepted it.
+#:
+#: KNOWN GAP, pinned by a test rather than papered over: ``write()`` also
+#: swallows its own ``QueueFull`` and drops the record, so a saturated rail still
+#: reports ``enqueued``. Closing that needs ``AuditWriter.write()`` to report its
+#: own outcome — a change to a rail co-owned with another branch.
+RECEIPT_ENQUEUED = "enqueued"
+RECEIPT_NO_WRITER = "no_audit_writer"
+RECEIPT_WRITE_FAILED = "write_failed"
+RECEIPT_STATUSES = frozenset({
+    RECEIPT_ENQUEUED, RECEIPT_NO_WRITER, RECEIPT_WRITE_FAILED,
 })
 
 
@@ -279,8 +392,21 @@ def _forward_headers(headers: Headers) -> list[tuple[str, str]]:
     """
     The request headers to relay, as a LIST so legitimate repeats survive.
 
-    Refuses rather than resolves a duplicated credential header: choosing one
-    silently is the smuggling primitive, whichever end you choose from.
+    ALLOW-LIST, not deny-list. A header is forwarded only if it is named in
+    ``FORWARDABLE_HEADERS``; anything else — known-bad, unknown, or invented
+    tomorrow — is dropped. A deny-list gets the default wrong in the permissive
+    direction, and that is how ``cookie`` / ``x-forwarded-for`` /
+    ``x-arkheia-internal`` reached the upstream on an ordinary accepted call.
+
+    Ordering is load-bearing and pinned by a test:
+
+    * The duplicate-credential refusal runs over EVERY occurrence, before any
+      filtering, so it cannot be made unreachable by the allow-list. Refusing
+      rather than resolving is the point: choosing one silently is the smuggling
+      primitive, whichever end you choose from.
+    * ``Connection``-nomination is honoured even for an allow-listed field.
+      ``Connection: accept`` makes ``accept`` hop-by-hop for this hop, and
+      membership of the allow-list must not defeat the nomination.
     """
     nominated = _nominated_hop_headers(headers)
     seen_credentials: dict[str, int] = {}
@@ -293,11 +419,7 @@ def _forward_headers(headers: Headers) -> list[tuple[str, str]]:
                 raise InterceptionRefusal(
                     "duplicate_credential_header", header=lowered
                 )
-        if lowered in HOP_BY_HOP_HEADERS:
-            continue
-        if lowered in REQUEST_OWNED_HEADERS:
-            continue
-        if lowered in nominated:
+        if lowered not in FORWARDABLE_HEADERS:
             continue
         out.append((name, value))
     return out
@@ -350,18 +472,39 @@ def _build_response(
 
 
 def _signal_headers(risk_level: str, action: Optional[str] = None,
-                    detection_id: Optional[str] = None) -> dict:
+                    detection_id: Optional[str] = None,
+                    gate_action: Optional[str] = None,
+                    policy_action: Optional[str] = None) -> dict:
     """
     Header-only signalling. The body is never mutated: prepending a banner to a
     JSON completion produces bytes no parser accepts, and
     ``proxy/endpoints/detect.py::_signal`` already rules against the pattern by
     name ("we never prepend to the body (that pattern in interception.py
     corrupts responses and 400-loops sessions)").
+
+    Three decision fields, and they are NOT interchangeable:
+
+      X-Arkheia-Action        what this proxy DID (block / warn / pass /
+                              refused / unavailable / error). Mirrors
+                              ``action_taken`` on the evidence row.
+      X-Arkheia-Gate-Action   the AUTHORITATIVE profile-earned gate, verbatim
+                              from the detector. A hard block requires this to
+                              be exactly "block".
+      X-Arkheia-Policy-Action the customer's configured INTENT
+                              (``high_risk_action``). Records what policy
+                              wanted, which authorises nothing.
+
+    Surfacing all three is what makes a DOWNGRADED block legible: policy=block,
+    gate=advise, action=warn says, without touching the body, that the operator
+    asked for a block and the profile had not earned one. ``None`` values are
+    dropped by ``_build_response``, so a path with no verdict emits no field.
     """
     return {
         "X-Arkheia-Risk": risk_level,
         "X-Arkheia-Action": action,
         "X-Arkheia-Detection-Id": detection_id,
+        "X-Arkheia-Gate-Action": gate_action,
+        "X-Arkheia-Policy-Action": policy_action,
     }
 
 
@@ -384,6 +527,8 @@ def _audit_record(
     deny_code: Optional[str] = None,
     reason: Optional[str] = None,
     error: Optional[str] = None,
+    gate_action: Optional[str] = None,
+    policy_action: Optional[str] = None,
 ) -> dict:
     """
     The evidence row. Shaped to match ``proxy/endpoints/detect.py::_audit_record``
@@ -408,6 +553,12 @@ def _audit_record(
         "response_hash": hashlib.sha256(response_body).hexdigest(),
         "response_length": len(response_body),
         "action_taken": action_taken,
+        # WHAT WAS AUTHORISED vs WHAT WAS ASKED FOR. Without both, a block that
+        # was downgraded because the profile had not earned the gate is
+        # indistinguishable on the row from an ordinary warn — and the operator
+        # whose configured block stopped firing has no way to find out why.
+        "gate_action": gate_action,
+        "policy_action": policy_action,
         "source": "interception",
         "path": path,
         "method": method,
@@ -417,19 +568,37 @@ def _audit_record(
     }
 
 
-async def _emit(request: Request, record: dict) -> None:
+async def _emit(request: Request, record: dict) -> str:
     """
-    Fire-and-forget enqueue. Never raises: a receipt failure must not turn a
-    block into a served answer (kill-switch-receipt ruling — the halt does not
-    depend on the record landing).
+    Fire-and-forget enqueue that REPORTS WHAT HAPPENED.
+
+    Never raises: a receipt failure must not turn a block into a served answer
+    (kill-switch-receipt ruling — the halt does not depend on the record
+    landing). But it must not be silent about it either. The caller-facing
+    ``receipt`` field is this return value, so the response can never claim an
+    evidence trail that does not exist:
+
+      ``enqueued``        the rail accepted the record
+      ``no_audit_writer`` no rail is configured — nothing was enqueued anywhere
+      ``write_failed``    the rail raised; nothing landed
+
+    The three are distinguished HERE, at the one place that can observe the
+    difference. A literal at the response-construction site cannot, which is the
+    entire defect this replaces.
     """
     audit = getattr(request.app.state, "audit_writer", None)
     if audit is None:
-        return
+        logger.warning(
+            "Interception decision not receipted: no audit writer configured "
+            "(decision unaffected; the caller is told '%s')", RECEIPT_NO_WRITER,
+        )
+        return RECEIPT_NO_WRITER
     try:
         await audit.write(record)
-    except Exception as exc:                                # pragma: no cover
+    except Exception as exc:
         logger.error("Interception audit write failed (decision unaffected): %s", exc)
+        return RECEIPT_WRITE_FAILED
+    return RECEIPT_ENQUEUED
 
 
 # ---------------------------------------------------------------------------
@@ -489,15 +658,21 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
             )
 
         # -- act on the verdict --------------------------------------------
+        # TWO signals, and they are not interchangeable. `policy` is what the
+        # customer configured and authorises nothing; `gate_action` is the
+        # profile-EARNED authorisation. A hard block needs both.
         settings = getattr(request.app.state, "settings", None)
         detection_cfg = getattr(settings, "detection", None) if settings else None
         if result.risk_level == "HIGH":
-            action = getattr(detection_cfg, "high_risk_action", "warn") if detection_cfg else "warn"
+            policy = getattr(detection_cfg, "high_risk_action", "warn") if detection_cfg else "warn"
         else:
-            action = "pass"
+            policy = "pass"
 
-        if result.risk_level == "HIGH" and action == "block":
-            await _emit(request, _audit_record(
+        gate_action = getattr(result, "gate_action", None)
+        gate_authorises_block = gate_action == GATE_ACTION_BLOCK
+
+        if result.risk_level == "HIGH" and policy == "block" and gate_authorises_block:
+            receipt = await _emit(request, _audit_record(
                 detection_id=result.detection_id,
                 risk_level="HIGH",
                 action_taken="block",
@@ -509,29 +684,37 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
                 profile_version=result.profile_version,
                 confidence=result.confidence,
                 features_triggered=list(result.features_triggered or []),
+                gate_action=gate_action,
+                policy_action=policy,
             ))
             payload = {
                 "error": "arkheia_blocked",
                 "risk_level": "HIGH",
                 "detection_id": result.detection_id,
                 "reason": (
-                    "the model response scored HIGH fabrication risk and this "
-                    "proxy is configured to block HIGH-risk responses"
+                    "the model response scored HIGH fabrication risk, this "
+                    "proxy is configured to block HIGH-risk responses, and the "
+                    "model profile has earned the hard-block gate"
                 ),
                 "remedy": (
                     "re-run the request, narrow the prompt to material the "
                     "model can ground, or ask an operator to review detection "
                     f"id {result.detection_id} in the audit log"
                 ),
-                "receipt": "enqueued",
+                "receipt": receipt,
             }
             return _build_response(
                 json.dumps(payload).encode("utf-8"), 200,
                 [("content-type", "application/json")],
-                _signal_headers("HIGH", "block", result.detection_id),
+                _signal_headers("HIGH", "block", result.detection_id,
+                                gate_action=gate_action, policy_action=policy),
             )
 
-        if result.risk_level == "HIGH" and action == "warn":
+        if result.risk_level == "HIGH" and policy in ("block", "warn"):
+            # Either the customer asked to warn, or they asked to block and the
+            # gate did not authorise it. Both deliver the answer; the difference
+            # is legible from `policy_action` on the headers and on the record,
+            # so a downgraded block is never silent.
             await _emit(request, _audit_record(
                 detection_id=result.detection_id,
                 risk_level="HIGH",
@@ -544,15 +727,19 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
                 profile_version=result.profile_version,
                 confidence=result.confidence,
                 features_triggered=list(result.features_triggered or []),
+                gate_action=gate_action,
+                policy_action=policy,
             ))
             return _build_response(
                 response_body, status_code, relayed,
-                _signal_headers("HIGH", "warn", result.detection_id),
+                _signal_headers("HIGH", "warn", result.detection_id,
+                                gate_action=gate_action, policy_action=policy),
             )
 
         return _build_response(
             response_body, status_code, relayed,
-            _signal_headers(result.risk_level, action, result.detection_id),
+            _signal_headers(result.risk_level, policy, result.detection_id,
+                            gate_action=gate_action, policy_action=policy),
         )
 
     # ------------------------------------------------------------------
@@ -608,7 +795,7 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
     async def _refuse(self, request: Request, refusal: InterceptionRefusal,
                       prompt: str, status_code: int = 400) -> Response:
         detection_id = str(uuid.uuid4())
-        await _emit(request, _audit_record(
+        receipt = await _emit(request, _audit_record(
             detection_id=detection_id,
             risk_level="REFUSED",
             action_taken="refused",
@@ -625,7 +812,7 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
             "reason": refusal.reason,
             "remedy": refusal.remedy,
             "detection_id": detection_id,
-            "receipt": "enqueued",
+            "receipt": receipt,
         }
         return _build_response(
             json.dumps(payload).encode("utf-8"), status_code,

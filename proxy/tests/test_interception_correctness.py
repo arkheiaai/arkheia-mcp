@@ -115,6 +115,12 @@ def client(app) -> httpx.AsyncClient:
 # ---------------------------------------------------------------------------
 
 class TestBlockActuallyBlocks:
+    """
+    Every case here supplies ``gate_action="block"`` — the profile-EARNED gate.
+    Since round 2 the policy alone does not authorise a hard block; the unearned
+    case is asserted in ``TestGateActionAuthorisesTheBlock``, which is where the
+    behaviour change lives.
+    """
 
     async def test_block_withholds_every_byte_of_the_flagged_answer(self):
         """
@@ -122,7 +128,7 @@ class TestBlockActuallyBlocks:
         caller. Asserted as an absence over the RAW bytes, with the positive
         control below proving the probe can see that content when it is served.
         """
-        app, _ = build(risk="HIGH", action="block")
+        app, _ = build(risk="HIGH", action="block", gate_action="block")
         async with client(app) as c:
             r = await c.post("/v1/chat/completions", json=REQ)
         assert b"THE-MODEL-ANSWER" not in r.content, (
@@ -137,7 +143,7 @@ class TestBlockActuallyBlocks:
         assert b"THE-MODEL-ANSWER" in r.content
 
     async def test_block_body_is_exactly_the_documented_refusal(self):
-        app, _ = build(risk="HIGH", action="block")
+        app, _ = build(risk="HIGH", action="block", gate_action="block")
         async with client(app) as c:
             r = await c.post("/v1/chat/completions", json=REQ)
         payload = json.loads(r.content)
@@ -152,7 +158,7 @@ class TestBlockActuallyBlocks:
         investigate or contest. The id must be on the response AND must be the
         id the engine actually produced for this request.
         """
-        eng = _Engine("HIGH")
+        eng = _Engine("HIGH", gate_action="block")
         app, _ = build(risk="HIGH", action="block", engine=eng)
         async with client(app) as c:
             r = await c.post("/v1/chat/completions", json=REQ)
@@ -165,7 +171,7 @@ class TestBlockActuallyBlocks:
         DONE.md Gate 9 legibility: every NO carries its reason and a route to
         yes. ``{"error":"arkheia_blocked"}`` alone is "computer says no".
         """
-        app, _ = build(risk="HIGH", action="block")
+        app, _ = build(risk="HIGH", action="block", gate_action="block")
         async with client(app) as c:
             r = await c.post("/v1/chat/completions", json=REQ)
         payload = json.loads(r.content)
@@ -174,7 +180,7 @@ class TestBlockActuallyBlocks:
 
     @pytest.mark.parametrize("risk", ["LOW", "MEDIUM", "UNKNOWN"])
     async def test_block_never_fires_below_high(self, risk):
-        app, _ = build(risk=risk, action="block")
+        app, _ = build(risk=risk, action="block", gate_action="block")
         async with client(app) as c:
             r = await c.post("/v1/chat/completions", json=REQ)
         assert b"arkheia_blocked" not in r.content
@@ -189,10 +195,11 @@ class TestBlockActuallyBlocks:
         only the product owner can weigh, so it is REPORTED, not decided. See
         the PR's adjudication list.
         """
-        app, _ = build(risk="HIGH", action="block")
+        app, _ = build(risk="HIGH", action="block", gate_action="block")
         async with client(app) as c:
             r = await c.post("/v1/chat/completions", json=REQ)
         assert r.status_code == 200
+        assert json.loads(r.content)["error"] == "arkheia_blocked"
 
 
 # ---------------------------------------------------------------------------
@@ -277,31 +284,167 @@ class TestPassAndDetectorContract:
         assert "x-arkheia-risk" not in r.headers
         assert r.json() == {"ok": True}
 
-    async def test_gate_action_is_not_consulted_by_the_transport_block(self):
+
+# ---------------------------------------------------------------------------
+# gate_action — the AUTHORITATIVE block signal
+# ---------------------------------------------------------------------------
+
+class TestGateActionAuthorisesTheBlock:
+    """
+    ``proxy/endpoints/detect.py`` documents two non-interchangeable signals and
+    states the rule in terms: *"a consumer MUST hard-block ONLY when
+    gate_action == 'block'"*, because ``action`` is policy INTENT and "keying
+    enforcement off `action` OVER-BLOCKS on profiles that never earned it -- do
+    not." ``features.py::resolve_gate_action`` returns "block" only when the
+    profile declares it AND carries non-null precision + f1 within the FP
+    ceiling; every other profile resolves to "advise".
+
+    This middleware is the one place in the product that blocks TRANSPORT, and
+    it used to key entirely off ``high_risk_action`` — so the single enforcing
+    site enforced on the signal the codebase says must not be enforced on.
+
+    BEHAVIOUR CHANGE, DELIBERATE AND DISCLOSED: a deployment configured
+    ``high_risk_action: block`` whose model profile has NOT earned the gate now
+    WARNS instead of blocking. That is the contract; it is also a live change
+    for anyone relying on the old behaviour, and it is stated at the top of the
+    PR body rather than buried here.
+    """
+
+    async def test_an_unearned_profile_cannot_hard_block(self):
+        """policy says block, the profile never earned it — the answer flows."""
+        app, _ = build(risk="HIGH", action="block", gate_action="advise")
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert b"arkheia_blocked" not in r.content, (
+            "an unvalidated profile (gate_action='advise') hard-blocked at "
+            "transport — the one enforcing site is enforcing on policy INTENT"
+        )
+        assert r.content == UPSTREAM_BODY
+
+    async def test_an_earned_profile_still_blocks(self):
+        """Control: the fix must not disable blocking where it was earned."""
+        app, _ = build(risk="HIGH", action="block", gate_action="block")
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert b"arkheia_blocked" in r.content
+        assert b"THE-MODEL-ANSWER" not in r.content
+
+    async def test_the_downgrade_is_a_warn_not_a_silent_pass(self):
         """
-        CURRENT BEHAVIOUR, PINNED — AND FLAGGED AS A DIVERGENCE.
-
-        ``proxy/endpoints/detect.py`` documents two non-interchangeable signals
-        and states the rule explicitly: *"a consumer MUST hard-block ONLY when
-        gate_action == 'block'"*, because ``action`` is policy INTENT and
-        "keying enforcement off `action` OVER-BLOCKS on profiles that never
-        earned it -- do not."
-
-        This middleware is the only place in the product that actually blocks
-        transport, and it keys entirely off ``high_risk_action``. So the one
-        enforcing site enforces on the signal the codebase says must not be
-        enforced on: an unvalidated profile (``gate_action == "advise"``, the
-        default for every profile lacking precision/f1) can still hard-block.
-
-        Aligning it would DISABLE blocking for customers relying on it today.
-        That is a product/authority decision — REPORTED, not taken. This test
-        keeps it visible and will fail the moment the behaviour changes, so the
-        change cannot land silently either way.
+        A configured block that the gate did not authorise is still a HIGH
+        verdict the customer asked to act on. Collapsing it to ``pass`` would
+        lose the warning as well as the block.
         """
         app, _ = build(risk="HIGH", action="block", gate_action="advise")
         async with client(app) as c:
             r = await c.post("/v1/chat/completions", json=REQ)
-        assert b"arkheia_blocked" in r.content
+        assert r.headers["x-arkheia-action"] == "warn"
+        assert r.headers["x-arkheia-risk"] == "HIGH"
+
+    async def test_the_caller_is_told_why_the_configured_block_did_not_fire(self):
+        """
+        DONE.md Gate 9 legibility, applied to a decision that went the
+        customer's way: an operator who configured ``block`` and received the
+        answer must be able to see, from the response alone, that the POLICY
+        wanted a block and the GATE did not authorise one. Header-only — the
+        warn path may never touch the body.
+        """
+        app, _ = build(risk="HIGH", action="block", gate_action="advise")
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert r.headers.get("x-arkheia-gate-action") == "advise", (
+            "the authoritative gate signal is not surfaced, so a downgraded "
+            "block is indistinguishable from a policy that never said block"
+        )
+        assert r.headers.get("x-arkheia-policy-action") == "block"
+        assert r.content == UPSTREAM_BODY
+
+    async def test_the_gate_signal_is_surfaced_on_an_earned_block_too(self):
+        app, _ = build(risk="HIGH", action="block", gate_action="block")
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert r.headers.get("x-arkheia-gate-action") == "block"
+        assert r.headers.get("x-arkheia-policy-action") == "block"
+
+    async def test_an_earned_gate_does_not_override_a_warn_policy(self):
+        """
+        The gate AUTHORISES, it does not command. A customer who configured
+        ``warn`` must not start being blocked because a profile earned the gate.
+        """
+        app, _ = build(risk="HIGH", action="warn", gate_action="block")
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert b"arkheia_blocked" not in r.content
+        assert r.headers["x-arkheia-action"] == "warn"
+
+    @pytest.mark.parametrize("gate", ["advise", "", "BLOCK", "unknown", None])
+    async def test_anything_that_is_not_exactly_block_fails_closed_to_advise(
+        self, gate
+    ):
+        """
+        Fail-safe direction: the authorisation is granted only by the exact
+        token. A missing, empty, mis-cased or novel value must not authorise a
+        hard block — that is the direction an unvalidated profile arrives from.
+        """
+        app, _ = build(risk="HIGH", action="block", gate_action=gate)
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert b"arkheia_blocked" not in r.content, (
+            f"gate_action={gate!r} authorised a hard block"
+        )
+
+    async def test_an_engine_result_with_no_gate_action_at_all_cannot_block(self):
+        """
+        A third-party or older engine that returns a result object without the
+        field must not be read as authorisation. ``getattr`` default, not
+        ``result.gate_action``.
+        """
+        class _Bare:
+            risk_level = "HIGH"
+            confidence = 0.8
+            features_triggered = []
+            model_id = "gpt-4o"
+            profile_version = "1.0"
+            detection_id = "bare-0000"
+
+        class _BareEngine:
+            async def verify(self, prompt, response, model_id):
+                return _Bare()
+
+        app, _ = build(risk="HIGH", action="block", engine=_BareEngine())
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert b"arkheia_blocked" not in r.content
+
+    async def test_the_record_says_what_policy_wanted_and_what_the_gate_allowed(
+        self, tmp_path
+    ):
+        """
+        An operator whose configured block silently stopped firing needs the
+        evidence row to say so. ``action_taken`` alone cannot: a downgraded
+        block and an ordinary warn are both ``warn``.
+        """
+        from proxy.audit.writer import AuditWriter
+        from proxy.tests._receipt_probe import ReceiptProbe
+
+        log = tmp_path / "audit.jsonl"
+        writer = AuditWriter(str(log))
+        await writer.start()
+        try:
+            app, _ = build(risk="HIGH", action="block", gate_action="advise",
+                           audit=writer)
+            async with client(app) as c:
+                r = await c.post("/v1/chat/completions", json=REQ)
+        finally:
+            await writer.stop()
+        row = ReceiptProbe(log).require(r.headers["x-arkheia-detection-id"])
+        assert row["action_taken"] == "warn"
+        assert row["policy_action"] == "block", (
+            "the record does not say the operator had configured a block"
+        )
+        assert row["gate_action"] == "advise", (
+            "the record does not say why the configured block did not fire"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +454,8 @@ class TestPassAndDetectorContract:
 class TestFailOpen:
 
     async def test_detector_crash_still_delivers_the_real_answer(self):
-        app, _ = build(risk="HIGH", action="block", raises=True)
+        app, _ = build(risk="HIGH", action="block", gate_action="block",
+                       raises=True)
         async with client(app) as c:
             r = await c.post("/v1/chat/completions", json=REQ)
         assert r.headers["x-arkheia-risk"] == "ERROR"
@@ -322,7 +466,8 @@ class TestFailOpen:
 
     async def test_detector_crash_does_not_block(self):
         """Fail-open by contract: detection degrades, it never blocks."""
-        app, _ = build(risk="HIGH", action="block", raises=True)
+        app, _ = build(risk="HIGH", action="block", gate_action="block",
+                       raises=True)
         async with client(app) as c:
             r = await c.post("/v1/chat/completions", json=REQ)
         assert b"arkheia_blocked" not in r.content
@@ -583,6 +728,226 @@ class TestForwardHeaderBoundary:
         ]))
         assert sorted(v for k, v in out if k == "accept") == [
             "application/json", "text/event-stream"]
+
+
+class TestForwardHeadersAreAnAllowList:
+    """
+    A DENY-list forwards every header nobody thought of. That is the same shape
+    as the enumerated deny-list that let ``unverifiable`` skip a halt on a
+    sibling flow: the set of things you must remember to name is unbounded, and
+    the failure is silent and in the permissive direction.
+
+    So the forward leg names what the upstream NEEDS and drops everything else.
+    An unknown header is not forwarded — including one that does not exist yet.
+    """
+
+    def _headers(self, pairs):
+        return Headers(raw=[(k.encode(), v.encode()) for k, v in pairs])
+
+    def _names(self, pairs):
+        return {k.lower() for k, _ in _forward_headers(self._headers(pairs))}
+
+    #: Each of these is a real leak, and the first three are the ones the second
+    #: vendor reproduced on an accepted /v1/chat/completions call.
+    LEAKS = [
+        ("cookie", "session=CALLER-SESSION"),
+        ("x-forwarded-for", "10.1.2.3, 192.0.2.9"),
+        ("x-arkheia-internal", "internal-only-token"),
+        ("x-forwarded-host", "proxy.internal.corp"),
+        ("x-forwarded-proto", "http"),
+        ("x-real-ip", "10.1.2.3"),
+        ("forwarded", "for=10.1.2.3;host=proxy.internal.corp"),
+        ("x-arkheia-risk", "LOW"),
+        ("referer", "https://internal.corp/admin/keys"),
+        ("origin", "https://internal.corp"),
+        ("user-agent", "internal-tooling/9.9 (build 1234)"),
+        ("accept-encoding", "identity"),
+        ("x-stainless-runtime-version", "3.12.13"),
+        ("set-cookie", "a=b"),
+    ]
+
+    @pytest.mark.parametrize("name,value", LEAKS)
+    def test_a_header_the_upstream_does_not_need_is_not_forwarded(self, name, value):
+        assert name not in self._names([
+            ("content-type", "application/json"), (name, value),
+        ]), f"{name} reached the configured upstream"
+
+    def test_an_unknown_header_nobody_thought_of_is_not_forwarded(self):
+        """
+        THE point of the allow-list, expressed directly: a header that no
+        reviewer has ever seen must default to NOT forwarded. Under a deny-list
+        this assertion is unsatisfiable without amending the deny-list first.
+        """
+        assert self._names([
+            ("content-type", "application/json"),
+            ("x-invented-2026-07-27", "surprise"),
+        ]) == {"content-type"}
+
+    #: What a provider API genuinely needs. Each entry is required by at least
+    #: one upstream this proxy is configured against in practice.
+    NEEDED = [
+        ("authorization", "Bearer sk-test"),          # OpenAI / most providers
+        ("x-api-key", "sk-ant-test"),                 # Anthropic
+        ("api-key", "azure-test"),                    # Azure OpenAI
+        ("anthropic-version", "2023-06-01"),          # required by Anthropic
+        ("anthropic-beta", "prompt-caching-2024-07-31"),
+        ("openai-organization", "org-abc"),
+        ("openai-project", "proj-abc"),
+        ("openai-beta", "assistants=v2"),
+        ("content-type", "application/json"),
+        ("accept", "text/event-stream"),              # streaming completions
+        ("idempotency-key", "idem-123"),
+    ]
+
+    @pytest.mark.parametrize("name,value", NEEDED)
+    def test_a_header_the_upstream_genuinely_needs_is_forwarded(self, name, value):
+        """
+        Control. An allow-list that forwards nothing is not a control, it is an
+        outage — and it would pass every assertion above.
+        """
+        assert name in self._names([(name, value)]), (
+            f"{name} is required by a configured upstream and was dropped"
+        )
+
+    def test_the_allow_list_is_matched_case_insensitively(self):
+        assert self._names([("Content-Type", "application/json")]) == {"content-type"}
+
+    def test_a_connection_nominated_allow_listed_header_is_still_stripped(self):
+        """
+        ``Connection: accept`` nominates an ALLOW-LISTED field as hop-by-hop.
+        Membership of the allow-list must not override the nomination, or the
+        nomination logic is dead code the allow-list happens to shadow.
+        """
+        assert self._names([
+            ("connection", "accept, close"),
+            ("accept", "application/json"),
+            ("content-type", "application/json"),
+        ]) == {"content-type"}
+
+    def test_a_duplicated_credential_is_still_refused_before_filtering(self):
+        """
+        The refusal must not become unreachable because the allow-list runs
+        first: ordering matters, and only a test can pin it.
+        """
+        with _pytest.raises(InterceptionRefusal) as exc:
+            _forward_headers(self._headers([
+                ("authorization", "Bearer LEGIT"),
+                ("authorization", "Bearer ATTACKER"),
+            ]))
+        assert exc.value.deny_code == "duplicate_credential_header"
+
+
+class TestReceiptStatusIsDerivedNotAsserted:
+    """
+    ``_emit`` returns silently when no audit writer is configured and swallows a
+    write that raises — both correct (the kill-switch-receipt ruling: the halt
+    must not depend on the record landing). What was NOT correct is that the
+    block and refusal bodies hard-coded ``"receipt": "enqueued"`` regardless, so
+    a response asserted an evidence trail that did not exist.
+
+    The previous round chose the word ``enqueued`` over ``recorded`` precisely
+    because the rail is fire-and-forget — and then asserted it where nothing was
+    enqueued at all. A response claiming evidence that does not exist is worse
+    than one claiming none: the first is what an investigator acts on.
+
+    The status must be DERIVED from what happened at the call site.
+    """
+
+    class _RaisingWriter:
+        """
+        A rail supplied through the documented extension point
+        (``app.state.audit_writer``) whose ``write`` fails.
+
+        NOT a monkeypatch of the shipped ``AuditWriter`` — the middleware
+        duck-types this attribute, and ``_emit``'s ``except`` clause exists for
+        exactly this object. The shipped writer cannot raise from ``write()``
+        today; that limitation is measured separately and disclosed.
+        """
+
+        def __init__(self):
+            self.calls = 0
+
+        async def write(self, record):
+            self.calls += 1
+            raise OSError("audit rail unavailable")
+
+    async def test_a_block_with_no_audit_writer_does_not_claim_a_receipt(self):
+        app, _ = build(risk="HIGH", action="block", gate_action="block")
+        assert not hasattr(app.state, "audit_writer")
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        status = json.loads(r.content)["receipt"]
+        assert status != "enqueued", (
+            "the block claimed 'enqueued' with no audit writer configured — "
+            "nothing was enqueued anywhere"
+        )
+        assert status == "no_audit_writer"
+
+    async def test_a_block_whose_audit_write_raised_says_so(self):
+        writer = self._RaisingWriter()
+        app, _ = build(risk="HIGH", action="block", gate_action="block",
+                       audit=writer)
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert writer.calls == 1, "the rail was never called; the test proves nothing"
+        assert json.loads(r.content)["receipt"] == "write_failed"
+
+    async def test_the_block_still_holds_when_the_receipt_fails(self):
+        """
+        The kill-switch-receipt ruling, unchanged: deriving the status must not
+        turn a receipt failure into a served answer.
+        """
+        app, _ = build(risk="HIGH", action="block", gate_action="block",
+                       audit=self._RaisingWriter())
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert b"arkheia_blocked" in r.content
+        assert b"THE-MODEL-ANSWER" not in r.content
+
+    async def test_a_refusal_with_no_audit_writer_does_not_claim_a_receipt(self):
+        app, _ = build(risk="LOW", upstream_url="file:///etc/passwd")
+        assert not hasattr(app.state, "audit_writer")
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        payload = json.loads(r.content)
+        assert payload["deny_code"] == "upstream_scheme_not_allowed"
+        assert payload["receipt"] == "no_audit_writer"
+
+    async def test_a_refusal_whose_audit_write_raised_says_so(self):
+        writer = self._RaisingWriter()
+        app, _ = build(risk="LOW", upstream_url="file:///etc/passwd", audit=writer)
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert writer.calls == 1
+        assert json.loads(r.content)["receipt"] == "write_failed"
+
+    async def test_the_refusal_still_holds_when_the_receipt_fails(self):
+        app, _ = build(risk="LOW", upstream_url="file:///etc/passwd",
+                       audit=self._RaisingWriter())
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert r.status_code == 400
+        assert b"root:" not in r.content
+
+    async def test_every_status_the_caller_can_see_is_from_the_closed_set(self):
+        """
+        The status is a machine-readable field a support tool will branch on. A
+        free-form string would put us back where we started.
+        """
+        from proxy.middleware.interception import RECEIPT_STATUSES
+
+        seen = set()
+        app, _ = build(risk="HIGH", action="block", gate_action="block")
+        async with client(app) as c:
+            seen.add(json.loads((await c.post("/v1/chat/completions",
+                                              json=REQ)).content)["receipt"])
+        app, _ = build(risk="HIGH", action="block", gate_action="block",
+                       audit=self._RaisingWriter())
+        async with client(app) as c:
+            seen.add(json.loads((await c.post("/v1/chat/completions",
+                                              json=REQ)).content)["receipt"])
+        assert len(seen) == 2, f"the two cases produced the same status: {seen}"
+        assert seen <= RECEIPT_STATUSES
 
 
 class TestFailSafeDefaults:

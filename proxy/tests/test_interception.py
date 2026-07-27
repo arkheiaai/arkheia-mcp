@@ -30,7 +30,7 @@ from proxy.detection.engine import DetectionResult
 # Helper: build a DetectionResult for a given risk level
 # ---------------------------------------------------------------------------
 
-def _make_result(risk_level: str) -> DetectionResult:
+def _make_result(risk_level: str, gate_action: str = "advise") -> DetectionResult:
     return DetectionResult(
         risk_level=risk_level,
         confidence=0.8 if risk_level != "UNKNOWN" else 0.0,
@@ -39,6 +39,7 @@ def _make_result(risk_level: str) -> DetectionResult:
         profile_version="1.0",
         timestamp=datetime.now(timezone.utc).isoformat(),
         detection_id=str(_uuid.uuid4()),
+        gate_action=gate_action,
     )
 
 
@@ -47,7 +48,8 @@ def _make_result(risk_level: str) -> DetectionResult:
 # ---------------------------------------------------------------------------
 
 def _make_app(risk_level: str = "LOW", high_risk_action: str = "warn",
-              engine_none: bool = False, raise_in_engine: bool = False) -> FastAPI:
+              engine_none: bool = False, raise_in_engine: bool = False,
+              gate_action: str = "advise") -> FastAPI:
     """
     Build a minimal FastAPI app with AIInterceptionMiddleware attached.
 
@@ -79,7 +81,8 @@ def _make_app(risk_level: str = "LOW", high_risk_action: str = "warn",
         app.state.engine = engine
     else:
         engine = AsyncMock()
-        engine.verify = AsyncMock(return_value=_make_result(risk_level))
+        engine.verify = AsyncMock(
+            return_value=_make_result(risk_level, gate_action))
         app.state.engine = engine
 
     settings = MagicMock()
@@ -153,8 +156,18 @@ class TestAIInterceptionMiddleware:
         assert resp.json()["choices"][0]["message"]["content"] == "Paris"
 
     def test_high_risk_block_returns_blocked_body(self):
-        """CRITERION 4: HIGH risk + block returns arkheia_blocked JSON, header = HIGH."""
-        app = _make_app(risk_level="HIGH", high_risk_action="block")
+        """
+        CRITERION 4, AMENDED (F10 round 2) — DELIBERATE BEHAVIOUR CHANGE.
+
+        HIGH risk + ``high_risk_action: block`` no longer blocks on its own. The
+        block is AUTHORISED by ``DetectionResult.gate_action == "block"`` — the
+        profile-earned gate — which ``proxy/endpoints/detect.py`` states in terms:
+        "a consumer MUST hard-block ONLY when gate_action == 'block'". Policy
+        asks; the gate authorises. This test now supplies the earned gate; the
+        unearned case is asserted immediately below.
+        """
+        app = _make_app(risk_level="HIGH", high_risk_action="block",
+                        gate_action="block")
         with TestClient(app, raise_server_exceptions=False) as client:
             resp = client.post(
                 "/v1/chat/completions",
@@ -164,6 +177,26 @@ class TestAIInterceptionMiddleware:
         data = resp.json()
         assert data["error"] == "arkheia_blocked"
         assert data["risk_level"] == "HIGH"
+
+    def test_high_risk_block_without_the_earned_gate_delivers_the_answer(self):
+        """
+        The other half of criterion 4, and the change worth knowing about: a
+        deployment configured to block, against a profile that has NOT earned
+        the gate (the default for every profile lacking precision/f1), now warns
+        and delivers the answer.
+        """
+        app = _make_app(risk_level="HIGH", high_risk_action="block",
+                        gate_action="advise")
+        with TestClient(app, raise_server_exceptions=False) as client:
+            resp = client.post(
+                "/v1/chat/completions",
+                json={"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]},
+            )
+        assert resp.headers.get("x-arkheia-risk") == "HIGH"
+        assert resp.headers.get("x-arkheia-action") == "warn"
+        assert resp.headers.get("x-arkheia-gate-action") == "advise"
+        assert resp.headers.get("x-arkheia-policy-action") == "block"
+        assert resp.json()["choices"][0]["message"]["content"] == "Paris"
 
     def test_unknown_risk_body_passes_through(self):
         """CRITERION 5: UNKNOWN risk leaves body unchanged and sets header = UNKNOWN."""

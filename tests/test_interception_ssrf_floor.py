@@ -570,3 +570,320 @@ class TestInv9FramingHeadersDroppedTogether:
     def test_control_the_pair_is_not_flagged(self):
         assert _framing_pair_broken({"content-length", "content-encoding"}) is False
         assert _framing_pair_broken(set()) is False
+
+
+# ---------------------------------------------------------------------------
+# INV-10 — the transport block is authorised by gate_action, not by policy
+# ---------------------------------------------------------------------------
+
+#: The marker that identifies the hard-block construction site.
+BLOCK_MARKER = "arkheia_blocked"
+
+
+def _block_guards(tree: ast.Module) -> list[ast.If]:
+    """
+    The INNERMOST ``if`` whose body builds the block payload.
+
+    Innermost on purpose: an enclosing ``if`` that happens to mention the gate
+    would otherwise satisfy this invariant while the branch that actually
+    withholds the answer is guarded by something else.
+    """
+    out: list[ast.If] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If):
+            continue
+        in_body = any(
+            isinstance(c, ast.Constant) and isinstance(c.value, str)
+            and BLOCK_MARKER in c.value
+            for stmt in node.body for c in ast.walk(stmt)
+        )
+        if not in_body:
+            continue
+        nested = any(
+            isinstance(inner, ast.If) and inner is not node
+            and any(isinstance(c, ast.Constant) and isinstance(c.value, str)
+                    and BLOCK_MARKER in c.value
+                    for stmt in inner.body for c in ast.walk(stmt))
+            for stmt in node.body for inner in ast.walk(stmt)
+        )
+        if not nested:
+            out.append(node)
+    return out
+
+
+def _guards_without_gate_reference(tree: ast.Module) -> list[int]:
+    """Line numbers of a block guard that never consults the gate."""
+    bad = []
+    for guard in _block_guards(tree):
+        names = {n.id.lower() for n in ast.walk(guard.test) if isinstance(n, ast.Name)}
+        names |= {n.attr.lower() for n in ast.walk(guard.test)
+                  if isinstance(n, ast.Attribute)}
+        if not any("gate" in n for n in names):
+            bad.append(guard.lineno)
+    return bad
+
+
+def _compares_against_the_gate_constant(tree: ast.Module) -> bool:
+    """Somewhere the module must test equality against the one authorising token."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Compare) and any(
+            isinstance(op, ast.Eq) for op in node.ops
+        ):
+            names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+            if "GATE_ACTION_BLOCK" in names:
+                return True
+    return False
+
+
+class TestInv10BlockIsGateAuthorised:
+    """
+    ``proxy/endpoints/detect.py`` states the rule in terms: *"a consumer MUST
+    hard-block ONLY when gate_action == 'block'"* — ``action`` is policy INTENT
+    and "keying enforcement off `action` OVER-BLOCKS on profiles that never
+    earned it -- do not." This middleware is the ONLY transport-blocking site in
+    the product, and it keyed entirely off ``high_risk_action``, so the single
+    enforcing site enforced on the single signal the codebase forbids enforcing
+    on. Found by a second vendor and classified P1.
+    """
+
+    def test_every_block_guard_consults_the_gate(self, tree):
+        guards = _block_guards(tree)
+        assert len(guards) >= 1, "no block construction site discovered — wrong file?"
+        assert _guards_without_gate_reference(tree) == []
+
+    def test_the_authorising_token_is_a_named_constant_compared_for_equality(self, tree):
+        const = _module_constant(tree, "GATE_ACTION_BLOCK")
+        assert isinstance(const, ast.Constant) and const.value == "block"
+        assert _compares_against_the_gate_constant(tree), (
+            "nothing compares against GATE_ACTION_BLOCK, so the constant is "
+            "documentation rather than a gate"
+        )
+
+    def test_negative_self_test_the_exact_pre_fix_guard_is_flagged(self):
+        """Verbatim shape of the defect: policy intent as the sole condition."""
+        pre_fix = ast.parse(
+            'if result.risk_level == "HIGH" and action == "block":\n'
+            '    payload = {"error": "arkheia_blocked"}\n'
+        )
+        assert _guards_without_gate_reference(pre_fix) == [1]
+        assert _compares_against_the_gate_constant(pre_fix) is False
+
+    def test_negative_self_test_an_outer_gate_check_does_not_launder_the_guard(self):
+        """
+        The subtle version: the gate is consulted somewhere up the tree while
+        the branch that actually withholds the answer is not guarded by it.
+        """
+        laundered = ast.parse(
+            "if gate_authorises_block or True:\n"
+            '    if action == "block":\n'
+            '        payload = {"error": "arkheia_blocked"}\n'
+        )
+        assert _guards_without_gate_reference(laundered) == [2]
+
+    def test_control_a_gated_guard_is_not_flagged(self):
+        good = ast.parse(
+            'if result.risk_level == "HIGH" and policy == "block" '
+            "and gate_authorises_block:\n"
+            '    payload = {"error": "arkheia_blocked"}\n'
+            'gate_authorises_block = gate_action == GATE_ACTION_BLOCK\n'
+        )
+        assert _guards_without_gate_reference(good) == []
+        assert _compares_against_the_gate_constant(good) is True
+
+
+# ---------------------------------------------------------------------------
+# INV-11 — the receipt status is DERIVED, never a literal
+# ---------------------------------------------------------------------------
+
+def _literal_receipt_fields(tree: ast.Module) -> list[int]:
+    """Line numbers of a ``"receipt": <literal>`` entry in any dict."""
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if isinstance(key, ast.Constant) and key.value == "receipt" \
+                    and isinstance(value, ast.Constant):
+                hits.append(value.lineno)
+    return sorted(hits)
+
+
+def _emit_returns_a_value(tree: ast.Module) -> bool:
+    """``_emit`` must return something other than a bare ``return``."""
+    emit = _func(tree, "_emit")
+    if emit is None:
+        return False
+    return any(isinstance(n, ast.Return) and n.value is not None
+               for n in ast.walk(emit))
+
+
+class TestInv11ReceiptStatusIsDerived:
+    """
+    ``_emit`` returns silently when no audit writer is configured and swallows a
+    write that raises — both deliberate, because the halt must not depend on the
+    record landing. The block and refusal bodies nonetheless hard-coded
+    ``"receipt": "enqueued"``, so a response asserted an evidence trail that did
+    not exist. The previous round chose ``enqueued`` over ``recorded`` precisely
+    because the rail is fire-and-forget, and then asserted it where nothing had
+    been enqueued at all.
+
+    A status a caller can read must be produced by the code that observed what
+    happened. Any literal in that field is the defect, whatever word it holds.
+    """
+
+    def test_no_response_hard_codes_its_own_receipt_status(self, tree):
+        statuses = _module_constant(tree, "RECEIPT_STATUSES")
+        assert statuses is not None, "no closed status vocabulary declared"
+        assert _literal_receipt_fields(tree) == []
+
+    def test_the_emitter_reports_what_happened(self, tree):
+        assert _emit_returns_a_value(tree), (
+            "_emit returns nothing, so no caller can derive a status from it"
+        )
+
+    def test_negative_self_test_the_exact_pre_fix_literal_is_flagged(self):
+        pre_fix = ast.parse('payload = {"error": "arkheia_blocked",\n'
+                            '           "receipt": "enqueued"}\n')
+        assert _literal_receipt_fields(pre_fix) == [2]
+
+    def test_negative_self_test_a_different_wording_is_still_flagged(self):
+        """The defect is the assertion, not the word chosen for it."""
+        assert _literal_receipt_fields(
+            ast.parse('payload = {"receipt": "recorded"}\n')) == [1]
+
+    def test_negative_self_test_a_bare_return_emitter_is_flagged(self):
+        assert _emit_returns_a_value(ast.parse(
+            "async def _emit(request, record):\n"
+            "    if audit is None:\n        return\n"
+            "    await audit.write(record)\n")) is False
+
+    def test_control_a_derived_status_is_not_flagged(self):
+        good = ast.parse('payload = {"receipt": receipt}\n')
+        assert _literal_receipt_fields(good) == []
+        assert _emit_returns_a_value(ast.parse(
+            "async def _emit(request, record):\n"
+            "    return RECEIPT_ENQUEUED\n")) is True
+
+
+# ---------------------------------------------------------------------------
+# INV-12 — the forward leg is an ALLOW-list
+# ---------------------------------------------------------------------------
+
+#: A deny-list is only as good as the imagination of whoever wrote it. Each of
+#: these was forwarded to the configured upstream on an ORDINARY accepted call;
+#: the first three were reproduced by a second vendor. They are named here as a
+#: regression corpus, NOT as the mechanism — the mechanism is that anything
+#: absent from the allow-list is dropped, including what nobody has thought of.
+MUST_NOT_BE_FORWARDABLE = {
+    "cookie", "cookie2", "set-cookie",
+    "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "forwarded",
+    "x-real-ip", "referer", "origin", "user-agent", "accept-encoding",
+    "host", "content-length",
+    # RFC 9110 §7.6.1 — addressed to this hop, never to the endpoint.
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade",
+}
+
+
+def _forwardable(tree: ast.Module) -> set[str]:
+    node = _module_constant(tree, "FORWARDABLE_HEADERS")
+    if node is None:
+        return set()
+    for sub in ast.walk(node):
+        if isinstance(sub, (ast.Set, ast.List, ast.Tuple)):
+            return {e.value.lower() for e in sub.elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+    return set()
+
+
+def _forwards_by_default(func: ast.AST) -> bool:
+    """
+    True when the filter has NO ``not in <ALLOW-LIST>: continue`` guard — i.e.
+    its default is to forward, which is the deny-list shape.
+    """
+    if func is None:
+        return True
+    for node in ast.walk(func):
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        if not (isinstance(test, ast.Compare)
+                and any(isinstance(op, ast.NotIn) for op in test.ops)):
+            continue
+        if not any(isinstance(c, ast.Name) and c.id == "FORWARDABLE_HEADERS"
+                   for c in test.comparators):
+            continue
+        if any(isinstance(s, ast.Continue) for s in ast.walk(node)):
+            return False
+    return True
+
+
+class TestInv12ForwardLegIsAnAllowList:
+    """
+    A deny-list of forbidden headers forwards any header nobody thought of —
+    the same shape as the enumerated deny-list that let ``unverifiable`` skip a
+    halt on a sibling flow. The failure is silent and permissive, which is the
+    worst pair. The forward leg names what the upstream NEEDS; the default is
+    DROP.
+    """
+
+    def test_the_allow_list_exists_and_is_not_empty(self, tree):
+        allowed = _forwardable(tree)
+        assert len(allowed) >= 5, (
+            f"only {sorted(allowed)} declared forwardable — an allow-list that "
+            f"forwards nothing is an outage, not a control"
+        )
+
+    def test_the_forward_filter_defaults_to_drop(self, tree):
+        assert _forwards_by_default(_func(tree, "_forward_headers")) is False
+
+    def test_nothing_dangerous_has_been_added_to_the_allow_list(self, tree):
+        leaked = _forwardable(tree) & MUST_NOT_BE_FORWARDABLE
+        assert leaked == set(), f"the allow-list forwards {sorted(leaked)}"
+
+    def test_no_proxy_domain_header_is_forwardable(self, tree):
+        """
+        ``x-arkheia-*`` is our signalling, not the upstream's — and one of them
+        is internal-only. Prefix-matched so a future addition is caught without
+        anyone remembering to enumerate it.
+        """
+        ours = sorted(h for h in _forwardable(tree) if h.startswith("x-arkheia-"))
+        assert ours == [], f"proxy-domain headers are forwardable: {ours}"
+
+    def test_negative_self_test_the_exact_pre_fix_deny_list_is_flagged(self):
+        """Verbatim shape of the defect: drop a few names, append the rest."""
+        pre_fix = ast.parse(
+            "def _forward_headers(headers):\n"
+            "    out = []\n"
+            "    for name, value in headers.items():\n"
+            "        lowered = name.lower()\n"
+            "        if lowered in HOP_BY_HOP_HEADERS:\n            continue\n"
+            "        if lowered in REQUEST_OWNED_HEADERS:\n            continue\n"
+            "        out.append((name, value))\n"
+            "    return out\n"
+        )
+        assert _forwards_by_default(_func(pre_fix, "_forward_headers")) is True
+
+    def test_negative_self_test_a_membership_test_with_no_continue_is_flagged(self):
+        """
+        The check must actually DROP. Consulting the allow-list and then
+        appending anyway is the shape that looks compliant and is not.
+        """
+        theatre = ast.parse(
+            "def _forward_headers(headers):\n"
+            "    for name, value in headers.items():\n"
+            "        if name not in FORWARDABLE_HEADERS:\n"
+            "            logger.debug('unexpected header %s', name)\n"
+            "        out.append((name, value))\n"
+        )
+        assert _forwards_by_default(_func(theatre, "_forward_headers")) is True
+
+    def test_control_an_allow_list_filter_is_not_flagged(self):
+        good = ast.parse(
+            "def _forward_headers(headers):\n"
+            "    for name, value in headers.items():\n"
+            "        if name.lower() not in FORWARDABLE_HEADERS:\n"
+            "            continue\n"
+            "        out.append((name, value))\n"
+        )
+        assert _forwards_by_default(_func(good, "_forward_headers")) is False
