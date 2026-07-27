@@ -21,6 +21,12 @@ jobs:
     steps:
       # Pin: actions/checkout v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          # Aikido LOW: a checkout that keeps the token in .git/config leaves it
+          # readable by every later step, including the real `npm pack` this job
+          # runs, which executes repo-authored build scripts. This job never
+          # pushes, so the credential has no purpose here.
+          persist-credentials: false
 
       - name: Set up Python
         # Pin: actions/setup-python v5.3.0
