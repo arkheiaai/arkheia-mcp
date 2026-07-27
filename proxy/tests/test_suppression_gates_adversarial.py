@@ -410,8 +410,20 @@ class TestSuppressionTaxonomyIsClosed:
 
     def test_free_text_is_not_a_suppression_reason(self):
         for junk in ["", None, "because", "token_count_below_", "TOKEN_COUNT_BELOW_80",
-                     "output_tokens_below_2"]:
-            assert F.is_suppression_reason(junk) is False
+                     "output_tokens_below_2", "token_count_below_eighty",
+                     "token_count_below_-1", " token_count_below_80"]:
+            assert F.is_suppression_reason(junk) is False, junk
+
+    @pytest.mark.parametrize("junk", [123, 0, 1, True, False, [], {}, object(), 3.5,
+                                      b"token_count_below_80"])
+    def test_a_non_string_is_rejected_and_does_not_raise(self, junk):
+        """FOUND BY MUTATION M23. `is_suppression_reason` is the one place a consumer
+        asks "was this verdict suppressed?", so it is called on whatever an audit row
+        or a decoded push body happens to hold. Replacing the `isinstance(reason, str)`
+        guard with `reason is None` left every string case passing while a non-string
+        reached `.startswith` and raised AttributeError — inside the predicate a
+        consumer uses to decide whether a LOW is trustworthy."""
+        assert F.is_suppression_reason(junk) is False
 
 
 # ===========================================================================

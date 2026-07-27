@@ -107,18 +107,58 @@ def declared_suppressed_methods(src: str) -> set[str]:
     return set()
 
 
+_ORDERED = (ast.Lt, ast.LtE, ast.Gt, ast.GtE)
+
+
+def _is_get_call(node) -> bool:
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get")
+
+
+def unvalidated_names(fn: ast.FunctionDef) -> set[str]:
+    """Locals bound DIRECTLY to a `.get()` result and never rebound through any other
+    call. Binding to `_usable_count(...)` (or any other function) clears the taint —
+    the point is the raw mapping read, not the variable name.
+    """
+    from_get: set[str] = set()
+    from_other_call: set[str] = set()
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Assign):
+            continue
+        for t in node.targets:
+            if not isinstance(t, ast.Name):
+                continue
+            if _is_get_call(node.value):
+                from_get.add(t.id)
+            elif isinstance(node.value, ast.Call):
+                from_other_call.add(t.id)
+    return from_get - from_other_call
+
+
 def raw_signal_comparisons(fn: ast.FunctionDef) -> list[str]:
-    """Comparisons with an UNVALIDATED `signals.get(...)` / `triggers.get(...)` /
-    `.get(...)`-on-a-config operand — the exact pre-fix crash-and-suppress shape."""
+    """ORDERED comparisons (`<`, `<=`, `>`, `>=`) against an unvalidated mapping read.
+
+    Two shapes, because the campaign proved the first check missed the second:
+      inline   `signals.get("token_count", inf) < max_tokens`   (the pre-fix line)
+      via name  `tc = signals.get("token_count")` … `tc < max_tokens`
+
+    Restricted to ORDERED operators on purpose. `==` / `!=` / `is` never raise across
+    types, so flagging `action != "suppress"` would make this a rule that forbids
+    everything — and a floor that cries wolf gets switched off.
+    """
+    tainted = unvalidated_names(fn)
     hits = []
     for node in ast.walk(fn):
         if not isinstance(node, ast.Compare):
             continue
+        if not any(isinstance(op, _ORDERED) for op in node.ops):
+            continue
         for operand in [node.left, *node.comparators]:
-            if (isinstance(operand, ast.Call)
-                    and isinstance(operand.func, ast.Attribute)
-                    and operand.func.attr == "get"):
+            if _is_get_call(operand) or (
+                isinstance(operand, ast.Name) and operand.id in tainted
+            ):
                 hits.append(ast.unparse(node))
+                break
     return hits
 
 
@@ -194,6 +234,17 @@ def detect_src() -> str:
 # ---------------------------------------------------------------------------
 # INV-0 — the subjects exist. Without this every invariant below is vacuous.
 # ---------------------------------------------------------------------------
+
+def test_inv0_the_contract_this_floor_checks_against_has_not_gone_quiet(features_src):
+    """The declarations above ARE the contract. Emptying one would leave every
+    invariant below passing over nothing — the quietest way to switch a floor off."""
+    assert len(REQUIRED_GATE_KEYS) >= 6, REQUIRED_GATE_KEYS
+    assert len(REQUIRED_GATE_METRIC_KEYS) >= 2, REQUIRED_GATE_METRIC_KEYS
+    assert MARKER and isinstance(MARKER, str)
+    assert GATE_NAME_RE.match("check_mode_gate"), (
+        "the discovery pattern no longer matches a known gate name"
+    )
+
 
 def test_inv0_the_files_and_the_gates_are_actually_found(features_src):
     for p in (FEATURES, ENGINE, DETECT):
@@ -422,7 +473,7 @@ def test_inv6_no_gate_compares_a_raw_get_result(features_src):
     )
 
 
-def test_inv6_negative_self_test():
+def test_inv6_negative_self_test_inline_shape():
     """The verbatim pre-fix line."""
     src = (
         "def check_mode_gate(profile, signals):\n"
@@ -437,6 +488,25 @@ def test_inv6_negative_self_test():
     assert "signals.get('token_count'" in hits[0]
 
 
+def test_inv6_negative_self_test_via_a_local_name():
+    """MUTANT M17's shape, and the reason this invariant was strengthened: the first
+    version of INV-6 only looked at inline `.get()` operands, so reverting the fix to
+    `tc = signals.get(...)` on one line and comparing `tc` on the next walked straight
+    past it. The mutation campaign returned M17 as KILLED_BY_OTHER — the runtime tests
+    caught it, this floor did not — which is exactly the signal the campaign exists to
+    produce."""
+    src = (
+        "def check_mode_gate(profile, signals):\n"
+        "    token_count = signals.get('token_count', float('inf'))\n"
+        "    if token_count < 80:\n"
+        "        return {'risk': 'LOW'}\n"
+        "    return None\n"
+    )
+    fn = find_gates(src)["check_mode_gate"]
+    assert unvalidated_names(fn) == {"token_count"}
+    assert raw_signal_comparisons(fn) == ["token_count < 80"]
+
+
 def test_inv6_control_it_does_not_flag_a_validated_comparison():
     """The control row that PASSES — otherwise INV-6 is a rule that forbids everything."""
     src = (
@@ -446,4 +516,22 @@ def test_inv6_control_it_does_not_flag_a_validated_comparison():
         "        return {'risk': 'LOW'}\n"
         "    return None\n"
     )
-    assert raw_signal_comparisons(find_gates(src)["check_mode_gate"]) == []
+    fn = find_gates(src)["check_mode_gate"]
+    assert unvalidated_names(fn) == set(), "validation through a call must clear taint"
+    assert raw_signal_comparisons(fn) == []
+
+
+def test_inv6_control_it_does_not_flag_an_equality_comparison():
+    """Second control. `!=` / `==` cannot raise across types, so the live
+    `action = tool_cfg.get("action", "suppress")` … `if action != "suppress"` is not a
+    finding. A floor that cries wolf gets switched off, and then there is no floor."""
+    src = (
+        "def check_mode_gate(profile, signals):\n"
+        "    action = tool_cfg.get('action', 'suppress')\n"
+        "    if action != 'suppress':\n"
+        "        return None\n"
+        "    return {'risk': 'LOW'}\n"
+    )
+    fn = find_gates(src)["check_mode_gate"]
+    assert unvalidated_names(fn) == {"action"}          # tainted, correctly
+    assert raw_signal_comparisons(fn) == []             # but not an ordered compare
