@@ -358,3 +358,53 @@ class TestPromptExtraction:
         assert eng.calls[0][2] == "unknown"
         assert eng.calls[0][0] == ""
         assert r.headers["x-arkheia-risk"] == "LOW"
+
+
+# ---------------------------------------------------------------------------
+# Reported gaps, pinned so they cannot quietly change or quietly persist
+# ---------------------------------------------------------------------------
+
+class TestReportedGaps:
+
+    async def test_unknown_action_config_is_never_consulted(self):
+        """
+        CURRENT BEHAVIOUR, PINNED — a REPORTED defect, not fixed here.
+
+        ``detection.unknown_action`` exists in ``proxy/config.py`` and is read
+        by ``proxy/endpoints/detect.py::_determine_action`` for UNKNOWN
+        verdicts. This middleware forces ``action = "pass"`` for everything that
+        is not HIGH, so the setting is dead on the only path that can actually
+        enforce. An operator who sets ``unknown_action: block`` gets silence.
+
+        Wiring it would turn a previously inert setting into a live blocking
+        control on existing deployments — an authority decision, REPORTED not
+        taken. The test fails the moment it starts being honoured, so the
+        change cannot land unnoticed either.
+        """
+        app, _ = build(risk="UNKNOWN", action="block")
+        app.state.settings.detection.unknown_action = "block"
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert b"arkheia_blocked" not in r.content
+        assert r.headers["x-arkheia-action"] == "pass"
+
+    async def test_the_passthrough_surface_is_outside_this_middleware(self):
+        """
+        CURRENT BEHAVIOUR, PINNED — a REPORTED coverage gap.
+
+        ``proxy/endpoints/passthrough.py`` serves ``/proxy/<provider>/v1/*`` and
+        forwards to four real providers. Those paths do not start with ``/v1/``,
+        so with ``interception_enabled: true`` the proxy still relays that
+        traffic with NO detection and NO receipt. "The proxy intercepts
+        API-driven AI traffic" is true only of one of its two forwarding
+        surfaces.
+        """
+        app, _ = build()
+
+        @app.post("/proxy/grok/v1/chat/completions")
+        async def grok():
+            return {"choices": [{"message": {"content": "unscored"}}]}
+
+        async with client(app) as c:
+            r = await c.post("/proxy/grok/v1/chat/completions", json=REQ)
+        assert "x-arkheia-risk" not in r.headers
