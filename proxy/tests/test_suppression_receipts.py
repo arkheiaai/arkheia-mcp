@@ -114,17 +114,37 @@ class TestTheRailIsReallyExercised:
     """"Suppressed N times" and "was never asked" produce the same empty directory."""
 
     def test_the_file_does_not_exist_before_any_request(self, rail):
+        """Before ANY /detect/verify call, THIS TEST'S SUBJECT has produced nothing --
+        though the file itself may already exist and be non-empty.
+
+        F20's `_resolve_profile_key()` (proxy/main.py) unconditionally journals a
+        `profile_key.load` decision on every lifespan boot -- including the benign "no
+        encrypted profiles" branch this fixture's real `profiles/` directory takes -- so
+        by the time the real `TestClient` startup event has run, one row (source ==
+        "profile_key_loader") may already be on disk. That is a legitimate, expected
+        startup record, not a fact this suite is about. The intent here is narrower than
+        "the file is empty": no row this suite is answerable for -- source == "proxy",
+        the stamp `/detect/verify`'s `_audit_record()` applies to every record it writes
+        -- exists yet.
+        """
         _, probe = rail
-        assert probe.raw_bytes() == b""
-        assert probe.rows() == []
+        assert [r for r in probe.rows() if r.get("source") == "proxy"] == []
 
     def test_one_suppressed_verdict_produces_exactly_one_durable_row(self, rail):
+        """One /detect/verify call -> exactly one row THIS TEST caused.
+
+        Scoped to source == "proxy" (see the docstring above): a real lifespan boot may
+        already have written a legitimate, unrelated F20 startup record before this
+        request lands, so counting every row on disk would make this assertion fragile
+        to any future legitimate startup-time record rather than to what this test
+        actually did.
+        """
         client, probe = rail
-        before = len(probe.raw_bytes())
+        before = [r for r in probe.rows() if r.get("source") == "proxy"]
         body = _verify(client, SHORT_RESPONSE)
         _await_row(probe, body["detection_id"])
-        assert len(probe.rows()) == 1
-        assert len(probe.raw_bytes()) > before
+        after = [r for r in probe.rows() if r.get("source") == "proxy"]
+        assert len(after) == len(before) + 1 == 1
 
     def test_a_fabricated_id_finds_nothing(self, rail):
         """P4 — without this the read-back is decorative: a probe that returned "the
@@ -173,14 +193,22 @@ class TestTheSuppressionIsDurableAndAttributable:
 
     def test_two_verdicts_are_separable_on_disk(self, rail):
         """The whole question, answered on the artefact: given the file alone, can an
-        investigator tell the never-screened row from the screened-clean one?"""
+        investigator tell the never-screened row from the screened-clean one?
+
+        Scoped to source == "proxy" -- the two /detect/verify rows THIS TEST caused. A
+        real lifespan boot may already have written an unrelated, legitimate F20
+        startup record (source == "profile_key_loader") onto the same file before
+        either request lands; that row is not one of "the two verdicts" this test
+        asks an investigator to separate, and counting it would make this assertion
+        fragile to any future legitimate startup-time record.
+        """
         client, probe = rail
         supp = _verify(client, SHORT_RESPONSE)
         scored = _verify(client, LONG_RESPONSE)
         _await_row(probe, supp["detection_id"])
         _await_row(probe, scored["detection_id"])
 
-        rows = probe.rows()
+        rows = [r for r in probe.rows() if r.get("source") == "proxy"]
         assert len(rows) == 2
         assert {r["risk_level"] for r in rows} == {"LOW"}      # identical bands
         suppressed = [r for r in rows if F.is_suppression_reason(r.get("gate_reason"))]
@@ -208,13 +236,28 @@ class TestTheMarkerIsCoveredByTheHashChain:
     The suppression marker is only evidence if the chain covers it."""
 
     def test_the_chain_verifies_over_a_suppressed_row(self, rail):
+        """The chain must verify OK across the suppressed row -- not merely across an
+        empty or coincidentally-single-row file.
+
+        `AuditWriter.verify_chain()` (proxy/audit/writer.py) is the PRODUCTION chain
+        verifier, deliberately not reimplemented here, and it walks the WHOLE file --
+        there is no source filter to apply the way there is for a row count. A real
+        lifespan boot may already have written a legitimate F20 startup record before
+        this request lands, so "the chain verified exactly 1 row" is not a stable
+        fact independent of that record; "the chain verified every row that is
+        actually on disk, with zero breaks, and the suppressed row is one of them" is
+        -- and it is the stronger property besides, since it also proves nothing was
+        silently skipped.
+        """
         client, probe = rail
         body = _verify(client, SHORT_RESPONSE)
-        _await_row(probe, body["detection_id"])
+        row = _await_row(probe, body["detection_id"])
+        total_rows_on_disk = len(probe.rows())
         result = probe.verify_chain()
         assert result["ok"] is True
-        assert result["verified"] == 1
+        assert result["verified"] == total_rows_on_disk
         assert result["breaks"] == []
+        assert row["gate_reason"] == "token_count_below_80"   # the suppressed row IS covered
 
     def test_the_stored_hash_recomputes_from_the_row_as_it_sits_on_disk(self, rail):
         """P8."""
