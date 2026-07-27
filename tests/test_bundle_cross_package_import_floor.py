@@ -63,9 +63,10 @@ repo in which that is intended to be false.
 
 SCOPE — the npm bundle only, and only the Python import graph. The Docker images
 are a different set of artifacts (`proxy/Dockerfile`, `registry_server/Dockerfile`,
-`mcp_server/Dockerfile`) and are not observed here; data the runtime reads but
-does not import is a third axis and is not claimed. Third-party declarations
-belong to `tests/test_declared_dependency_floor.py` (PR #27).
+`mcp_server/Dockerfile`) and are not observed here; they are covered by
+`tests/test_docker_context_floor.py`. Data the runtime reads but does not import is
+a third axis and is not claimed. Third-party declarations belong to
+`tests/test_tooling_dependency.py` (which runs in `unit-tests`, not the floor tier).
 """
 
 from __future__ import annotations

@@ -71,13 +71,17 @@ the directory restored afterwards — the artifact a clean checkout publishes.
 SCOPE — read before trusting a green run
 ────────────────────────────────────────────────────────────────────────────────
 * THE NPM BUNDLE ONLY. The Docker images are a different set of artifacts and are
-  NOT observed here. Their COPY directives are parsed by
-  `tests/test_mcp_packaging_floor.py` (PR #23) — which is the same
-  intent-not-artifact weakness one axis over, and cannot be closed the same way
-  without a container runtime in CI. Named, not silently inherited.
+  NOT observed here. They are covered by `tests/test_docker_context_floor.py`,
+  which materialises the tree their COPY directives produce and resolves the entry
+  point in it — one step short of a real image, because there is no container
+  runtime in CI. (This paragraph previously named `tests/test_mcp_packaging_floor.py`,
+  which has never existed in this repo: a scope note claiming an axis was covered
+  elsewhere, pointing at nothing. Corrected when the Docker axis was actually
+  closed.)
 * FIRST-PARTY PYTHON IMPORTS ONLY. Whether the bundle DECLARES the third-party
   packages it imports is the complementary axis and belongs to
-  `tests/test_declared_dependency_floor.py` (PR #27). Data the runtime reads but
+  `tests/test_tooling_dependency.py` (which runs in `unit-tests`, not the floor
+  tier — it needs the plugins installed to answer). Data the runtime reads but
   does not import (`profiles/`, model files) is a third axis and is not claimed.
 * IMPORT RESOLUTION, NOT EXECUTION. The packed tree is checked with
   `importlib.machinery.PathFinder` and `compile()`: every first-party module
@@ -97,7 +101,6 @@ configuration in which that is intended.
 from __future__ import annotations
 
 import ast
-import importlib.machinery
 import json
 import sys
 from pathlib import Path
@@ -469,24 +472,11 @@ def _resolve_in(module: str, bundle_dir: Path):
     """
     Resolve `module` using ONLY the extracted bundle as the search path.
 
-    `importlib.machinery.PathFinder` is the same machinery the interpreter uses,
-    so this answers "would `import module` find a file here?" without executing
-    anything — which matters, because the floor tier has none of the third-party
-    packages the server needs.
+    Delegates to the shared resolver: the Docker-context floor asks the identical
+    question of a different tree, and two implementations of "does this module
+    resolve here" would eventually disagree silently (floor_support/__init__.py).
     """
-    finder = importlib.machinery.PathFinder
-    parts = module.split(".")
-    search = [str(bundle_dir)]
-    spec = None
-    for depth in range(1, len(parts) + 1):
-        spec = finder.find_spec(".".join(parts[:depth]), search)
-        if spec is None:
-            return None
-        if spec.submodule_search_locations is not None:
-            search = list(spec.submodule_search_locations)
-        elif depth != len(parts):
-            return None  # a module cannot contain a submodule
-    return spec
+    return import_closure.resolve_in(module, bundle_dir)
 
 
 def test_the_packed_tree_resolves_its_own_entry_point(artifact: Artifact):

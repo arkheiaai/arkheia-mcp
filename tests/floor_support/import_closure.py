@@ -139,6 +139,38 @@ def module_name_for(rel_path: Path) -> str:
     return ".".join(parts)
 
 
+def resolve_in(module: str, tree: Path):
+    """
+    Resolve `module` using ONLY `tree` as the search path, without importing it.
+
+    `importlib.machinery.PathFinder` is the machinery the interpreter itself uses,
+    so this answers "would `import module` find a file here?" against a built tree —
+    a packed tarball, a materialised container context — with none of the
+    third-party packages the floor tier deliberately does not have.
+
+    Returns the spec, or None. Caches are invalidated first, because the adverse
+    controls that prove these floors can fail work by DELETING a file from a tree
+    that was just walked, and a cached directory listing would hide the deletion.
+    """
+    import importlib
+    import importlib.machinery
+
+    importlib.invalidate_caches()
+    finder = importlib.machinery.PathFinder
+    parts = module.split(".")
+    search = [str(tree)]
+    spec = None
+    for depth in range(1, len(parts) + 1):
+        spec = finder.find_spec(".".join(parts[:depth]), search)
+        if spec is None:
+            return None
+        if spec.submodule_search_locations is not None:
+            search = list(spec.submodule_search_locations)
+        elif depth != len(parts):
+            return None  # a module cannot contain a submodule
+    return spec
+
+
 def missing_from(required: set[Path], present: set[str]) -> set[Path]:
     """
     Required files that a set of ACTUALLY-PRESENT paths does not contain.
