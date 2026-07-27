@@ -8,3 +8,8 @@ audit.jsonl
 .pytest_cache/
 install_service.bat
 start-enterprise-proxy.bat
+
+# Mutation-campaign crash-safety sidecar (tools/mutate_f11_passthrough.py).
+# Its presence means a run died holding a planted mutant; it must never be
+# committed, and neither must the mutant it is there to undo.
+*.mutation-original

@@ -51,7 +51,9 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
+import signal
 import subprocess
 import sys
 import time
@@ -60,6 +62,23 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 TARGET = REPO / "proxy" / "endpoints" / "passthrough.py"
+
+#: CRASH-SAFE RESTORE — earned 2026-07-27, in this file, tonight.
+#:
+#: The campaign was killed by a watchdog partway through trial M02. `finally:`
+#: does not run when the process is terminated, so the PLANTED MUTANT was left
+#: in the working tree: `passthrough.py` sat there with its OpenAI allowlist
+#: end-anchor weakened from `\Z` to `$`, one `git add` away from being committed
+#: as a security regression that reads like a typo. It was caught by inspecting
+#: the diff, which is not a control.
+#:
+#: So the original is written to a sidecar BEFORE the first fault is planted,
+#: and three things restore from it: a SIGTERM/SIGINT handler, an atexit hook,
+#: and — for SIGKILL, where no handler can run — the NEXT invocation, which
+#: refuses to start while a sidecar exists and puts the file back first. The
+#: sidecar is removed only on a clean finish, so its presence always means "a
+#: run died holding a mutant".
+BACKUP = TARGET.with_suffix(".py.mutation-original")
 
 NEW_TIER = [
     "proxy/tests/test_passthrough.py",
@@ -170,27 +189,21 @@ MUTANTS: list[Mutant] = [
            "postcondition"),
 
     # -- gate ordering and credentials -------------------------------------
-    # M21/M22 REPOINTED (2026-07-27). Their original anchors — `dups =
-    # _duplicate_credential_headers(request)` in the gate, and that helper's
-    # `n > 1` — no longer exist: the credential screen absorbed both when the
-    # mapping went per-destination, and the helper became dead code and was
-    # deleted. The FAULTS they express are unchanged; only the anchors moved.
-    # Left un-repointed they would have scored NOT_OBSERVED, which is a
-    # measurement of nothing, not a pass.
-    Mutant("M21", "gate no longer refuses a repeated credential header",
-           "    if any(n > 1 for n in counts.values()):\n"
-           "        return DENY_DUPLICATE_CREDENTIAL\n", "", "credentials"),
-    Mutant("M22", "duplicate detection needs three occurrences, not two",
-           "    if any(n > 1 for n in counts.values()):",
-           "    if any(n > 2 for n in counts.values()):", "credentials"),
-    # M23 REPLACED by M23R — the anchor it targeted no longer exists.
-    # `_CREDENTIAL_HEADERS` is now the multi-line screen vocabulary rather than a
-    # one-line frozenset, and emptying it is still the same fault: nothing is
-    # recognised as a credential, so neither duplication nor foreignness can be
-    # seen.
-    Mutant("M23R", "no header is recognised as a credential",
-           '        if key in _CREDENTIAL_HEADERS:',
-           '        if key in frozenset():', "credentials"),
+    # M21/M22/M23R REPOINTED TWICE (2026-07-27 rounds 2 and 3). Round 2 moved
+    # them off `_duplicate_credential_headers`; round 3 moved them again when the
+    # count went per-DESTINATION across channels and the per-header helper was
+    # absorbed into `_credential_presentations`. The FAULTS they express are
+    # unchanged; only the anchors moved. Left un-repointed they would score
+    # NOT_OBSERVED, which is a measurement of nothing, not a pass.
+    Mutant("M21", "gate no longer refuses more than one credential",
+           "    if len(_credential_presentations(request)) > 1:\n"
+           "        return DENY_MULTIPLE_CREDENTIALS\n", "", "credentials"),
+    Mutant("M22", "the multiplicity limit needs three credentials, not two",
+           "    if len(_credential_presentations(request)) > 1:",
+           "    if len(_credential_presentations(request)) > 2:", "credentials"),
+    Mutant("M23R", "nothing is recognised as a credential on any channel",
+           "            if name in channel.vocabulary:",
+           "            if name in frozenset():", "credentials"),
     Mutant("M24", "cookie added to the shared forward allowlist",
            '_SAFE_TRANSPORT_HEADERS = frozenset({\n    "content-type",\n',
            '_SAFE_TRANSPORT_HEADERS = frozenset({\n    "cookie",\n    "content-type",\n',
@@ -235,8 +248,9 @@ MUTANTS: list[Mutant] = [
            '"deny_code": deny_code,\n        "attempted_path"',
            '"deny_code": None,\n        "attempted_path"', "receipts"),
     Mutant("M37", "header VALUES are recorded instead of key names",
-           '"request_header_names": sorted({k.lower() for k in request.headers.keys()}),',
-           '"request_header_names": sorted(set(request.headers.values())),', "receipts"),
+           '"request_header_names": sorted(set(_header_names(request))),',
+           '"request_header_names": sorted({v.decode("latin-1") '
+           'for _k, v in request.headers.raw}),', "receipts"),
     Mutant("M38", "the attempted path is no longer length-capped",
            '"attempted_path": attempted_path[:_MAX_RECORDED_PATH],',
            '"attempted_path": attempted_path,', "receipts"),
@@ -276,22 +290,20 @@ MUTANTS: list[Mutant] = [
            "    if deny:\n        return None, deny\n", "", "credential-boundary"),
     Mutant("M45", "a foreign credential is dropped silently instead of refused "
                   "(the alternative ruling, planted as a fault)",
-           "    foreign = _foreign_credentials(request, provider)\n"
-           "    if foreign:\n"
-           "        return DENY_FOREIGN_CREDENTIAL\n", "", "credential-boundary"),
+           "    if _foreign_credentials(request, provider):\n"
+           "        return DENY_FOREIGN_CREDENTIAL\n\n", "", "credential-boundary"),
     Mutant("M46", "every provider accepts every credential the screen knows",
-           "    foreign = [\n"
-           "        name for name in _credential_header_counts(request)\n"
-           "        if name not in provider.credential_headers\n"
-           "    ]",
-           "    foreign = [\n"
-           "        name for name in _credential_header_counts(request)\n"
-           "        if name not in _CREDENTIAL_HEADERS\n"
-           "    ]", "credential-boundary"),
-    Mutant("M47", "two DIFFERENT credential headers are allowed through "
-                  "(the exact blind spot of a per-header rule)",
-           "    if len(counts) > 1:\n"
-           "        return DENY_DUPLICATE_CREDENTIAL\n", "", "credential-boundary"),
+           "        if name not in getattr(provider, channel.provider_field):",
+           "        if name not in channel.vocabulary:", "credential-boundary"),
+    # M47 REPOINTED (round 3) to the ROUND-2 REGRESSION ITSELF: the count taken
+    # over the header channel alone. That is the defect Codex reproduced, so
+    # this mutant is the campaign's memory of it — a survival here means the
+    # suite has forgotten the finding it was written for.
+    Mutant("M47", "the count is taken over the HEADER channel alone "
+                  "(the exact round-2 regression)",
+           "    if len(_credential_presentations(request)) > 1:",
+           '    if len([p for p in _credential_presentations(request) '
+           'if p[0] == "header"]) > 1:', "credential-boundary"),
     # Deliberately redundant with the gate screen, so a single-edit mutant would
     # be equivalent: the filter and the screen must BOTH be removed for the
     # credential to reach the wire.
@@ -306,22 +318,18 @@ MUTANTS: list[Mutant] = [
            '        "anthropic-version", "anthropic-beta"})\n',
            "credential-boundary",
            extra=((
-               "    foreign = _foreign_credentials(request, provider)\n"
-               "    if foreign:\n"
-               "        return DENY_FOREIGN_CREDENTIAL\n", ""),)),
+               "    if _foreign_credentials(request, provider):\n"
+               "        return DENY_FOREIGN_CREDENTIAL\n\n", ""),)),
     Mutant("M49", "delete BOTH credential-PARAMETER controls: the per-destination "
-                  "param filter and the gate's foreign screen",
-           "        if k.lower() not in _CREDENTIAL_QUERY_PARAMS\n"
-           "        or k.lower() in provider.credential_query_params\n",
+                  "param filter and the gate's foreign screen for the query channel",
+           "        if key.lower() not in _CREDENTIAL_QUERY_PARAMS\n"
+           "        or key.lower() in provider.credential_query_params\n",
            "        if True\n",
            "credential-boundary",
            extra=((
-               '        f"?{name}" for name in {k.lower() for k in request.query_params.keys()}\n'
-               "        if name in _CREDENTIAL_QUERY_PARAMS\n"
-               "        and name not in provider.credential_query_params\n",
-               '        f"?{name}" for name in set()\n'
-               "        if name in _CREDENTIAL_QUERY_PARAMS\n"
-               "        and name not in provider.credential_query_params\n"),)),
+               "    for channel_name, name in _credential_presentations(request):\n",
+               "    for channel_name, name in [p for p in "
+               '_credential_presentations(request) if p[0] != "query"]:\n'),)),
     Mutant("M50", "no query parameter is recognised as credential-bearing",
            '_CREDENTIAL_QUERY_PARAMS = frozenset({\n'
            '    "key", "api_key", "apikey", "access_token", "auth_token", "token",\n})',
@@ -341,6 +349,80 @@ MUTANTS: list[Mutant] = [
     Mutant("M54", "the refusal stops naming the credential this provider uses",
            '        body["credential_headers"] = sorted(provider.credential_headers)',
            '        body["credential_headers"] = []', "credential-boundary"),
+    # -- credential MULTIPLICITY per destination (2026-07-27, round 3) ------
+    # Codex proved the round-2 screen counted HEADERS, so a bearer plus a
+    # `?key=` both reached Google and `?key=FIRST&key=SECOND` collapsed to the
+    # last value. Each mutant below is a way back to one of those.
+    Mutant("M56", "the count is per DISTINCT credential, not per occurrence "
+                  "(?key=FIRST&key=SECOND reads as one)",
+           "    if len(_credential_presentations(request)) > 1:",
+           "    if len(set(_credential_presentations(request))) > 1:",
+           "multiplicity"),
+    # Deleting the query channel row ALONE trips the import-time coverage guard,
+    # so the fault would never be OBSERVED by a test. The guard is disabled in
+    # the same trial, which is the point: this measures whether the suites see
+    # the query channel go dark, not whether the guard exists (M62 measures
+    # that).
+    Mutant("M57", "the credential channel table loses its query row "
+                  "(and the coverage guard that would have caught it)",
+           '    CredentialChannel(\n'
+           '        "query", _CREDENTIAL_QUERY_PARAMS, "credential_query_params",\n'
+           "        _query_param_names, lambda name: f\"?{name}\",\n"
+           "    ),\n",
+           "", "multiplicity",
+           extra=(("if _DECLARED_CREDENTIAL_FIELDS != _CHANNELLED_CREDENTIAL_FIELDS:",
+                   "if False:"),)),
+    Mutant("M58", "the query channel is read through a collapsing accessor, so "
+                  "a repeated credential parameter is invisible to the count",
+           "    return [key.lower() for key, _ in request.query_params.multi_items()]",
+           "    return [key.lower() for key in request.query_params.keys()]",
+           "multiplicity"),
+    Mutant("M59", "the header channel is read through a collapsing accessor, so "
+                  "a repeated credential header is invisible to the count",
+           '    return [raw_key.decode("latin-1").lower() '
+           "for raw_key, _ in request.headers.raw]",
+           '    return [key.lower() for key in request.headers.keys()]',
+           "multiplicity"),
+    Mutant("M60", "the forwarded query string collapses repeats again",
+           "        (key, value) for key, value in request.query_params.multi_items()",
+           "        (key, value) for key, value in request.query_params.items()",
+           "multiplicity"),
+    Mutant("M61", "the forwarded headers collapse repeats again "
+                  "(the dict comprehension that kept the LAST)",
+           "    return [\n"
+           '        (raw_key.decode("latin-1"), raw_value.decode("latin-1"))\n'
+           "        for raw_key, raw_value in request.headers.raw\n"
+           '        if raw_key.decode("latin-1").lower() in allowed\n'
+           "    ]",
+           "    return {k: v for k, v in request.headers.items() "
+           "if k.lower() in allowed}",
+           "multiplicity"),
+    Mutant("M62", "a fifth credential channel is declared on Provider with no "
+                  "channel row to read it",
+           "    credential_headers: frozenset = frozenset()",
+           "    credential_headers: frozenset = frozenset()\n"
+           "    credential_cookies: frozenset = frozenset()",
+           "multiplicity"),
+    # The redundancy-aware twin of M62: with the import guard removed, the
+    # STATIC floor invariant and the derived provider-table test are what must
+    # catch it. If only the guard catches it, the property holds solely on a
+    # branch that imports this module.
+    Mutant("M63", "the same uncounted channel, with the import-time coverage "
+                  "guard removed too",
+           "    credential_headers: frozenset = frozenset()",
+           "    credential_headers: frozenset = frozenset()\n"
+           "    credential_cookies: frozenset = frozenset()",
+           "multiplicity",
+           extra=(("if _DECLARED_CREDENTIAL_FIELDS != _CHANNELLED_CREDENTIAL_FIELDS:",
+                   "if False:"),)),
+    Mutant("M64", "Gemini stops accepting its own query key "
+                  "(a boundary that refuses a working path is not a boundary)",
+           '    credential_query_params=frozenset({"key"}),',
+           "    credential_query_params=frozenset(),", "multiplicity"),
+    Mutant("M65", "the refusal stops naming the query parameter this provider "
+                  "uses, so the caller is not told the way out",
+           '        body["credential_query_params"] = sorted(provider.credential_query_params)',
+           '        body["credential_query_params"] = []', "multiplicity"),
     Mutant("M55", "the credential refusal is reported as a path problem",
            "        \"error\": (\n"
            '            "invalid_credential_header"\n'
@@ -387,13 +469,57 @@ def classify(returncode: int, output: str) -> tuple[str, list[str]]:
     return ("KILLED", failures) if failures else ("KILLED_COLLECTION", failures)
 
 
+def _recover_from_a_killed_run() -> None:
+    """
+    Put the target back if a previous run died holding a planted mutant.
+
+    A sidecar that still exists means the previous process never reached its
+    clean finish. Restoring is unconditional and LOUD: a silent recovery would
+    hide the fact that a mutated file was sitting in the tree.
+    """
+    if not BACKUP.exists():
+        return
+    saved = BACKUP.read_text(encoding="utf-8")
+    current = TARGET.read_text(encoding="utf-8") if TARGET.exists() else ""
+    print("!" * 78)
+    print("A PREVIOUS RUN DIED HOLDING A PLANTED MUTANT.")
+    print(f"  target differs from the saved original: {saved != current}")
+    print(f"  restoring {TARGET.relative_to(REPO)} from {BACKUP.name}")
+    print("!" * 78)
+    TARGET.write_text(saved, encoding="utf-8")
+    BACKUP.unlink()
+
+
+def _arm_restore(original: str) -> None:
+    """Restore on a clean exit, on SIGTERM/SIGINT, and (via BACKUP) on SIGKILL."""
+    BACKUP.write_text(original, encoding="utf-8")
+
+    def restore() -> None:
+        if TARGET.read_text(encoding="utf-8") != original:
+            TARGET.write_text(original, encoding="utf-8")
+
+    atexit.register(restore)
+
+    def _on_signal(signum, _frame):
+        restore()
+        BACKUP.unlink(missing_ok=True)
+        # 128+signum is the shell's convention for "died on this signal"; the
+        # campaign must never exit 0 after being cut short.
+        sys.exit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, _on_signal)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--only", nargs="*", default=None)
     parser.add_argument("--json", default=None)
     args = parser.parse_args()
 
+    _recover_from_a_killed_run()
     original = TARGET.read_text(encoding="utf-8")
+    _arm_restore(original)
 
     print("=" * 78)
     print("BASELINE — the tier must be green before any fault is planted")
@@ -459,8 +585,11 @@ def main() -> int:
     finally:
         TARGET.write_text(original, encoding="utf-8")
 
-    # Post-campaign baseline: prove the target was restored byte-for-byte.
+    # Post-campaign baseline: prove the target was restored byte-for-byte, then
+    # drop the sidecar — its presence is the signal that a run died holding a
+    # mutant, so it is removed only here, on the clean path.
     assert TARGET.read_text(encoding="utf-8") == original, "target not restored"
+    BACKUP.unlink(missing_ok=True)
     rc, out = run_pytest(NEW_TIER)
     restored_green = rc == 0
 
