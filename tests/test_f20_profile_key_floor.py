@@ -835,6 +835,95 @@ def test_inv7_negative_self_test_detects_an_undeclared_import(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# INV-8 — no field read from a decision record reaches a log sink
+# ---------------------------------------------------------------------------
+#
+# Earned by CodeQL on PR #34: two HIGH
+# ``py/clear-text-logging-sensitive-data`` alerts on this very module. A decision
+# record is built from arguments that include key material, so every field read
+# out of one carries that lineage — and static analysis is right to refuse to
+# distinguish the safe fields from the unsafe ones inside a single dict. Today's
+# fields are all taxonomy constants; the field someone adds next year might not
+# be, and that is one line away from stdout.
+#
+# The rule is therefore structural rather than a judgement about which fields are
+# safe: inside the taxonomy module, an argument to a logging call may not be a
+# subscript or ``.get()`` on a dict. Labels go through ``_label`` / ``_uuid_label``,
+# which return module-level literals.
+
+LOG_CALL_ATTRS = frozenset({"debug", "info", "warning", "error", "exception",
+                            "critical", "log"})
+
+#: Resolvers that launder a record field into a module-owned literal.
+LOG_SANITISERS = frozenset({"_label", "_uuid_label"})
+
+
+def _record_field_log_violations(tree: ast.Module) -> tuple[list[str], int]:
+    """``(violations, logging calls examined)``."""
+    violations: list[str] = []
+    examined = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr in LOG_CALL_ATTRS):
+            continue
+        examined += 1
+        for arg in list(node.args) + [kw.value for kw in node.keywords]:
+            for sub in ast.walk(arg):
+                bad = None
+                if isinstance(sub, ast.Subscript):
+                    bad = ast.unparse(sub)
+                elif isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute) \
+                        and sub.func.attr == "get":
+                    bad = ast.unparse(sub)
+                if bad is None:
+                    continue
+                # Permitted only when wrapped by a declared sanitiser.
+                wrapped = any(
+                    isinstance(outer, ast.Call)
+                    and isinstance(outer.func, ast.Name)
+                    and outer.func.id in LOG_SANITISERS
+                    and sub in list(ast.walk(outer))
+                    for outer in ast.walk(arg)
+                )
+                if not wrapped:
+                    violations.append(
+                        f"line {sub.lineno}: {bad} is read from a record and passed "
+                        f"straight to a log call; route it through "
+                        f"{sorted(LOG_SANITISERS)}"
+                    )
+    return violations, examined
+
+
+def test_inv8_no_record_field_is_logged_unresolved():
+    violations, examined = _record_field_log_violations(_parse(JOURNAL))
+    assert examined >= 2, (
+        f"only {examined} logging calls found in {JOURNAL.name} — this check "
+        f"passes by finding nothing, so its population is pinned"
+    )
+    assert not violations, (
+        "a decision-record field reaches a log sink unresolved:\n  "
+        + "\n  ".join(violations)
+    )
+
+
+def test_inv8_negative_self_test_detects_a_raw_field_in_a_log_call():
+    broken = ast.parse(
+        "logger.error('a=%s b=%s c=%s', out.get('outcome'), out['key_id'],\n"
+        "             _label(out.get('event_type'), EVENT_TYPES))\n"
+    )
+    violations, examined = _record_field_log_violations(broken)
+    assert examined == 1
+    assert len(violations) == 2, violations
+    assert any("out.get('outcome')" in v for v in violations)
+    assert any("out['key_id']" in v for v in violations)
+    # Control: the sanitised argument is NOT flagged, so the check discriminates
+    # rather than merely forbidding.
+    assert not any("event_type" in v for v in violations)
+
+
+# ---------------------------------------------------------------------------
 # INV-5 — this file's own subject matter still exists
 # ---------------------------------------------------------------------------
 

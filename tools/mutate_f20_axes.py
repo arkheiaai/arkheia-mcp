@@ -133,20 +133,32 @@ MUTANTS: list[Mutant] = [
            'RECEIPT_ENQUEUED = "enqueued"', 'RECEIPT_ENQUEUED = "recorded"',
            "status"),
     Mutant("M07", JOURNAL, "a missing writer is reported as a successful enqueue",
-           '            out.get("event_type"), out.get("decision_id"), out.get("outcome"),\n'
+           "            event_label, id_label, outcome_label,\n"
            "        )\n        return RECEIPT_UNAVAILABLE",
-           '            out.get("event_type"), out.get("decision_id"), out.get("outcome"),\n'
+           "            event_label, id_label, outcome_label,\n"
            "        )\n        return RECEIPT_ENQUEUED", "status"),
     Mutant("M08", JOURNAL, "a raised write error is reported as a successful enqueue",
-           '            out.get("decision_id"), out.get("outcome"),\n'
+           "            type(exc).__name__, event_label, id_label, outcome_label,\n"
            "        )\n        return RECEIPT_UNAVAILABLE",
-           '            out.get("decision_id"), out.get("outcome"),\n'
+           "            type(exc).__name__, event_label, id_label, outcome_label,\n"
            "        )\n        return RECEIPT_ENQUEUED", "status"),
     Mutant("M09", CRYPTO, "the loader assumes 'enqueued' instead of reporting it",
            "        self.last_receipt_status = (\n"
            "            RECEIPT_UNAVAILABLE if (not results or RECEIPT_UNAVAILABLE in statuses)\n"
            "            else RECEIPT_ENQUEUED\n        )",
            "        self.last_receipt_status = RECEIPT_ENQUEUED", "status"),
+
+    # -- log-sink sanitisation (earned by CodeQL on PR #34, two HIGH) --------
+    Mutant("M43", JOURNAL, "the failure log reads the outcome straight out of the record",
+           "    outcome_label = _label(out.get(\"outcome\"), KEY_LOAD_OUTCOMES | PROFILE_AUTH_OUTCOMES)",
+           "    outcome_label = out.get(\"outcome\")", "disclosure"),
+    Mutant("M44", JOURNAL, "the failure log reads the decision id straight out of the record",
+           "    id_label = _uuid_label(out.get(\"decision_id\"))",
+           "    id_label = out.get(\"decision_id\")", "disclosure"),
+    Mutant("M45", JOURNAL, "_label returns the record's value instead of the vocabulary member",
+           "    for member in vocabulary:\n        if member == value:\n            return member\n"
+           "    return UNRESOLVED_LABEL",
+           "    return value", "disclosure"),
 
     # -- the timing gap ------------------------------------------------------
     Mutant("M10", JOURNAL, "the deferral is no longer measured",

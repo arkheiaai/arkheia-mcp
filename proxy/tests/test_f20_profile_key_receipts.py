@@ -418,6 +418,65 @@ async def test_emit_reports_unavailable_when_there_is_no_writer():
     assert await emit(None, record) == RECEIPT_UNAVAILABLE
 
 
+async def test_the_failure_log_can_only_contain_taxonomy_members_and_a_uuid(caplog):
+    """
+    Found by CodeQL on PR #34 (two HIGH, py/clear-text-logging-sensitive-data).
+
+    A decision record is built from arguments that include key material, so
+    every field read out of one carries that lineage. ``emit``'s ERROR path now
+    resolves its labels THROUGH the taxonomy, so what reaches the log is a
+    module-level literal or a sentinel — never a value from the record. Drive it
+    with a record whose fields have been overwritten with hostile content and
+    assert none of it appears.
+    """
+    import logging as _logging
+
+    poisoned = build_key_load_record(
+        outcome=KEY_LOAD_UNAVAILABLE,
+        key_source=KEY_SOURCE_NONE,
+        revocation_state=REVOCATION_NOT_APPLICABLE,
+    )
+    poisoned["outcome"] = "SENTINEL-OUTCOME-9f2a"
+    poisoned["event_type"] = "SENTINEL-EVENT-9f2a"
+    poisoned["decision_id"] = "SENTINEL-ID-9f2a"
+
+    with caplog.at_level(_logging.ERROR):
+        assert await emit(None, poisoned) == RECEIPT_UNAVAILABLE
+
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert logged, "control: the failure MUST be logged loudly, never swallowed"
+    assert "SENTINEL-OUTCOME-9f2a" not in logged
+    assert "SENTINEL-EVENT-9f2a" not in logged
+    assert "SENTINEL-ID-9f2a" not in logged
+    assert "<outside-taxonomy>" in logged and "<non-uuid>" in logged
+
+
+async def test_the_failure_log_still_names_a_legitimate_decision(caplog):
+    """
+    Control row for the test above: a well-formed record must still be
+    identifiable in the log, or the sanitiser has traded a real capability for a
+    clean scan result.
+    """
+    import logging as _logging
+
+    record = build_key_load_record(
+        outcome=KEY_LOAD_UNAVAILABLE,
+        key_source=KEY_SOURCE_NONE,
+        revocation_state=REVOCATION_NOT_APPLICABLE,
+    )
+    journal = DecisionJournal()
+    decision_id = journal.record(record)
+    entries, _dropped = journal.drain()
+
+    with caplog.at_level(_logging.ERROR):
+        assert await emit(None, entries[0]) == RECEIPT_UNAVAILABLE
+
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    assert decision_id in logged
+    assert KEY_LOAD_UNAVAILABLE in logged
+    assert "profile_key.load" in logged
+
+
 async def test_a_rail_that_REFUSES_the_write_is_reported_as_unavailable():
     """
     Found by the mutation campaign (M08 survived the first run — a real hole in

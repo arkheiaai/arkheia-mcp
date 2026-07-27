@@ -213,6 +213,54 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+#: Emitted in place of a field that does not resolve to a known label. Two
+#: distinct sentinels, because "the record said something we do not recognise"
+#: and "the record said nothing" are different faults.
+UNRESOLVED_LABEL = "<outside-taxonomy>"
+UNRESOLVED_ID = "<non-uuid>"
+
+
+def _label(value: Any, vocabulary: frozenset) -> str:
+    """
+    Resolve a record field to **the vocabulary member it equals**, returning this
+    module's own constant rather than the string that was read from the record.
+
+    This is a real sanitiser, not a formality, and it exists for a specific
+    reason. A decision record is built from arguments that include key material
+    (as ``key_id(key)``), so every field read out of one carries that lineage.
+    Handing any of them to a log sink means a future edit that adds a
+    less-careful field is one line from writing it to stdout — and static
+    analysis is right to refuse to distinguish the safe fields from the unsafe
+    ones inside a single dict. (CodeQL ``py/clear-text-logging-sensitive-data``
+    flagged exactly this on ``proxy/audit/decision_journal.py`` at PR #34, two
+    HIGH.)
+
+    Resolving through the vocabulary makes the guarantee structural: what reaches
+    the log is a module-level literal that was compiled into this file, or a
+    sentinel. No value from the record itself can be logged, whatever anyone
+    later adds to it.
+    """
+    for member in vocabulary:
+        if member == value:
+            return member
+    return UNRESOLVED_LABEL
+
+
+def _uuid_label(value: Any) -> str:
+    """
+    Re-render a decision id from its parsed 128 bits.
+
+    Same discipline as ``_label`` for a field with no fixed vocabulary: the
+    string that reaches the log is produced by ``uuid.UUID.__str__`` from the
+    integer it parsed, so it is a canonical UUID or the sentinel — never the
+    bytes that were in the record.
+    """
+    try:
+        return str(uuid.UUID(hex=str(value)))
+    except (AttributeError, TypeError, ValueError):
+        return UNRESOLVED_ID
+
+
 # ---------------------------------------------------------------------------
 # The journal
 # ---------------------------------------------------------------------------
@@ -291,11 +339,18 @@ async def emit(writer: Any, record: dict) -> str:
     out["receipt_deferred_ms"] = _deferral_ms(out.get("decided_at"), enqueued_at)
     out["receipt_status"] = RECEIPT_ENQUEUED
 
+    # Log labels are RESOLVED THROUGH THE TAXONOMY, never read straight out of
+    # the record — see _label()/_uuid_label(). A record can carry a key-derived
+    # field, so nothing read from it goes to a log sink unresolved.
+    event_label = _label(out.get("event_type"), EVENT_TYPES)
+    outcome_label = _label(out.get("outcome"), KEY_LOAD_OUTCOMES | PROFILE_AUTH_OUTCOMES)
+    id_label = _uuid_label(out.get("decision_id"))
+
     if writer is None:
         logger.error(
             "F20 decision NOT RECEIPTED (no audit writer at emit time): "
             "event_type=%s decision_id=%s outcome=%s",
-            out.get("event_type"), out.get("decision_id"), out.get("outcome"),
+            event_label, id_label, outcome_label,
         )
         return RECEIPT_UNAVAILABLE
 
@@ -305,8 +360,7 @@ async def emit(writer: Any, record: dict) -> str:
         logger.error(
             "F20 decision NOT RECEIPTED (audit write raised %s): "
             "event_type=%s decision_id=%s outcome=%s",
-            type(exc).__name__, out.get("event_type"),
-            out.get("decision_id"), out.get("outcome"),
+            type(exc).__name__, event_label, id_label, outcome_label,
         )
         return RECEIPT_UNAVAILABLE
 
