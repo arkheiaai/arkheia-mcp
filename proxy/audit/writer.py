@@ -223,17 +223,32 @@ class AuditWriter:
         """
         Walk the hash chain and report any breaks.
 
-        Returns {"ok": bool, "verified": n, "breaks": [{seq, expected, got}]}
+        Returns {"ok": bool, "verified": n, "breaks": [{seq, expected, got}],
+        "error": str|None}
+
+        "ok" is only True for a chain that was actually walked without incident
+        (including the legitimate case of a log that does not exist yet -- a
+        fresh deployment has nothing to verify, and that is not evidence of
+        tampering). It is deliberately NOT just `len(breaks) == 0`: an absent
+        log, a genuinely empty one, a log whose every line failed to parse, and
+        a walk that raised before checking anything all leave `breaks` empty
+        too, but only the first two are "nothing to check" -- the latter two are
+        content that COULD NOT be verified, which is evidence of a problem, not
+        an intact chain, and must not read the same as one (Codex adversarial
+        review, 2026-07-27; sibling of the integrity.py empty-manifest defect).
 
         Hook for enterprise upgrade: expose this via /admin/verify-chain endpoint
         and run it on a schedule to detect log tampering.
         """
         if not self.log_path.exists():
-            return {"ok": True, "verified": 0, "breaks": []}
+            return {"ok": True, "verified": 0, "breaks": [], "error": None}
 
         breaks = []
         prev_hash = "0" * 64
         verified = 0
+        total_lines = 0
+        unparseable = 0
+        error: Optional[str] = None
 
         try:
             with open(self.log_path, "r", encoding="utf-8") as f:
@@ -241,9 +256,11 @@ class AuditWriter:
                     raw_line = raw_line.strip()
                     if not raw_line:
                         continue
+                    total_lines += 1
                     try:
                         record = json.loads(raw_line)
                     except json.JSONDecodeError:
+                        unparseable += 1
                         continue
 
                     stored_this  = record.pop("this_hash", None)
@@ -265,8 +282,27 @@ class AuditWriter:
 
         except Exception as e:
             logger.error("AuditWriter.verify_chain: %s", e)
+            error = str(e)
 
-        return {"ok": len(breaks) == 0, "verified": verified, "breaks": breaks}
+        if error is not None:
+            # The walk did not complete -- we cannot claim anything about the
+            # chain's integrity, so this must not be reported as ok=True.
+            return {"ok": False, "verified": verified, "breaks": breaks, "error": error}
+
+        if total_lines > 0 and verified == 0:
+            # The log has content, but every line failed to parse. That is
+            # evidence of corruption, not "nothing to verify" -- do not let
+            # `len(breaks) == 0` (true only because nothing was ever checked)
+            # read as ok=True.
+            return {
+                "ok": False,
+                "verified": 0,
+                "breaks": breaks,
+                "error": f"{unparseable} log line(s) present but none parseable "
+                         f"-- cannot verify chain integrity",
+            }
+
+        return {"ok": len(breaks) == 0, "verified": verified, "breaks": breaks, "error": None}
 
     def purge_old_records(self) -> int:
         """Remove records older than retention_days. Returns count deleted."""

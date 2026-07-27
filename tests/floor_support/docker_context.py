@@ -64,6 +64,15 @@ class Copy:
     destination: PurePosixPath
     line: int
     text: str
+    #: True iff the RAW destination argument ended with `/`. `PurePosixPath`
+    #: normalises away trailing slashes on construction, so this has to be
+    #: captured from the string in `_parse_copy` before that happens — it is the
+    #: only record left of "this destination names a directory, even a
+    #: not-yet-existing one" per Docker's own COPY semantics. Losing it here is
+    #: exactly the class of trailing-slash mistake this module's docstring calls
+    #: out as the whole reason it materialises the tree instead of comparing
+    #: path strings.
+    destination_is_dir: bool = False
 
 
 @dataclass
@@ -261,6 +270,10 @@ def _parse_copy(
         destination=absolute,
         line=number,
         text=f"{instruction} {argument}",
+        # Multiple sources can only resolve into a directory (Docker requires
+        # this, trailing slash or not); a single source still needs the raw
+        # string checked, since `absolute`/`target` above have already lost it.
+        destination_is_dir=len(sources) > 1 or destination.endswith("/"),
     )
 
 
@@ -310,7 +323,7 @@ def materialise(
                 _copy_tree(src, _image_path(destination, copy.destination))
             else:
                 target = copy.destination
-                if str(copy.destination).endswith("/"):
+                if copy.destination_is_dir:
                     target = copy.destination / src.name
                 _copy_file(src, _image_path(destination, target))
 

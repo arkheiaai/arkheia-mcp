@@ -17,7 +17,8 @@ Hook for enterprise upgrade:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -115,12 +116,40 @@ class PolicyViolation(Exception):
         super().__init__(f"Policy violation for '{tool_name}': {reason}")
 
 
-def check(tool_name: str) -> ToolPolicy:
+class RegistryCoverageError(PolicyViolation):
     """
-    Look up tool_name in the registry.
+    Raised at startup when the set of tools ADVERTISED to orchestrators is not
+    identical to the set of tools covered by REGISTRY.
 
-    Returns the ToolPolicy if allowed.
-    Raises PolicyViolation if the tool is not registered (default deny).
+    This exists because REGISTRY is a *shadow* allowlist: the effective allowlist
+    is the MCP framework's own decorator registry, which is what decides which
+    names are advertised via ``tools/list`` and which names ``call_tool`` will
+    dispatch. A tool present in the framework but absent from REGISTRY is
+    reachable by every orchestrator with no policy covering it. Refusing to start
+    is the fail-closed answer: an ungoverned tool must never be advertised.
+    """
+
+
+def check(tool_name: str, *, human_confirmed: bool = False) -> ToolPolicy:
+    """
+    Evaluate the policy for tool_name and return it if the call is allowed.
+
+    Args:
+        tool_name:       The tool being invoked.
+        human_confirmed: True only if this call site carries an explicit human
+                         approval for a tool whose policy sets
+                         ``requires_human_confirm``. Defaults to False, so a
+                         confirm-required tool is denied unless the approval is
+                         passed deliberately (fail closed).
+
+    Returns:
+        The ToolPolicy, if every policy rule allows the call.
+
+    Raises:
+        PolicyViolation, with a distinct reason per deny branch:
+          * not registered            -> default deny
+          * empty permission set      -> default deny (grants nothing => allows nothing)
+          * requires_human_confirm    -> deny until an approval is supplied
 
     Call this as the FIRST statement in every MCP tool body.
     """
@@ -131,4 +160,61 @@ def check(tool_name: str) -> ToolPolicy:
             f"not in allowlist — default deny. "
             f"Known tools: {sorted(REGISTRY.keys())}",
         )
+
+    # A policy that grants no permission must not authorise a call. Previously
+    # `permissions` was declared on every entry and read nowhere, so an entry with
+    # `permissions=[]` allowed exactly as much as one granting DEPLOY.
+    if not policy.permissions:
+        raise PolicyViolation(
+            tool_name,
+            "registered with an empty permission set — default deny. A policy "
+            "that grants nothing cannot authorise a call.",
+        )
+
+    # `requires_human_confirm` is documented as "block until explicit approval".
+    # Before this it was read nowhere, so setting it blocked nothing at all.
+    if policy.requires_human_confirm and not human_confirmed:
+        raise PolicyViolation(
+            tool_name,
+            "requires explicit human confirmation — denied because no approval "
+            "was supplied. An approving call site must pass human_confirmed=True.",
+        )
+
     return policy
+
+
+def assert_registry_covers(advertised: Iterable[str]) -> None:
+    """
+    Fail closed unless every advertised tool has a policy and every policy covers
+    an advertised tool.
+
+    Args:
+        advertised: The tool names the server actually exposes to orchestrators.
+
+    Raises:
+        RegistryCoverageError naming the specific offending tools on each side.
+        The units are named rather than counted: a bare "2 tools differ" would
+        hide *which* tool is ungoverned, which is the only actionable fact.
+    """
+    advertised_set = set(advertised)
+    registry_set = set(REGISTRY)
+
+    if not advertised_set:
+        raise RegistryCoverageError(
+            "<startup>",
+            "no tools were advertised, so registry coverage was never actually "
+            "checked. An empty check must fail, not pass.",
+        )
+
+    ungoverned = sorted(advertised_set - registry_set)
+    dead_policy = sorted(registry_set - advertised_set)
+
+    if ungoverned or dead_policy:
+        raise RegistryCoverageError(
+            "<startup>",
+            f"registry coverage mismatch — refusing to start. "
+            f"advertised but NOT in REGISTRY (ungoverned, reachable by any "
+            f"orchestrator): {ungoverned}; "
+            f"in REGISTRY but NOT advertised (dead policy, misleading evidence): "
+            f"{dead_policy}.",
+        )

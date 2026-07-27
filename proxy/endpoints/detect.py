@@ -55,6 +55,35 @@ class VerifyResponse(BaseModel):
     detection_id: str
     error: Optional[str] = None
     # ---------------------------------------------------------------------------
+    # SCREENING TRANSPARENCY. These three fields decide what the verdict MEANS, and
+    # the engine has always computed them -- they were simply not surfaced, so a
+    # verdict that measured NOTHING was byte-indistinguishable from one that
+    # measured everything. Fail-open must never be fail-silent.
+    #
+    #   evidence_depth_limited  True when nothing (or too little) was actually
+    #                           measured. Defaults TRUE: every path that reaches
+    #                           _unknown() screened nothing, and a couldn't-assess
+    #                           must never default to reading as full evidence.
+    #   detection_method        "profile_<strategy>" when features were scored;
+    #                           "tool_surface_suppressed" / "empty_output_suppressed"
+    #                           when a GATE fired and features_used == 0. A
+    #                           suppressed LOW is a couldn't-assess, not a clean bill
+    #                           of health.
+    #   profile_model_id        The model whose profile ACTUALLY scored this response.
+    #                           NOT always model_id: ProfileRouter resolves through
+    #                           exact -> prefix -> family, so "grok-3" is scored by
+    #                           the "grok-3-mini-fast" fingerprint and
+    #                           "deepseek-coder:33b-instruct" (local) by the cloud
+    #                           "deepseek-ai/DeepSeek-V4-Pro" one. None when no
+    #                           profile matched. profile_model_id != model_id means a
+    #                           substitution the caller must weigh.
+    #
+    # Mirrored in headers by _signal() for transport-layer consumers, and covered by
+    # proxy/tests/test_detect_screening_transparency.py.
+    # ---------------------------------------------------------------------------
+    evidence_depth_limited: bool = True
+    detection_method: Optional[str] = None
+    profile_model_id: Optional[str] = None
     # SUPPRESSION MARKER. Which false-positive suppression gate produced this verdict,
     # and against which threshold — one of the closed values in
     # proxy/detection/features.py (SUPPRESSION_REASONS), e.g. "token_count_below_80",
@@ -68,8 +97,12 @@ class VerifyResponse(BaseModel):
     # documents, and the MCP tool consuming this endpoint tells its agent
     # `LOW -- surface normally`. ALWAYS emitted, null when scored: an absent field is
     # indistinguishable from an older proxy that never set it.
-    # ---------------------------------------------------------------------------
     gate_reason: Optional[str] = None
+    # Which detection path served this verdict. ProxyClient.verify() serves callers
+    # from the local proxy OR the hosted API and the caller does not choose;
+    # _verify_hosted already stamps source="hosted", so the local path must declare
+    # itself or the two paths return different contracts under one method.
+    source: str = "local"
     # Governance decision surfaced to the CALLER so a configured block is not silently
     # decorative. These two fields are NOT interchangeable:
     #   action      = POLICY INTENT (NOT authorization). The customer policy applied, from
@@ -135,6 +168,14 @@ def _signal(
     verify.gate_action = gate_action
     try:
         http_response.headers["X-Arkheia-Risk"] = str(verify.risk_level)
+        # Screening transparency, mirrored for header-only consumers (the /v1/*
+        # interception path, the operator signal hook). A header that is ABSENT is
+        # indistinguishable from an older proxy that never set it, so both are always
+        # emitted -- "none" rather than omitted.
+        http_response.headers["X-Arkheia-Evidence-Limited"] = (
+            "true" if verify.evidence_depth_limited else "false"
+        )
+        http_response.headers["X-Arkheia-Profile"] = str(verify.profile_model_id or "none")
         # X-Arkheia-Action = POLICY INTENT (not authorization); mirrors audit action_taken.
         http_response.headers["X-Arkheia-Action"] = action
         # X-Arkheia-Gate-Action = AUTHORITATIVE authorized action. Consumers hard-block ONLY
@@ -213,6 +254,13 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
         timestamp=result.timestamp,
         detection_id=result.detection_id,
         error=result.error,
+        # Screening transparency -- see the field comments on VerifyResponse. Read
+        # via getattr so an engine built before these fields existed degrades to the
+        # fail-safe defaults (evidence-limited, no method, no profile) rather than
+        # raising inside a path contracted never to crash the pipeline it monitors.
+        evidence_depth_limited=bool(getattr(result, "evidence_depth_limited", True)),
+        detection_method=getattr(result, "detection_method", None),
+        profile_model_id=getattr(result, "profile_model_id", None),
         # Read via getattr so an engine built before the field existed degrades to None
         # rather than raising inside a path contracted never to crash the pipeline it
         # monitors.
@@ -275,6 +323,14 @@ def _audit_record(response: VerifyResponse, req: VerifyRequest, action: str) -> 
         "risk_level": response.risk_level,
         "confidence": response.confidence,
         "features_triggered": response.features_triggered,
+        # Screening transparency in the FORENSIC record too. An audit row that
+        # says "LOW" for a verdict which scored nothing, or which was scored by
+        # another model's profile, is a record of a screening that did not
+        # happen -- and the audit log is the compliance artefact. Structural
+        # metadata only: no prompt or response text, per this log's contract.
+        "evidence_depth_limited": response.evidence_depth_limited,
+        "detection_method": response.detection_method,
+        "profile_model_id": response.profile_model_id,
         # The suppression marker in the FORENSIC record too. This log is the compliance
         # artefact: a row reading "LOW" for a response nothing was measured on records a
         # screening that did not happen. Structural metadata only — a gate reason names

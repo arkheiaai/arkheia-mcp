@@ -27,10 +27,15 @@ Transport: stdio (default — Claude Code / Claude Desktop)
 import os
 import logging
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from mcp_server.proxy_client import ProxyClient
-from mcp_server.tool_registry import check, PolicyViolation
+from mcp_server.tool_registry import (
+    assert_registry_covers,
+    check,
+    PolicyViolation,
+)
 from mcp_server.tools.providers import call_grok, call_gemini, call_ollama, call_together
 from mcp_server.tools.memory import store_entity, retrieve_entities, store_relation
 
@@ -416,5 +421,30 @@ async def memory_relate(from_entity: str, relation_type: str, to_entity: str) ->
     return await store_relation(from_entity=from_entity, relation_type=relation_type, to_entity=to_entity)
 
 
+def startup_policy_selfcheck() -> None:
+    """
+    Fail closed at startup unless every advertised tool is covered by REGISTRY.
+
+    REGISTRY is a *shadow* allowlist: FastMCP's decorator registry is what decides
+    which names are advertised via ``tools/list`` and which ``call_tool`` will
+    dispatch — an unknown name is refused by FastMCP's own ``ToolError`` and never
+    reaches ``check()``. So a tool decorated here but missing from REGISTRY is
+    reachable by every orchestrator with no policy covering it. Refusing to start
+    is the only fail-closed answer.
+
+    ``tests/test_tool_gate_floor.py`` INV-2 catches the same drift statically in
+    CI; this is the runtime backstop, and it is the check that still holds once
+    REGISTRY is loaded from a signed/remote policy store (the documented
+    enterprise upgrade hook), where a static parse cannot see the contents.
+    """
+    advertised = [t.name for t in anyio.run(mcp.list_tools)]
+    assert_registry_covers(advertised)
+    logger.info(
+        "tool-registry policy self-check OK: %d advertised tools, all covered",
+        len(advertised),
+    )
+
+
 if __name__ == "__main__":
+    startup_policy_selfcheck()
     mcp.run()
