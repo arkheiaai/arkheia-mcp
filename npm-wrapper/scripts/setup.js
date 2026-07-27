@@ -5,27 +5,8 @@
  */
 
 const { execFileSync } = require("child_process");
-const fs = require("fs");
-const path = require("path");
 
-const CONFIG_FILE_NAME = "config.json";
-const ARKHEIA_DIR_MODE = 0o700;
-const ARKHEIA_CONFIG_MODE = 0o600;
 const KEY_ENV = "ARKHEIA" + "_API_KEY";
-
-function homeDir(env = process.env) {
-  return env.HOME || env.USERPROFILE || "/tmp";
-}
-
-function pathsForHome(home) {
-  const arkheiaDir = path.join(home, ".arkheia");
-  return {
-    arkheiaDir,
-    configFile: path.join(arkheiaDir, CONFIG_FILE_NAME),
-    claudeDir: path.join(home, ".claude"),
-    claudeMdPath: path.join(home, ".claude", "CLAUDE.md"),
-  };
-}
 
 function truthy(value) {
   return /^(1|true|yes|y|on)$/i.test(String(value || ""));
@@ -37,60 +18,10 @@ function parseOptions(argv = process.argv.slice(2), env = process.env) {
   };
 }
 
-function chmodIfPossible(target, mode) {
-  try {
-    fs.chmodSync(target, mode);
-  } catch (err) {
-    if (process.platform !== "win32") {
-      throw err;
-    }
-  }
-}
-
 function childEnvWithoutApiKey(env = process.env) {
   const childEnv = { ...env };
   delete childEnv[KEY_ENV];
   return childEnv;
-}
-
-function readJsonFile(file) {
-  if (!fs.existsSync(file)) return {};
-  return JSON.parse(fs.readFileSync(file, "utf-8"));
-}
-
-function hasExistingApiKey(configFile) {
-  try {
-    const config = readJsonFile(configFile);
-    if (config.api_key && config.api_key.length > 0) {
-      chmodIfPossible(path.dirname(configFile), ARKHEIA_DIR_MODE);
-      chmodIfPossible(configFile, ARKHEIA_CONFIG_MODE);
-      return true;
-    }
-  } catch {
-    // Corrupt config: treat as missing.
-  }
-  return false;
-}
-
-function checkApiKey(options = {}) {
-  const env = options.env || process.env;
-  const home = options.home || homeDir(env);
-  const { configFile } = pathsForHome(home);
-
-  if (hasExistingApiKey(configFile)) {
-    return { hasApiKey: true, source: "config", persisted: true, configFile };
-  }
-
-  if (!env[KEY_ENV]) {
-    return { hasApiKey: false, source: null, persisted: false, configFile };
-  }
-
-  return {
-    hasApiKey: true,
-    source: "environment",
-    persisted: false,
-    configFile,
-  };
 }
 
 function checkPython() {
@@ -119,7 +50,7 @@ function checkPython() {
 }
 
 function main() {
-  const options = parseOptions();
+  parseOptions();
   const python = checkPython();
 
   if (!python) {
@@ -140,22 +71,9 @@ function main() {
   `);
   }
 
-  const keyState = checkApiKey(options);
-
-  if (keyState.hasApiKey) {
-    const persistence = keyState.persisted
-      ? `Config: ${keyState.configFile}`
-      : "Not persisted by postinstall. Start your MCP client with the Arkheia runtime key set.";
-    console.log(`
+  console.log(`
   ============================================================
-  API key configured.
-  ${persistence}
-  ============================================================
-  `);
-  } else {
-    console.log(`
-  ============================================================
-  No Arkheia API key configured.
+  Runtime credentials are not inspected by postinstall.
 
   To enable hosted detection and encrypted profiles:
 
@@ -163,23 +81,20 @@ function main() {
     2. Set the Arkheia runtime key in your environment
     3. Start your MCP client with that environment present
 
-  This postinstall does not write API keys to ${keyState.configFile}.
+  This postinstall does not read, verify, persist, or print API keys.
   The server will work without a key, but encrypted profiles
   and hosted detection will be unavailable.
   ============================================================
   `);
-  }
 
   console.log("  [arkheia] Global Claude instructions not modified by postinstall.");
 }
 
 module.exports = {
-  ARKHEIA_CONFIG_MODE,
-  ARKHEIA_DIR_MODE,
-  checkApiKey,
+  childEnvWithoutApiKey,
+  checkPython,
   main,
   parseOptions,
-  pathsForHome,
 };
 
 if (require.main === module) {

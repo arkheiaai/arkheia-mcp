@@ -8,23 +8,18 @@
 #
 # What it does:
 #   1. Checks prerequisites (Node.js 18+, Python 3.10+)
-#   2. Provisions a free-tier API key (or uses the one you provide)
-#   3. Installs @arkheia/mcp-server via npx
-#   4. Writes Claude Desktop / Claude Code MCP config
+#   2. Installs @arkheia/mcp-server via npx
+#   3. Prints manual MCP client configuration guidance
 #
-# This installer does not persist API keys. Start your MCP client with the
-# Arkheia runtime key in its process environment.
+# This installer does not read, provision, verify, persist, or print API keys.
+# Start your MCP client with the Arkheia runtime key in its process environment.
 # ============================================================================
 
 set -euo pipefail
 
-HOSTED_URL="${ARKHEIA_HOSTED_URL:-https://arkheia-proxy-production.up.railway.app}"
 RUNTIME_KEY_ENV="ARKHEIA""_API_KEY"
-API_KEY="${!RUNTIME_KEY_ENV:-}"
-# Keep the installer-local copy, but do not leak it to prerequisite, helper, or
-# package-install subprocesses that do not need the runtime API key.
+# Do not leak runtime credentials to prerequisite or package-install subprocesses.
 unset "$RUNTIME_KEY_ENV"
-EMAIL=""
 DRY_RUN=0
 
 # ---------------------------------------------------------------------------
@@ -49,14 +44,6 @@ truthy() {
     esac
 }
 
-require_value() {
-    local option="$1"
-    local value="${2:-}"
-    if [ -z "$value" ]; then
-        fail "${option} requires a value."
-    fi
-}
-
 # ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
@@ -66,9 +53,12 @@ while [[ $# -gt 0 ]]; do
             fail "--api-key is not supported because command-line arguments can leak. Use environment-based runtime configuration instead."
             ;;
         --email)
-            require_value "$1" "${2:-}"
-            EMAIL="$2"
-            shift 2
+            warn "--email is ignored; this installer does not provision API keys."
+            if [ "${2:-}" ] && [[ "${2:-}" != --* ]]; then
+                shift 2
+            else
+                shift
+            fi
             ;;
         --persist-api-key)
             warn "--persist-api-key is deprecated; this installer does not write API keys to disk."
@@ -85,7 +75,7 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: curl -fsSL https://arkheia.ai/install-mcp | bash"
             echo ""
             echo "Options (pass via: bash -s -- --option value):"
-            echo "  --email EMAIL          Email for free-tier key provisioning"
+            echo "  --email EMAIL          Deprecated no-op; key provisioning is not performed"
             echo "  --persist-api-key      Deprecated no-op; API keys are not written by this installer"
             echo "  --no-persist-api-key   Deprecated no-op; retained for compatibility"
             echo "  --dry-run              Print planned actions without writing files or calling network services"
@@ -143,74 +133,6 @@ if [ -z "$PYTHON_CMD" ]; then
     fail "Python 3.10+ is required but not found. Install from https://python.org"
 fi
 ok "Python $($PYTHON_CMD --version 2>&1)"
-
-# ---------------------------------------------------------------------------
-# API Key provisioning
-# ---------------------------------------------------------------------------
-if [ -z "$API_KEY" ]; then
-    if [ "$DRY_RUN" -eq 1 ]; then
-        info "Dry run: would provision a free-tier API key if no key is provided."
-    else
-        info "No API key provided; provisioning a free-tier key..."
-
-        # Get email if not provided
-        if [ -z "$EMAIL" ]; then
-            if [ -t 0 ]; then
-                printf "${BOLD}Enter your email address:${NC} "
-                read -r EMAIL
-            else
-                fail "Email required for provisioning. Use: bash -s -- --email you@example.com"
-            fi
-        fi
-
-        if [ -z "$EMAIL" ]; then
-            fail "Email cannot be empty."
-        fi
-
-        # Validate email format before sending (prevent injection in JSON payload)
-        if ! [[ "$EMAIL" =~ ^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$ ]]; then
-            fail "Invalid email format: ${EMAIL}"
-        fi
-
-        # Call the provisioning endpoint; email is validated above, payload built safely.
-        PROVISION_PAYLOAD=$(printf '{"email": "%s"}' "$EMAIL")
-        PROVISION_RESPONSE=$(curl -sS -w "\n%{http_code}" \
-            -X POST "${HOSTED_URL}/v1/provision" \
-            -H "Content-Type: application/json" \
-            -d "$PROVISION_PAYLOAD" 2>&1) || fail "Failed to reach ${HOSTED_URL}"
-
-        HTTP_CODE=$(echo "$PROVISION_RESPONSE" | tail -1)
-        BODY=$(echo "$PROVISION_RESPONSE" | sed '$d')
-
-        case "$HTTP_CODE" in
-            201)
-                API_KEY=$(env -u "$RUNTIME_KEY_ENV" "$PYTHON_CMD" -c 'import json, sys; print(json.load(sys.stdin).get("api_key", ""))' <<<"$BODY")
-                if [ -z "$API_KEY" ]; then
-                    fail "Provisioning succeeded but could not parse API key from response."
-                fi
-                ok "Free-tier API key provisioned."
-                warn "The full API key is not printed. Store it outside this installer and start Claude with the runtime key set."
-                ;;
-            409)
-                fail "This email already has a free-tier key. Log in at https://hermes.arkheia.ai to manage your keys."
-                ;;
-            429)
-                fail "Rate limit exceeded. Try again later or pass --api-key."
-                ;;
-            *)
-                fail "Provisioning failed (HTTP $HTTP_CODE)."
-                ;;
-        esac
-    fi
-fi
-
-if [ -z "$API_KEY" ]; then
-    warn "No API key available; hosted detection will require the Arkheia runtime key."
-fi
-
-if [ -n "$API_KEY" ]; then
-    warn "API key was not persisted by this installer. Start Claude with the runtime key set."
-fi
 
 # ---------------------------------------------------------------------------
 # Install the npm package (this also sets up the Python venv on first run)

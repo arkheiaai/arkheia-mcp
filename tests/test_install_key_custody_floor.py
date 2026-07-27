@@ -95,16 +95,6 @@ def _fake_install_path(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
 
-    (bin_dir / "curl").write_text(
-        "#!/bin/sh\n"
-        f"if [ -n \"${{{KEY_ENV}+x}}\" ]; then echo 'leaked runtime key to curl' >&2; exit 92; fi\n"
-        "case \"$*\" in\n"
-        "  */v1/provision*) printf '{\"api_key\":\"%s\"}\\n201' \"${ARKHEIA_FAKE_PROVISION_KEY:-custody_fixture_provisioned}\" ;;\n"
-        "  *) printf '200' ;;\n"
-        "esac\n",
-        encoding="utf-8",
-    )
-
     (bin_dir / "python3").write_text(
         "#!/bin/sh\n"
         f"if [ -n \"${{{KEY_ENV}+x}}\" ]; then echo 'leaked runtime key to python' >&2; exit 92; fi\n"
@@ -112,7 +102,7 @@ def _fake_install_path(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
 
-    for script in (bin_dir / "npx", bin_dir / "curl", bin_dir / "python3"):
+    for script in (bin_dir / "npx", bin_dir / "python3"):
         script.chmod(0o755)
 
     return bin_dir
@@ -127,7 +117,6 @@ def _run_install(
     env = _base_env(home, api_key=None)
     fake_bin = _fake_install_path(tmp_path)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
-    env["ARKHEIA_HOSTED_URL"] = "https://arkheia.invalid"
     if env_extra:
         env.update(env_extra)
 
@@ -149,7 +138,7 @@ def test_npm_postinstall_does_not_persist_keys_or_global_claude_md(tmp_path: Pat
     assert PRIMARY_VALUE not in _combined(result)
     assert not (tmp_path / ".arkheia" / "config.json").exists()
     assert not (tmp_path / ".claude" / "CLAUDE.md").exists()
-    assert "Not persisted" in result.stdout
+    assert "not inspected by postinstall" in result.stdout
     assert "Global Claude instructions not modified" in result.stdout
 
 
