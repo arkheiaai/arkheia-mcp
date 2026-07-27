@@ -181,10 +181,23 @@ def start_proxy(port: int, profiles_dir: str) -> subprocess.Popen:
 
 
 def start_registry(port: int, profiles_dir: str) -> subprocess.Popen:
+    # The fallback was the literal string "pilot-test-key" -- a KNOWN key,
+    # committed to a public repo, that provisions the registry for anyone who
+    # runs this script without ARKHEIA_REGISTRY_KEYS set. That defeats the
+    # fail-closed default the registry is built around (unset => 503,
+    # reject-all) by replacing it with a guessable credential. An ephemeral
+    # random key preserves the script's purpose -- it needs SOME key to
+    # exercise the authenticated path -- without ever being a value an
+    # attacker could know. Bound to 127.0.0.1, so the blast radius was local;
+    # it is fixed because a known key in a validation script is how known keys
+    # end up in deployments.
+    from registry_server.auth import generate_key
+
     env = {**os.environ,
            "ARKHEIA_REGISTRY_PROFILE_DIR": str(profiles_dir),
            "ARKHEIA_REGISTRY_BASE_URL": f"http://127.0.0.1:{port}",
-           "ARKHEIA_REGISTRY_KEYS": os.environ.get("ARKHEIA_REGISTRY_KEYS", "pilot-test-key")}
+           "ARKHEIA_REGISTRY_KEYS": os.environ.get("ARKHEIA_REGISTRY_KEYS")
+                                    or generate_key("ak_test")}
     return subprocess.Popen(
         [str(VENV_PYTHON), "-m", "uvicorn", "registry_server.main:app",
          "--host", "127.0.0.1", "--port", str(port)],
