@@ -777,3 +777,447 @@ def test_inv9_provider_credentials_are_a_subset_of_the_screened_vocabulary(tree)
                     f"which the screen's vocabulary does not recognise"
                 )
     assert unknown == []
+
+
+# ---------------------------------------------------------------------------
+# INV-10 — every credential channel the provider table declares is COUNTED
+#
+# WHAT EARNED THIS (2026-07-27, found by a second vendor — Codex, gpt-5.5, in
+# the fix for the defect that earned INV-8)
+# ------------------------------------------------------------------------
+# INV-8's own commit message said "a per-header rule cannot see a cross-header
+# interaction" — and the gate it shipped counted credential HEADERS, so it could
+# not see a header <-> QUERY-PARAMETER interaction either. On Gemini, which
+# genuinely accepts `authorization`, `x-goog-api-key` AND `?key=`, a bearer plus
+# a `?key=` passed the screen and BOTH left for Google; `?key=FIRST&key=SECOND`
+# passed and collapsed to the last value, discarding a credential the caller
+# sent. The insight was right and the implementation stopped one category short
+# of it.
+#
+# So the invariant is not about headers, and not about query parameters. It is
+# that EVERY CHANNEL A DESTINATION DECLARES IS ONE THE SCREEN CAN READ. A
+# `Provider` field naming a credential channel that no channel row reads is a
+# credential the screen cannot count, and an uncounted credential is a second
+# secret on the wire. Both sides are DISCOVERED — the fields from the dataclass,
+# the channels from the table — so a sixth channel added next year fails the
+# build without anyone remembering this file exists.
+# ---------------------------------------------------------------------------
+
+def _provider_credential_fields(tree: ast.Module) -> set[str]:
+    """Every ``Provider`` field whose name declares a credential channel."""
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == "Provider":
+            return {
+                stmt.target.id
+                for stmt in node.body
+                if isinstance(stmt, ast.AnnAssign)
+                and isinstance(stmt.target, ast.Name)
+                and stmt.target.id.startswith("credential_")
+            }
+    return set()
+
+
+def _channel_rows(tree: ast.Module) -> list[ast.Call]:
+    """Every ``CredentialChannel(...)`` row of the module-level channel table."""
+    for node in tree.body:
+        # Annotated or bare: the table carries a type annotation today, and a
+        # discovery that only understood one spelling would report an empty
+        # table — which reads exactly like a clean run.
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        elif isinstance(node, ast.Assign):
+            targets = node.targets
+        else:
+            continue
+        if not any(isinstance(t, ast.Name) and t.id == "CREDENTIAL_CHANNELS"
+                   for t in targets):
+            continue
+        value = node.value
+        if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
+            return [e for e in value.elts
+                    if isinstance(e, ast.Call)
+                    and isinstance(e.func, ast.Name)
+                    and e.func.id == "CredentialChannel"]
+    return []
+
+
+def _channel_argument(call: ast.Call, position: int, keyword: str) -> str | None:
+    """A ``CredentialChannel`` argument, positional or keyword, as a name."""
+    node = None
+    for kw in call.keywords:
+        if kw.arg == keyword:
+            node = kw.value
+    if node is None and len(call.args) > position:
+        node = call.args[position]
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return node.id
+    return None
+
+
+def _channelled_fields(rows: list[ast.Call]) -> set[str]:
+    return {
+        name for name in
+        (_channel_argument(row, 2, "provider_field") for row in rows)
+        if name is not None
+    }
+
+
+def _violations_channel_coverage(declared: set[str], channelled: set[str]) -> list[str]:
+    bad = []
+    uncounted = sorted(declared - channelled)
+    if uncounted:
+        bad.append(
+            f"Provider declares credential channel(s) {uncounted} that no "
+            f"CredentialChannel row reads; a channel the screen cannot read is a "
+            f"credential it cannot count, and an uncounted credential is a "
+            f"second secret on the wire — this is the shape that let a bearer "
+            f"and a ?key= both reach Google"
+        )
+    orphan = sorted(channelled - declared)
+    if orphan:
+        bad.append(
+            f"CredentialChannel row(s) name provider field(s) {orphan} that "
+            f"Provider does not declare; the screen would read nothing there"
+        )
+    return bad
+
+
+def test_inv10_every_declared_credential_channel_is_counted(tree):
+    declared = _provider_credential_fields(tree)
+    assert len(declared) >= 2, (
+        f"discovered only {sorted(declared)} credential fields on Provider — the "
+        f"discovery is looking in the wrong place, which is indistinguishable "
+        f"from a clean run"
+    )
+    rows = _channel_rows(tree)
+    assert len(rows) >= 2, (
+        f"discovered only {len(rows)} credential channel rows — discovery failure"
+    )
+    assert _violations_channel_coverage(declared, _channelled_fields(rows)) == []
+
+
+def test_inv10_negative_self_test():
+    """The exact pre-fix shape — a query channel nothing counts — is reported."""
+    pre_fix = _violations_channel_coverage(
+        {"credential_headers", "credential_query_params"},
+        {"credential_headers"},
+    )
+    assert pre_fix, "the invariant does not catch the defect that earned it"
+    assert "credential_query_params" in pre_fix[0]
+
+    # A channel row pointing at a field that does not exist is the other error.
+    assert _violations_channel_coverage({"credential_headers"},
+                                        {"credential_headers", "credential_cookies"})
+
+    # Control row: matched sets are clean, so the check discriminates.
+    assert _violations_channel_coverage(
+        {"credential_headers", "credential_query_params"},
+        {"credential_headers", "credential_query_params"},
+    ) == []
+
+
+def test_inv10_channel_rows_are_parsed_from_the_real_module(tree):
+    """
+    The table above is only worth anything if the parse found the real rows.
+    Pins what each row must carry, so a row that silently loses its
+    provider_field cannot read as coverage.
+    """
+    rows = _channel_rows(tree)
+    names = {_channel_argument(row, 0, "name") for row in rows}
+    assert names == {"header", "query"}, f"channel names discovered: {sorted(names)}"
+    for row in rows:
+        assert _channel_argument(row, 2, "provider_field"), (
+            f"a CredentialChannel row at line {row.lineno} names no provider_field"
+        )
+        assert _channel_argument(row, 1, "vocabulary"), (
+            f"a CredentialChannel row at line {row.lineno} names no vocabulary"
+        )
+
+
+# ---------------------------------------------------------------------------
+# INV-11 — the multiplicity decision is taken over the CHANNEL TABLE, never
+#          over one channel's contents
+# ---------------------------------------------------------------------------
+# INV-10 says every channel is readable. This says the decision actually reads
+# them: the function that refuses a second credential must derive its count by
+# iterating the table, and must not reach into any single channel's vocabulary
+# directly — reaching into one is what a per-channel rule looks like, and a
+# per-channel rule is blind to the interaction between channels by construction.
+
+def _function_defs(tree: ast.Module) -> dict[str, ast.AST]:
+    return {
+        node.name: node for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
+def _called_names(node: ast.AST) -> set[str]:
+    return {
+        inner.func.id for inner in ast.walk(node)
+        if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name)
+    }
+
+
+def _decision_closure(tree: ast.Module, deny_constant: str) -> list[ast.AST]:
+    """
+    Every module-level function reachable from the one that returns
+    ``deny_constant`` — the whole of the code that takes that decision.
+    """
+    defs = _function_defs(tree)
+    roots = [
+        node for node in defs.values()
+        if any(isinstance(inner, ast.Return)
+               and isinstance(inner.value, ast.Name)
+               and inner.value.id == deny_constant
+               for inner in ast.walk(node))
+    ]
+    seen: dict[str, ast.AST] = {}
+    frontier = list(roots)
+    while frontier:
+        node = frontier.pop()
+        name = getattr(node, "name", None)
+        if name in seen:
+            continue
+        if name is not None:
+            seen[name] = node
+        for called in _called_names(node):
+            if called in defs and called not in seen:
+                frontier.append(defs[called])
+    return list(seen.values())
+
+
+def _iterates(node: ast.AST, table_name: str) -> bool:
+    """Does this function iterate ``table_name`` — as a for-loop or a comprehension?"""
+    for inner in ast.walk(node):
+        iterated = None
+        if isinstance(inner, (ast.For, ast.AsyncFor)):
+            iterated = inner.iter
+        elif isinstance(inner, ast.comprehension):
+            iterated = inner.iter
+        if isinstance(iterated, ast.Name) and iterated.id == table_name:
+            return True
+    return False
+
+
+def _violations_multiplicity_shape(
+    closure: list[ast.AST], table_name: str, channel_vocabularies: set[str]
+) -> list[str]:
+    bad = []
+    if not closure:
+        return ["no function returns the multiplicity deny code at all — "
+                "discovery failure, which is indistinguishable from a clean run"]
+    if not any(_iterates(node, table_name) for node in closure):
+        bad.append(
+            f"nothing on the multiplicity decision path iterates {table_name}; "
+            f"a count taken over one channel cannot see a credential arriving on "
+            f"another, which is how a bearer and a ?key= were both forwarded"
+        )
+    for node in closure:
+        used = {
+            inner.id for inner in ast.walk(node)
+            if isinstance(inner, ast.Name) and inner.id in channel_vocabularies
+        }
+        if used:
+            bad.append(
+                f"{getattr(node, 'name', '?')} reaches into channel "
+                f"vocabular(ies) {sorted(used)} directly instead of going "
+                f"through {table_name}; that is a per-channel rule, and a "
+                f"per-channel rule is blind to the interaction between channels"
+            )
+    return bad
+
+
+def test_inv11_the_multiplicity_decision_spans_every_channel(tree):
+    rows = _channel_rows(tree)
+    vocabularies = {
+        name for name in (_channel_argument(row, 1, "vocabulary") for row in rows)
+        if name is not None
+    }
+    assert len(vocabularies) >= 2, (
+        f"discovered only {sorted(vocabularies)} channel vocabularies — "
+        f"discovery failure"
+    )
+    closure = _decision_closure(tree, "DENY_MULTIPLE_CREDENTIALS")
+    assert closure, "no multiplicity decision found — discovery failure"
+    assert _violations_multiplicity_shape(
+        closure, "CREDENTIAL_CHANNELS", vocabularies) == []
+
+
+def test_inv11_negative_self_test():
+    """The exact pre-fix screen must be reported, and each fault separately."""
+    pre_fix = ast.parse(
+        "def _credential_header_counts(request):\n"
+        "    seen = {}\n"
+        "    for raw_key, _ in request.headers.raw:\n"
+        "        key = raw_key.decode('latin-1').lower()\n"
+        "        if key in _CREDENTIAL_HEADERS:\n"
+        "            seen[key] = seen.get(key, 0) + 1\n"
+        "    return seen\n"
+        "def _screen_credentials(request, provider):\n"
+        "    counts = _credential_header_counts(request)\n"
+        "    if len(counts) > 1:\n"
+        "        return DENY_MULTIPLE_CREDENTIALS\n"
+        "    return None\n"
+    )
+    vocabularies = {"_CREDENTIAL_HEADERS", "_CREDENTIAL_QUERY_PARAMS"}
+    violations = _violations_multiplicity_shape(
+        _decision_closure(pre_fix, "DENY_MULTIPLE_CREDENTIALS"),
+        "CREDENTIAL_CHANNELS", vocabularies,
+    )
+    assert violations, "the invariant does not catch the defect that earned it"
+    assert any("iterates CREDENTIAL_CHANNELS" in v for v in violations)
+    assert any("_CREDENTIAL_HEADERS" in v for v in violations)
+
+    # A screen that iterates the table but still reaches into one channel.
+    half_fixed = ast.parse(
+        "def _screen_credentials(request, provider):\n"
+        "    n = 0\n"
+        "    for channel in CREDENTIAL_CHANNELS:\n"
+        "        n += len(channel.read(request))\n"
+        "    if any(k in _CREDENTIAL_HEADERS for k in request.headers.raw):\n"
+        "        return DENY_MULTIPLE_CREDENTIALS\n"
+        "    return None\n"
+    )
+    assert _violations_multiplicity_shape(
+        _decision_closure(half_fixed, "DENY_MULTIPLE_CREDENTIALS"),
+        "CREDENTIAL_CHANNELS", vocabularies,
+    )
+
+    # A module where nothing takes the decision at all is a discovery failure,
+    # not a pass.
+    assert _violations_multiplicity_shape([], "CREDENTIAL_CHANNELS", vocabularies)
+
+    # Control row: the shipped shape is clean, so the check discriminates.
+    ok = ast.parse(
+        "def _credential_presentations(request):\n"
+        "    found = []\n"
+        "    for channel in CREDENTIAL_CHANNELS:\n"
+        "        for name in channel.read(request):\n"
+        "            if name in channel.vocabulary:\n"
+        "                found.append((channel.name, name))\n"
+        "    return found\n"
+        "def _screen_credentials(request, provider):\n"
+        "    if len(_credential_presentations(request)) > 1:\n"
+        "        return DENY_MULTIPLE_CREDENTIALS\n"
+        "    return None\n"
+    )
+    assert _violations_multiplicity_shape(
+        _decision_closure(ok, "DENY_MULTIPLE_CREDENTIALS"),
+        "CREDENTIAL_CHANNELS", vocabularies,
+    ) == []
+
+
+# ---------------------------------------------------------------------------
+# INV-12 — a credential channel is read through a MULTIPLICITY-PRESERVING
+#          accessor, everywhere in this module
+# ---------------------------------------------------------------------------
+# `?key=FIRST&key=SECOND` reached Google as SECOND alone, because
+# `dict(request.query_params)` keeps the last of any repeated name. That is the
+# same mechanism as the `Authorization` last-wins defect round 1 fixed, in
+# another spelling, and it is invisible to any rule stated in terms of WHICH
+# names are credentials — the credential was recognised; the second copy of it
+# was thrown away before anyone counted.
+#
+# So: every read of the caller's headers or query string in this module goes
+# through the accessor that keeps repeats. A screen cannot count what the reader
+# already discarded.
+
+#: object -> the ONLY accessors that preserve repeats. An allow-list, never a
+#: deny-list: a deny-list fails open on the next accessor anyone reaches for.
+MULTIPLICITY_PRESERVING = {
+    "headers": {"raw"},
+    "query_params": {"multi_items"},
+}
+
+
+def _caller_input_reads(tree: ast.Module) -> list[tuple[int, str, str]]:
+    """Every ``request.<headers|query_params>.<accessor>`` in the module."""
+    found = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        parent = node.value
+        if not (isinstance(parent, ast.Attribute)
+                and parent.attr in MULTIPLICITY_PRESERVING
+                and isinstance(parent.value, ast.Name)
+                and parent.value.id == "request"):
+            continue
+        found.append((node.lineno, parent.attr, node.attr))
+    return found
+
+
+def _collapsing_conversions(tree: ast.Module) -> list[tuple[int, str]]:
+    """``dict(request.headers)`` / ``dict(request.query_params)``."""
+    found = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "dict"
+                and node.args):
+            continue
+        arg = node.args[0]
+        if (isinstance(arg, ast.Attribute)
+                and arg.attr in MULTIPLICITY_PRESERVING
+                and isinstance(arg.value, ast.Name)
+                and arg.value.id == "request"):
+            found.append((node.lineno, arg.attr))
+    return found
+
+
+def _violations_multiplicity_preserving(tree: ast.Module) -> list[str]:
+    bad = []
+    for lineno, obj, accessor in _caller_input_reads(tree):
+        if accessor not in MULTIPLICITY_PRESERVING[obj]:
+            bad.append(
+                f"line {lineno}: request.{obj}.{accessor} collapses repeats; a "
+                f"second copy of a credential is discarded before anything can "
+                f"count it. Use "
+                f"{'/'.join(sorted(MULTIPLICITY_PRESERVING[obj]))}"
+            )
+    for lineno, obj in _collapsing_conversions(tree):
+        bad.append(
+            f"line {lineno}: dict(request.{obj}) keeps the LAST of any repeated "
+            f"name — this is exactly how ?key=FIRST&key=SECOND became SECOND"
+        )
+    return bad
+
+
+def test_inv12_caller_input_is_read_multiplicity_preserving(tree):
+    reads = _caller_input_reads(tree)
+    assert len(reads) >= 4, (
+        f"discovered only {len(reads)} reads of the caller's headers/query "
+        f"string — the discovery is looking in the wrong place, which is "
+        f"indistinguishable from a clean run"
+    )
+    assert {obj for _l, obj, _a in reads} == set(MULTIPLICITY_PRESERVING), (
+        "both caller-input channels must be read somewhere in this module; "
+        "finding only one means the scan is blind to the other"
+    )
+    assert _violations_multiplicity_preserving(tree) == []
+
+
+def test_inv12_negative_self_test():
+    """Every pre-fix spelling must be reported, and the shipped one must not."""
+    keys = ast.parse("names = request.query_params.keys()")
+    assert _violations_multiplicity_preserving(keys)
+
+    items = ast.parse("pairs = request.headers.items()")
+    assert _violations_multiplicity_preserving(items)
+
+    conversion = ast.parse("params = dict(request.query_params)")
+    violations = _violations_multiplicity_preserving(conversion)
+    assert violations
+    assert "SECOND" in violations[0]
+
+    header_conversion = ast.parse("h = dict(request.headers)")
+    assert _violations_multiplicity_preserving(header_conversion)
+
+    # Control rows: the shipped spellings are clean, so the check discriminates.
+    assert _violations_multiplicity_preserving(
+        ast.parse("for k, _ in request.headers.raw:\n    pass\n")
+    ) == []
+    assert _violations_multiplicity_preserving(
+        ast.parse("for k, v in request.query_params.multi_items():\n    pass\n")
+    ) == []
