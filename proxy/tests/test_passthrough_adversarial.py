@@ -202,12 +202,12 @@ async def test_allowed_gemini_path_forwards_to_exact_url():
     with capture_upstream(json_response({"candidates": []})) as log:
         resp = await asgi_request(
             app, "POST", "/v1beta/models/gemini-2.5-flash:generateContent",
-            query_string=b"key=AIzaSyTESTTESTTESTTESTTESTTESTTEST",
+            query_string=b"key=NOT-A-REAL-CREDENTIAL-google-fixture",
         )
     assert resp.status == 200
     assert str(log.last.url) == (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        "gemini-2.5-flash:generateContent?key=AIzaSyTESTTESTTESTTESTTESTTESTTEST"
+        "gemini-2.5-flash:generateContent?key=NOT-A-REAL-CREDENTIAL-google-fixture"
     )
 
 
@@ -680,7 +680,7 @@ async def test_no_credential_is_attached_to_a_refused_destination():
         resp = await asgi_request(
             app, "POST", "/proxy/grok/v1/audio/../../admin/keys",
             headers=[("authorization", "Bearer CALLER-SECRET"),
-                     ("x-api-key", "sk-ant-CALLERKEYCALLERKEYCALLERKEY")],
+                     ("x-api-key", "NOT-A-REAL-CREDENTIAL-caller-fixture")],
         )
     assert resp.status == 400
     assert log.count == 0
