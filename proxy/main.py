@@ -41,6 +41,111 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def _record_key_load_posture(audit_writer, profiles_dir: Path, profile_router) -> str:
+    """
+    Run step 1b's key load and receipt the decision it reaches, whichever it is.
+
+    Returns the ``receipt_status`` of the record written for the branch taken —
+    ``"enqueued"`` or ``"unavailable"``, never ``"recorded"``: ``AuditWriter`` is
+    fire-and-forget and cannot acknowledge that anything landed.
+
+    Extracted from the lifespan body so the decision has one testable entry point
+    rather than living inside a 100-line startup coroutine that only a running
+    app can exercise. ``audit_writer`` is a PARAMETER, which is the whole point:
+    the writer is built before this is called and there is no arrangement of this
+    function in which it is not.
+    """
+    from proxy.audit.decision_journal import (
+        KEY_LOAD_KEY_PRECONFIGURED,
+        KEY_LOAD_LOADER_ERROR,
+        KEY_LOAD_NO_API_KEY,
+        KEY_LOAD_NO_ENCRYPTED_PROFILES,
+        KEY_SOURCE_NONE,
+        KEY_SOURCE_PRECONFIGURED,
+        REVOCATION_NOT_APPLICABLE,
+        build_key_load_record,
+        emit,
+    )
+
+    enc_files = list(profiles_dir.glob("*.yaml.enc"))
+    hosted_url = os.getenv(
+        "ARKHEIA_HOSTED_URL",
+        "https://arkheia-proxy-production.up.railway.app",
+    )
+
+    if not enc_files:
+        return await emit(audit_writer, build_key_load_record(
+            outcome=KEY_LOAD_NO_ENCRYPTED_PROFILES,
+            key_source=KEY_SOURCE_NONE,
+            revocation_state=REVOCATION_NOT_APPLICABLE,
+            encrypted_profile_count=0,
+        ))
+
+    if profile_router._decryption_key:
+        return await emit(audit_writer, build_key_load_record(
+            outcome=KEY_LOAD_KEY_PRECONFIGURED,
+            key_source=KEY_SOURCE_PRECONFIGURED,
+            revocation_state=REVOCATION_NOT_APPLICABLE,
+            key=profile_router._decryption_key,
+            encrypted_profile_count=len(enc_files),
+        ))
+
+    api_key = os.getenv("ARKHEIA_API_KEY", "")
+    if not api_key:
+        logger.warning(
+            "Encrypted profiles found but no ARKHEIA_API_KEY — "
+            "set key or provide decryption_key"
+        )
+        return await emit(audit_writer, build_key_load_record(
+            outcome=KEY_LOAD_NO_API_KEY,
+            key_source=KEY_SOURCE_NONE,
+            revocation_state=REVOCATION_NOT_APPLICABLE,
+            hosted_url=hosted_url,
+            encrypted_profile_count=len(enc_files),
+        ))
+
+    try:
+        from proxy.crypto.profile_crypto import DynamicKeyLoader
+        loader = DynamicKeyLoader(
+            hosted_url=hosted_url,
+            api_key=api_key,
+            # The rail, at construction. fetch_key() is async, so unlike the
+            # router's synchronous load_all() it receipts its decision AT the
+            # moment it is taken — receipt_deferred_ms is ~0 for this record and
+            # the field proves it rather than the comment.
+            audit_writer=audit_writer,
+        )
+        key = await loader.fetch_key()
+        if key:
+            profile_router.set_decryption_key(key)
+            await profile_router.flush_decision_journal()
+            logger.info(
+                "Decryption key loaded — %d encrypted profiles available",
+                profile_router.loaded_count,
+            )
+        else:
+            logger.warning(
+                "Could not fetch decryption key — encrypted profiles unavailable"
+            )
+        # fetch_key() has already written its own record naming the source and
+        # the revocation state; re-emitting here would double-count the decision.
+        # Report the status IT got, rather than asserting one.
+        return loader.last_receipt_status
+    except Exception as exc:
+        logger.warning(
+            "DynamicKeyLoader failed (continuing without encrypted profiles): %s",
+            exc,
+        )
+        return await emit(audit_writer, build_key_load_record(
+            outcome=KEY_LOAD_LOADER_ERROR,
+            key_source=KEY_SOURCE_NONE,
+            revocation_state=REVOCATION_NOT_APPLICABLE,
+            hosted_url=hosted_url,
+            encrypted_profile_count=len(enc_files),
+            error_type=type(exc).__name__,
+        ))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ----------------------------------------------------------------
@@ -52,6 +157,55 @@ async def lifespan(app: FastAPI):
 
     logger.info("Arkheia Enterprise Proxy starting up")
 
+    # ----------------------------------------------------------------
+    # 0. Audit writer -- FIRST, because everything below it DECIDES.
+    #
+    # This used to be step 3. That ordering was the root cause of F20's
+    # receipted axis failing: the profile router (step 1) decides whether each
+    # encrypted profile authenticated, and the key loader (step 1b) decides
+    # which key to trust and from where — both of them before any writer
+    # existed to record them. A missing call site is a bug; a missing writer is
+    # a structure that makes the call site impossible.
+    #
+    # Nothing below the writer's own construction is needed to build it: it
+    # takes a path and a retention window from settings, and its background
+    # drain task only needs the running loop. So the fix is genuinely just to
+    # move it, not to add a second rail.
+    #
+    # Enforced by tests/test_f20_profile_key_floor.py::INV-1, which fails the
+    # build if a future edit puts a decision site above the writer again.
+    # ----------------------------------------------------------------
+    audit_writer = AuditWriter(
+        log_path=settings.audit.log_path,
+        retention_days=settings.audit.retention_days,
+    )
+    await audit_writer.start()
+
+    # Startup tamper-evidence self-check: walk the audit log's hash chain and
+    # surface any break. This wires AuditWriter.verify_chain() to a live call
+    # site so the tamper-evident chain is actually validated on boot rather than
+    # only ever computed on write. Fail-open — an integrity check must never
+    # block startup (consistent with the audit pipeline's non-blocking design).
+    #
+    # It runs HERE, before the first record of this boot is enqueued, so a break
+    # it reports is a break inherited from a previous run rather than one this
+    # process might have introduced.
+    try:
+        chain = audit_writer.verify_chain()
+        if not chain.get("ok", True):
+            logger.warning(
+                "Audit hash-chain integrity check FAILED on startup: "
+                "%d record(s) verified, %d break(s) detected — possible tampering",
+                chain.get("verified", 0), len(chain.get("breaks", [])),
+            )
+        else:
+            logger.info(
+                "Audit hash-chain integrity OK on startup (%d record(s) verified)",
+                chain.get("verified", 0),
+            )
+    except Exception as exc:  # fail-open: never block startup on the self-check
+        logger.warning("Audit hash-chain startup self-check skipped: %s", exc)
+
     # 1. Profile router -- loads all YAML profiles
     profiles_dir = Path(settings.detection.profile_dir)
     if not profiles_dir.is_dir():
@@ -61,7 +215,16 @@ async def lifespan(app: FastAPI):
             profiles_dir,
         )
         raise RuntimeError(f"Cannot start: required directory/config missing")
-    profile_router = ProfileRouter(settings.detection.profile_dir)
+    profile_router = ProfileRouter(
+        settings.detection.profile_dir,
+        # The rail, at construction. load_all() runs inside __init__ and is
+        # synchronous, so each per-profile authentication decision is journalled
+        # with its true decided_at and drained below; every record carries
+        # receipt_deferred_ms so the gap between deciding and enqueueing is a
+        # number a reader can see, not a claim they have to take on trust.
+        audit_writer=audit_writer,
+    )
+    await profile_router.flush_decision_journal()
     logger.info("Loaded %d profiles from %s",
                 profile_router.loaded_count, settings.detection.profile_dir)
     if profile_router.loaded_count == 0:
@@ -82,72 +245,20 @@ async def lifespan(app: FastAPI):
             settings.detection.profile_dir,
         )
 
-    # 1b. Dynamic key loading for encrypted profiles
-    enc_files = list(profiles_dir.glob("*.yaml.enc"))
-    if enc_files and not profile_router._decryption_key:
-        api_key = os.getenv("ARKHEIA_API_KEY", "")
-        if api_key:
-            try:
-                from proxy.crypto.profile_crypto import DynamicKeyLoader
-                loader = DynamicKeyLoader(
-                    hosted_url=os.getenv(
-                        "ARKHEIA_HOSTED_URL",
-                        "https://arkheia-proxy-production.up.railway.app",
-                    ),
-                    api_key=api_key,
-                )
-                key = await loader.fetch_key()
-                if key:
-                    profile_router.set_decryption_key(key)
-                    logger.info(
-                        "Decryption key loaded — %d encrypted profiles available",
-                        profile_router.loaded_count,
-                    )
-                else:
-                    logger.warning(
-                        "Could not fetch decryption key — encrypted profiles unavailable"
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "DynamicKeyLoader failed (continuing without encrypted profiles): %s",
-                    exc,
-                )
-        else:
-            logger.warning(
-                "Encrypted profiles found but no ARKHEIA_API_KEY — "
-                "set key or provide decryption_key"
-            )
+    # ----------------------------------------------------------------
+    # 1b. Dynamic key loading for encrypted profiles.
+    #
+    # EVERY branch here is a decision about which key this process will trust,
+    # and every branch now leaves a row — including the two that are not
+    # failures. "This deployment has no encrypted profiles and never fetched a
+    # key" is the branch that actually fires in production today (0 of 60
+    # profiles are encrypted), and a governance plane that only hears about the
+    # exotic branches cannot tell a dormant control from a working one.
+    # ----------------------------------------------------------------
+    await _record_key_load_posture(audit_writer, profiles_dir, profile_router)
 
     # 2. Detection engine
     engine = DetectionEngine(profile_router)
-
-    # 3. Audit writer
-    audit_writer = AuditWriter(
-        log_path=settings.audit.log_path,
-        retention_days=settings.audit.retention_days,
-    )
-    await audit_writer.start()
-
-    # Startup tamper-evidence self-check: walk the audit log's hash chain and
-    # surface any break. This wires AuditWriter.verify_chain() to a live call
-    # site so the tamper-evident chain is actually validated on boot rather than
-    # only ever computed on write. Fail-open — an integrity check must never
-    # block startup (consistent with the audit pipeline's non-blocking design).
-    try:
-        chain = audit_writer.verify_chain()
-        if not chain.get("ok", True):
-            logger.warning(
-                "Audit hash-chain integrity check FAILED on startup: "
-                "%d record(s) verified, %d break(s) detected — possible tampering",
-                chain.get("verified", 0), len(chain.get("breaks", [])),
-            )
-        else:
-            logger.info(
-                "Audit hash-chain integrity OK on startup (%d record(s) verified)",
-                chain.get("verified", 0),
-            )
-    except Exception as exc:  # fail-open: never block startup on the self-check
-        logger.warning("Audit hash-chain startup self-check skipped: %s", exc)
 
     # 4. Registry client (only if API key configured)
     registry_client = RegistryClient(
