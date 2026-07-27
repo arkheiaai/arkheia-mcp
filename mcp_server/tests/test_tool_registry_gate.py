@@ -37,6 +37,8 @@ PASSING CRITERIA
   12. LATE REGISTRATION: the public REGISTRY name is a read-only view, so a
       policy cannot be added or widened after the startup coverage self-check.
   13. ALIAS EVASION: no alternative spelling of an allowed tool name resolves.
+  14. network_egress is enforced at cloud-provider boundaries, so flipping it
+      to False refuses before a prompt can leave the process.
 """
 
 from __future__ import annotations
@@ -57,6 +59,7 @@ from mcp_server.tool_registry import (
     ToolPolicy,
     assert_registry_covers,
     check,
+    require_network_egress,
 )
 
 # The nine tools this server is expected to expose. Hard-coded on purpose: a set
@@ -227,10 +230,7 @@ class TestAllowDecision:
         assert not deploying, f"tools granted DEPLOY: {deploying}"
 
     def test_expected_egress_posture_is_pinned_exactly(self):
-        """network_egress is NOT enforced (named in the floor's KNOWN_UNENFORCED).
-        Pinning the declared values still has value: it is the evidence a reviewer
-        reads, and a silent flip of a local-only tool to egress-permitted should
-        be visible even while the field is inert."""
+        """Pin the declared local/cloud split per tool."""
         expected_no_egress = {
             "arkheia_audit_log",
             "run_ollama",
@@ -624,6 +624,26 @@ class TestPolicyControlsAreEnforced:
             assert "human confirmation" in exc.value.reason, name
             assert check(name, human_confirmed=True).name == name
 
+    def test_network_egress_can_refuse_a_cloud_provider_boundary(self):
+        policy = ToolPolicy(
+            name="run_grok",
+            permissions=[Permission.READ, Permission.EXECUTE],
+            network_egress=False,
+        )
+        with pytest.raises(PolicyViolation) as exc:
+            require_network_egress(policy, provider="xai")
+        assert exc.value.tool_name == "run_grok"
+        assert "network egress" in exc.value.reason
+        assert "xai" in exc.value.reason
+
+    def test_network_egress_allows_when_policy_permits_it(self):
+        policy = ToolPolicy(
+            name="run_grok",
+            permissions=[Permission.READ, Permission.EXECUTE],
+            network_egress=True,
+        )
+        assert require_network_egress(policy, provider="xai") is None
+
 
 # ---------------------------------------------------------------------------
 # 7 — advertised identifiers, exercised VERBATIM under two transports
@@ -919,4 +939,35 @@ class TestRefusalContract:
             f"{tool_name} called its provider despite the policy denial — the "
             f"refusal would be cosmetic and the prompt would already have left "
             f"the process"
+        )
+
+    @pytest.mark.parametrize(
+        ("tool_name", "provider_attr"),
+        [
+            ("run_grok", "call_grok"),
+            ("run_gemini", "call_gemini"),
+            ("run_together", "call_together"),
+        ],
+    )
+    async def test_cloud_provider_egress_policy_refuses_before_calling_provider(
+        self, tool_name, provider_attr, registry_sandbox, monkeypatch
+    ):
+        called = []
+
+        async def _tripwire(*a, **k):
+            called.append(1)
+            return {"response": "leaked", "model": "m", "prompt_hash": "0"}
+
+        registry_sandbox[tool_name] = replace(
+            REGISTRY[tool_name],
+            network_egress=False,
+        )
+        monkeypatch.setattr(srv, provider_attr, _tripwire)
+        monkeypatch.setattr(srv.proxy, "verify", _tripwire)
+
+        result = await getattr(srv, tool_name)(prompt="p")
+        assert result["risk_level"] == "UNKNOWN"
+        assert "network egress" in result["error"]
+        assert called == [], (
+            f"{tool_name} called its provider despite network_egress=False"
         )

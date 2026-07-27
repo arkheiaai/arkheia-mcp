@@ -8,8 +8,9 @@ the MCP tool wrapper in server.py — NOT here.
 This separation means providers.py is testable in isolation and the
 detection layer is applied consistently regardless of which provider is called.
 
-Environment variables read at call time (not import time) so the process
-can start without all keys present and pick them up when they're set:
+Provider API keys are read through a single helper at call time (not import
+time) so the process can start without all keys present and pick them up when
+they're set:
   XAI_API_KEY    — xAI / Grok
   GOOGLE_API_KEY — Google Gemini
   OLLAMA_BASE_URL — defaults to http://localhost:11434
@@ -51,6 +52,63 @@ def _err_response(model: str, prompt: str, error: str) -> dict:
     }
 
 
+def _provider_api_key(provider: str) -> str:
+    """Single read point for provider credentials."""
+    if provider == "xai":
+        return os.environ.get("XAI_API_KEY", "")
+    if provider == "google":
+        return os.environ.get("GOOGLE_API_KEY", "")
+    if provider == "together":
+        return os.environ.get("TOGETHER_API_KEY", "")
+    raise ValueError(f"unknown provider: {provider}")
+
+
+def _bearer_json_headers(api_key: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+async def _provider_post(
+    provider: str,
+    client: httpx.AsyncClient,
+    url: str,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Single outbound HTTP chokepoint for provider calls."""
+    return await client.post(url, **kwargs)
+
+
+def _provider_exception_reason(exc: BaseException) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx.ConnectError):
+        return "connection_error"
+    return exc.__class__.__name__
+
+
+def _provider_failure(
+    function_name: str,
+    model: str,
+    prompt: str,
+    exc: BaseException,
+) -> dict:
+    reason = _provider_exception_reason(exc)
+    logger.error(
+        "%s: provider call failed with %s for model=%s",
+        function_name,
+        exc.__class__.__name__,
+        model,
+    )
+    return _err_response(model, prompt, reason)
+
+
+def _parse_failure(function_name: str, model: str, prompt: str) -> dict:
+    logger.error("%s: unexpected response shape for model=%s", function_name, model)
+    return _err_response(model, prompt, "parse_error")
+
+
 # ---------------------------------------------------------------------------
 # Grok (xAI) — OpenAI-compatible /v1/chat/completions
 # ---------------------------------------------------------------------------
@@ -65,18 +123,17 @@ async def call_grok(
 
     Returns: {response, model, prompt_hash, error}
     """
-    api_key = os.environ.get("XAI_API_KEY", "")
+    api_key = _provider_api_key("xai")
     if not api_key:
         return _err_response(model, prompt, "XAI_API_KEY not set")
 
     try:
         async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-            resp = await client.post(
+            resp = await _provider_post(
+                "xai",
+                client,
                 "https://api.x.ai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=_bearer_json_headers(api_key),
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
@@ -93,12 +150,13 @@ async def call_grok(
                 "usage":       data.get("usage", {}),
                 "error":       None,
             }
+    except (KeyError, IndexError, TypeError):
+        return _parse_failure("call_grok", model, prompt)
     except httpx.HTTPStatusError as e:
         logger.error("call_grok: HTTP %s for model=%s", e.response.status_code, model)
         return _err_response(model, prompt, f"http_{e.response.status_code}")
     except Exception as e:
-        logger.error("call_grok: unexpected error: %s", e)
-        return _err_response(model, prompt, str(e))
+        return _provider_failure("call_grok", model, prompt, e)
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +177,7 @@ async def call_gemini(
 
     Returns: {response, model, prompt_hash, error}
     """
-    api_key = os.environ.get("GOOGLE_API_KEY", "")
+    api_key = _provider_api_key("google")
     if not api_key:
         return _err_response(model, prompt, "GOOGLE_API_KEY not set")
 
@@ -129,7 +187,9 @@ async def call_gemini(
     )
     try:
         async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-            resp = await client.post(
+            resp = await _provider_post(
+                "google",
+                client,
                 url,
                 params={"key": api_key},
                 json={
@@ -152,15 +212,13 @@ async def call_gemini(
                 "usage":       data.get("usageMetadata", {}),
                 "error":       None,
             }
-    except (KeyError, IndexError) as e:
-        logger.error("call_gemini: unexpected response shape: %s", e)
-        return _err_response(model, prompt, f"parse_error: {e}")
+    except (KeyError, IndexError, TypeError):
+        return _parse_failure("call_gemini", model, prompt)
     except httpx.HTTPStatusError as e:
         logger.error("call_gemini: HTTP %s for model=%s", e.response.status_code, model)
         return _err_response(model, prompt, f"http_{e.response.status_code}")
     except Exception as e:
-        logger.error("call_gemini: unexpected error: %s", e)
-        return _err_response(model, prompt, str(e))
+        return _provider_failure("call_gemini", model, prompt, e)
 
 
 # ---------------------------------------------------------------------------
@@ -182,18 +240,17 @@ async def call_together(
 
     Returns: {response, model, prompt_hash, usage, error}
     """
-    api_key = os.environ.get("TOGETHER_API_KEY", "")
+    api_key = _provider_api_key("together")
     if not api_key:
         return _err_response(model, prompt, "TOGETHER_API_KEY not set")
 
     try:
         async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
-            resp = await client.post(
+            resp = await _provider_post(
+                "together",
+                client,
                 "https://api.together.xyz/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=_bearer_json_headers(api_key),
                 json={
                     "model": model,
                     "max_tokens": max_tokens,
@@ -211,12 +268,13 @@ async def call_together(
                 "usage":       data.get("usage", {}),
                 "error":       None,
             }
+    except (KeyError, IndexError, TypeError):
+        return _parse_failure("call_together", model, prompt)
     except httpx.HTTPStatusError as e:
         logger.error("call_together: HTTP %s for model=%s", e.response.status_code, model)
         return _err_response(model, prompt, f"http_{e.response.status_code}")
     except Exception as e:
-        logger.error("call_together: unexpected error: %s", e)
-        return _err_response(model, prompt, str(e))
+        return _provider_failure("call_together", model, prompt, e)
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +298,9 @@ async def call_ollama(
 
     try:
         async with httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT) as client:
-            resp = await client.post(
+            resp = await _provider_post(
+                "ollama",
+                client,
                 f"{base_url}/api/generate",
                 json={
                     "model":  model,
@@ -265,5 +325,4 @@ async def call_ollama(
         logger.error("call_ollama: HTTP %s for model=%s", e.response.status_code, model)
         return _err_response(model, prompt, f"http_{e.response.status_code}")
     except Exception as e:
-        logger.error("call_ollama: unexpected error: %s", e)
-        return _err_response(model, prompt, str(e))
+        return _provider_failure("call_ollama", model, prompt, e)

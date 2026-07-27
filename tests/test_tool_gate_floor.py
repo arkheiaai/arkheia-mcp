@@ -73,15 +73,7 @@ POLICY_CONTROL_FIELDS = ("permissions", "network_egress", "requires_human_confir
 # reason. This set is asserted EXACTLY, in both directions: adding a new
 # unenforced control is RED, and enforcing one of these without removing it from
 # here is also RED. An allowlist that can grow silently is not a floor.
-KNOWN_UNENFORCED: dict[str, str] = {
-    "network_egress": (
-        "No egress chokepoint exists in mcp_server: mcp_server/tools/providers.py "
-        "opens its own httpx client per provider, so there is nothing for the gate "
-        "to deny. Enforcing it needs a design decision on WHERE the chokepoint "
-        "lives (provider factory vs process-level cap) — deferred to David, "
-        "explicitly named in the PR that added this floor rather than left silent."
-    ),
-}
+KNOWN_UNENFORCED: dict[str, str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -323,12 +315,7 @@ def test_inv3_declared_policy_controls_have_a_production_read_site():
 
 
 def test_inv3_known_unenforced_entries_each_carry_a_reason():
-    """A deferral without a stated reason is an unnamed residual — the exact
-    defect class this sweep exists to remove."""
-    assert KNOWN_UNENFORCED, (
-        "KNOWN_UNENFORCED is empty; if every control is now enforced, delete this "
-        "test along with the dict rather than leaving a check that checks nothing."
-    )
+    """Any future deferral must carry a stated reason and name a real field."""
     thin = sorted(k for k, v in KNOWN_UNENFORCED.items() if len(v.strip()) < 40)
     assert not thin, f"KNOWN_UNENFORCED entries with no substantive reason: {thin}"
 
