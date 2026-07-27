@@ -5,7 +5,15 @@ Writes one JSONL record per detection event. Non-blocking -- uses an asyncio
 queue so writes never delay the response pipeline. Target write latency < 5ms.
 
 Security properties:
-  - Secrets redacted at the boundary before any write (see redactor.py)
+  - Secrets redacted at the boundary before any write (see redactor.py).
+    ORDER MATTERS: the record is sanitised into JSON-native, all-string
+    shapes (_sanitize_for_json) BEFORE redact() ever sees it, never after.
+    A set or an arbitrary object is invisible to the redactor (not a
+    container it descends into, not a string it can scan) -- sanitizing
+    such a value turns it INTO a new string, and a string created after
+    redaction reaches disk unscrubbed. Regression found in review
+    (2026-07-27): the first version of the non-serialisable-value fix ran
+    redact() first and shipped exactly this leak.
   - Tamper-evident hash chain: every record carries seq, prev_hash, this_hash
     so any modification or deletion is detectable by replaying the chain
   - The audit log never contains prompt or response text -- only their
@@ -81,6 +89,15 @@ def _sanitize_for_json(obj):
     Returns (sanitised_value, changed). The caller logs once, loudly, when
     `changed` is True — coercion must never be quiet either; "degrade, don't
     drop" is not "degrade, don't tell".
+
+    MUST run BEFORE redact(), never after. This function's whole job is
+    turning shapes the redactor cannot see (a ``set``, an arbitrary object)
+    into new strings it CAN see. If those new strings are produced after
+    redact() has already run, they are never scanned at all, and any secret
+    they carried reaches disk verbatim — a regression that shipped in the
+    same PR that introduced this function (2026-07-27), caught in review.
+    The caller (``_writer_loop``) always sanitises first, then redacts the
+    result.
     """
     if isinstance(obj, dict):
         changed = False
@@ -229,15 +246,22 @@ class AuditWriter:
                 continue
 
             try:
-                # 1. Redact secrets before anything touches disk
-                clean = redact(record)
-
-                # 1b. Guarantee JSON-serialisability. A value the redactor
-                #     passes through unchanged (bytes, set, ...) would
-                #     otherwise reach json.dumps() below and raise -- see
-                #     _sanitize_for_json's docstring for why this is a
-                #     "degrade, don't drop" coercion rather than a refusal.
-                clean, degraded = _sanitize_for_json(clean)
+                # 1. Guarantee JSON-serialisability FIRST -- before the
+                #    redactor ever sees the record. A `set` is not a
+                #    container the redactor descends into, and an arbitrary
+                #    object is not a string it can scan, so both pass through
+                #    `redact()` completely untouched. `_sanitize_for_json`
+                #    turns EXACTLY those two shapes into new strings (a
+                #    sorted list of the set's raw elements; a bounded
+                #    `repr()` of the object) -- and a string that is created
+                #    AFTER redaction reaches disk having never been scrubbed.
+                #    Concretely: redact({SECRET}) returns {SECRET} unchanged
+                #    (a set, not a string); only sanitizing it into
+                #    ['sk-ant-...'] makes the secret redactable at all, so
+                #    sanitizing must happen before redact() runs, not after.
+                #    (Regression found in review, 2026-07-27: sanitize-after-
+                #    redact shipped a leak in this same PR.)
+                clean, degraded = _sanitize_for_json(record)
                 if degraded:
                     logger.warning(
                         "AuditWriter: record %s contained non-JSON-serialisable "
@@ -246,25 +270,35 @@ class AuditWriter:
                         record.get("detection_id", "?"),
                     )
 
-                # 2. Compute the NEXT chain position without committing to it
+                # 2. Redact secrets before anything touches disk. Runs on the
+                #    now fully JSON-native (all-string-shaped) record, so
+                #    every string it needs to scan -- including ones that did
+                #    not exist before step 1 -- is actually visible to it.
+                clean = redact(clean)
+
+                # 3. Compute the NEXT chain position without committing to it
                 #    yet. seq/last_hash are only written into self._seq /
                 #    self._last_hash after the disk write below actually
-                #    succeeds (step 5) — a write that never lands must never
+                #    succeeds (step 6) — a write that never lands must never
                 #    consume a sequence number, or the persisted chain gets a
                 #    hole a verifier cannot tell apart from a deleted record.
                 next_seq = self._seq + 1
                 clean["seq"]       = next_seq
                 clean["prev_hash"] = self._last_hash
 
-                # 3. Compute this_hash over the clean record (no this_hash yet)
+                # 4. Compute this_hash over the FINAL, fully sanitised and
+                #    redacted record (no this_hash yet) -- this must be the
+                #    exact same object that step 5 writes to disk, or
+                #    verify_chain()'s recomputation on read-back will not
+                #    match what was actually persisted.
                 this_hash = _compute_hash(clean, self._last_hash)
                 clean["this_hash"] = this_hash
 
-                # 4. Write
+                # 5. Write
                 with open(self.log_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(clean) + "\n")
 
-                # 5. Only now commit chain state — the write above is the
+                # 6. Only now commit chain state — the write above is the
                 #    last thing that can fail before this point.
                 self._seq = next_seq
                 self._last_hash = this_hash
