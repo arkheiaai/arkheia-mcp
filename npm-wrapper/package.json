@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node bin/arkheia-mcp.js",
+    "prepack": "node scripts/build.js",
     "postinstall": "node scripts/setup.js"
   },
   "keywords": [
