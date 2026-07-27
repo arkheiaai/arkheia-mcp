@@ -1,10 +1,15 @@
 name: Security Scan
 
 on:
+  # The default branch of this repo is `master`. This workflow used to trigger on
+  # [main, staging] — branches that do not exist here — so its push/pull_request
+  # triggers could NEVER fire. It did still run weekly via `schedule` (which runs
+  # against the default branch), so it was not dead; what it could never do is
+  # GATE A COMMIT. See PR body item 1.
   push:
-    branches: [main, staging]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
   schedule:
     - cron: '0 6 * * 1'   # Every Monday at 6am UTC
   workflow_dispatch:

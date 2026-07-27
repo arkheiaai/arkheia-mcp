@@ -26,6 +26,7 @@ import os
 import socket
 import sys
 import tempfile
+import warnings
 from pathlib import Path
 
 import pytest
@@ -213,19 +214,80 @@ class TestGracefulDegradation:
 _api_key = _load_api_key()
 
 
-@pytest.mark.skipif(
-    not _api_key,
-    reason="ARKHEIA_API_KEY not available (set env var or C:\\keys\\master.env)",
+# ---------------------------------------------------------------------------
+# NOT-OBSERVED reporting
+#
+# Per ~/.claude/DONE.md floor-invariant 9(d): "an outcome that produced no
+# observation must not be counted as a success. A timeout, a crash, a skip, a
+# `None` return, an empty result set — none of these observed the thing they were
+# meant to observe... the only honest buckets are observed-good, observed-bad and
+# not-observed, and the third must be visible in the verdict."
+#
+# `warnings.warn` is used deliberately rather than relying on the skip reason:
+# pytest ALWAYS prints its "warnings summary" section under default flags,
+# whereas skip reasons only appear with `-rs`. Since this file now runs inside
+# the REQUIRED `unit-tests` context, a stage that did not run is named in the
+# gating job's output on every PR, and cannot be mistaken for a pass.
+# ---------------------------------------------------------------------------
+
+def _report_not_observed(stage: str, claim: str, why: str) -> None:
+    warnings.warn(
+        f"NOT-OBSERVED: {stage} did not run, so the claim below was neither "
+        f"confirmed nor refuted — this is NOT a pass (DONE.md floor 9(d)). "
+        f"CLAIM: {claim} REASON NOT RUN: {why}",
+        UserWarning,
+        stacklevel=1,
+    )
+
+
+HOSTED_404_CLAIM = (
+    "app.arkheia.ai/v1/detect returns 404 — hosted detection endpoint not "
+    "deployed, so paying customers with an API key but no local proxy get "
+    "UNKNOWN on every call."
 )
+
+_HOSTED_SKIP_REASON = (
+    "NOT-OBSERVED: ARKHEIA_API_KEY not available (set env var or "
+    "C:\\keys\\master.env) — the hosted-404 claim was not evaluated"
+)
+
+if not _api_key:
+    _report_not_observed(
+        stage="Stage 3 (TestHostedFallback, hosted detection fallback)",
+        claim=HOSTED_404_CLAIM,
+        why="ARKHEIA_API_KEY is not set. NOTE: this repo has NO GitHub Actions "
+            "secret named ARKHEIA_API_KEY (verified `gh secret list` empty, "
+            "2026-07-26), so this stage skips in CI unconditionally.",
+    )
+
+
+@pytest.mark.skipif(not _api_key, reason=_HOSTED_SKIP_REASON)
 class TestHostedFallback:
     """Local proxy down, but API key set. Hosted API at app.arkheia.ai should work."""
 
+    # NOTE ON `strict`: this xfail was previously `strict=True`. That was
+    # DECEPTIVE, not rigorous. `strict=True` means "fail the suite if this
+    # unexpectedly passes" — a tripwire that fires the moment hosted detection is
+    # deployed. But the mark sits under the class-level `skipif` above, and a skip
+    # short-circuits xfail evaluation, so the tripwire could never fire. Verified:
+    # the last real run (smoke-test.yml run 29727531417, 2026-07-20) reported
+    # `TestHostedFallback::test_verify_returns_real_detection SKIPPED`. A strict
+    # xfail that never evaluates reads as a rigorous check while asserting
+    # nothing, which is worse than no mark at all.
+    #
+    # `strict` is therefore removed rather than left as an unfulfillable promise.
+    # The blocked claim is instead carried by (a) HOSTED_404_CLAIM above, (b) the
+    # loud NOT-OBSERVED warning, which surfaces in the REQUIRED `unit-tests` job
+    # on every PR, and (c) tests/test_ci_enforcement_floor.py INV-4, which fails
+    # the build if any strict xfail is nested under a conditional skip again.
+    #
+    # Restoring `strict=True` is correct ONLY once this can actually run — i.e.
+    # once an ARKHEIA_API_KEY secret exists and hosted detection is deployed.
     @pytest.mark.xfail(
-        reason="BLOCKED: app.arkheia.ai/v1/detect returns 404 — hosted detection "
-               "endpoint not deployed. Paying customers with API keys but no local "
-               "proxy get UNKNOWN on every call. Must deploy hosted detection API "
-               "before removing this xfail.",
-        strict=True,
+        reason=f"BLOCKED: {HOSTED_404_CLAIM} Must deploy hosted detection API "
+               "before removing this xfail. NOT strict — see the note above: a "
+               "strict xfail under a conditional skip can never fire.",
+        strict=False,
     )
     @pytest.mark.asyncio
     async def test_verify_returns_real_detection(self):
@@ -264,10 +326,23 @@ class TestHostedFallback:
 
 _proxy_up = _port_open("127.0.0.1", 8098)
 
+# Same not-observed treatment as Stage 3 (sibling instance of the same class of
+# defect — a skip that reads as a pass). This stage skips in CI by construction:
+# no CI job starts the Enterprise Proxy on :8098.
+if not _proxy_up:
+    _report_not_observed(
+        stage="Stage 4 (TestLocalProxy, detection via local Enterprise Proxy)",
+        claim="Detection via a local Enterprise Proxy on :8098 returns a valid "
+              "risk level, a detection_id and a non-zero confidence.",
+        why="nothing is listening on 127.0.0.1:8098. No CI job starts the proxy, "
+            "so this stage never runs in CI.",
+    )
+
 
 @pytest.mark.skipif(
     not _proxy_up,
-    reason="Local proxy not running on port 8098",
+    reason="NOT-OBSERVED: local proxy not running on port 8098 — the local "
+           "detection path was not exercised",
 )
 class TestLocalProxy:
     """Enterprise Proxy running locally. Full detection path."""

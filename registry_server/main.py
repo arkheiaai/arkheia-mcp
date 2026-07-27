@@ -14,6 +14,7 @@ Config (env vars):
   ARKHEIA_REGISTRY_BASE_URL      -- base URL for download_url construction (default: http://localhost:8200)
   ARKHEIA_REGISTRY_PORT          -- port to listen on (default: 8200)
   ARKHEIA_REGISTRY_KEYS          -- comma-separated valid API keys (required for protected endpoints)
+  ARKHEIA_REGISTRY_AUDIT_LOG     -- auth-decision receipt log (default: ./registry_audit.jsonl)
 """
 
 import os
@@ -25,6 +26,7 @@ from typing import Optional
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import Response
 
+from registry_server import receipts
 from registry_server.auth import require_auth
 from registry_server.storage import ProfileStorage
 
@@ -43,7 +45,17 @@ async def lifespan(app: FastAPI):
     profile_dir = _get_profile_dir()
     base_url = _get_base_url()
     app.state.storage = ProfileStorage(profile_dir=profile_dir, base_url=base_url)
-    yield
+    # Auth-decision receipts. Started here so the writer's background drain
+    # task lives for the app's lifetime and is flushed on shutdown. If this
+    # raised, the server would not boot -- deliberate: a registry that cannot
+    # record who it let in should be fixed, not run silently. It does not
+    # raise in practice (AuditWriter.start only mkdirs and spawns a task), and
+    # a per-request write failure is fail-open by design (see receipts.emit).
+    await receipts.start()
+    try:
+        yield
+    finally:
+        await receipts.stop()
 
 
 app = FastAPI(

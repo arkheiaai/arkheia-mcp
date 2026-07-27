@@ -102,7 +102,23 @@ class ProxyClient:
                     json=payload,
                 )
                 resp.raise_for_status()
-                return resp.json()
+                data = resp.json()
+                # Normalise through the constructor rather than returning the
+                # proxy's body verbatim: the local proxy is a separate service on
+                # its own release cadence, so its payload is an INPUT, not the
+                # contract. Passing it through unchanged is how the local success
+                # path came to omit the transparency fields entirely.
+                return _detection_response(
+                    risk_level=data.get("risk_level", "UNKNOWN"),
+                    confidence=data.get("confidence", 0.0),
+                    features_triggered=data.get("features_triggered") or [],
+                    detection_id=data.get("detection_id"),
+                    detection_method=data.get("detection_method"),
+                    # Absent => assume limited. A proxy that does not report its
+                    # evidence depth has not told us it had full evidence.
+                    evidence_depth_limited=data.get("evidence_depth_limited", True),
+                    source="local",
+                )
         except httpx.TimeoutException:
             logger.warning("ProxyClient: /detect/verify timed out for model=%s", model_id)
             return _unavailable("proxy_timeout")
@@ -139,16 +155,16 @@ class ProxyClient:
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                # Map hosted response format to local format
-                return {
-                    "risk_level": data.get("risk", "UNKNOWN"),
-                    "confidence": data.get("confidence", 0.0),
-                    "features_triggered": data.get("features_triggered", []) or [],
-                    "detection_id": data.get("detection_id"),
-                    "detection_method": data.get("detection_method"),
-                    "evidence_depth_limited": data.get("evidence_depth_limited", True),
-                    "source": "hosted",
-                }
+                # Map hosted response format to the verdict contract.
+                return _detection_response(
+                    risk_level=data.get("risk", "UNKNOWN"),
+                    confidence=data.get("confidence", 0.0),
+                    features_triggered=data.get("features_triggered") or [],
+                    detection_id=data.get("detection_id"),
+                    detection_method=data.get("detection_method"),
+                    evidence_depth_limited=data.get("evidence_depth_limited", True),
+                    source="hosted",
+                )
         except httpx.TimeoutException:
             logger.warning("ProxyClient: hosted /v1/detect timed out for model=%s", model_id)
             return _unavailable("hosted_timeout")
@@ -203,14 +219,80 @@ class ProxyClient:
             return _empty_log("proxy_error")
 
 
-def _unavailable(error: str) -> dict:
-    """Standard UNKNOWN response when detection is unreachable."""
+# ---------------------------------------------------------------------------
+# The verdict shape — ONE constructor, every return path.
+#
+# Why a constructor and not a dict literal per path: the transparency fields
+# (`detection_method`, `evidence_depth_limited`, `source`) were added to the
+# hosted SUCCESS path only. Every other return path — the local success path and
+# all eight degraded paths — kept its own literal and silently omitted them, so a
+# fail-open UNKNOWN reached MCP callers with `evidence_depth_limited` ABSENT.
+# A caller reading `result.get("evidence_depth_limited")` got None, which is
+# falsy, which reads as "full evidence" — the exact inversion this field exists
+# to prevent.
+#
+# Per-path literals drift because omission is invisible. A single constructor
+# makes the field set a property of the module rather than of each author:
+# a new return path cannot omit a field without deleting it here, and
+# `tests/test_proxy_client.py::TestVerdictShapeParity` asserts every discovered
+# return path routes through this function.
+# ---------------------------------------------------------------------------
+
+#: The complete verdict contract. Every dict returned by a ProxyClient detection
+#: path has exactly these keys — present, even when the value is None.
+DETECTION_FIELDS = (
+    "risk_level",
+    "confidence",
+    "features_triggered",
+    "detection_id",
+    "detection_method",
+    "evidence_depth_limited",
+    "source",
+    "error",
+)
+
+
+def _detection_response(
+    *,
+    source: str,
+    risk_level: str = "UNKNOWN",
+    confidence: float = 0.0,
+    features_triggered: Optional[list] = None,
+    detection_id: Optional[str] = None,
+    detection_method: Optional[str] = None,
+    evidence_depth_limited: bool = True,
+    error: Optional[str] = None,
+) -> dict:
+    """
+    Build a detection verdict. The ONLY place a verdict dict is constructed.
+
+    Defaults are the *honest degraded* values: UNKNOWN at zero confidence with
+    no features and `evidence_depth_limited=True`. A path that measured nothing
+    therefore says so by default, and a path that measured something has to
+    state that explicitly. The inverse defaulting (assume full evidence) is what
+    lets an unmeasured verdict pass as a measured one.
+    """
     return {
-        "risk_level": "UNKNOWN",
-        "confidence": 0.0,
-        "features_triggered": [],
+        "risk_level": risk_level,
+        "confidence": confidence,
+        "features_triggered": list(features_triggered or []),
+        "detection_id": detection_id,
+        "detection_method": detection_method,
+        "evidence_depth_limited": bool(evidence_depth_limited),
+        "source": source,
         "error": error,
     }
+
+
+def _unavailable(error: str) -> dict:
+    """
+    Standard UNKNOWN verdict when detection is unreachable.
+
+    `source="unavailable"` because no backend produced this verdict — naming the
+    attempted backend here would read as "local/hosted scored it". Which path
+    failed is carried by `error` (`proxy_timeout` vs `hosted_timeout`, ...).
+    """
+    return _detection_response(source="unavailable", error=error)
 
 
 def _empty_log(error: str) -> dict:

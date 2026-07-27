@@ -127,6 +127,40 @@ class TestProfileValidator:
         assert passed is True
         assert "no smoke test" in reason
 
+    def test_smoke_test_incomplete_does_not_pass(self, validator):
+        """
+        RED (sibling of the integrity.py empty-manifest defect, 2026-07-27): a
+        smoke_test block that DECLARES itself (unlike test_no_smoke_test_passes,
+        where the key is absent entirely) but is missing response/expected_risk
+        must not read as a pass. profiles/schema.yaml requires all three fields
+        together -- a smoke_test present with fields missing is a malformed
+        declared check, not the absence of one, and
+        `if not response or not expected_risk: return True` was exactly the
+        `if not items: return True` vacuous-truth shape: nothing to compare, so
+        it defaulted to "passed".
+        """
+        profile = dict(VALID_PROFILE)
+        profile["smoke_test"] = {"prompt": "What is 2+2?"}  # no response/expected_risk
+        passed, reason = validator.run_smoke_test(profile)
+        assert passed is False, reason
+
+    def test_smoke_test_inconclusive_does_not_pass(self, validator):
+        """
+        RED, sibling framing: a smoke test that ran but for which
+        classify_with_profile computed ZERO features (features_used == 0, so it
+        returns None) must not silently read as a pass either. "Could not
+        determine" is absence of evidence, not evidence of a pass.
+        """
+        profile = dict(VALID_PROFILE)
+        profile["detection"] = {"features": {}}  # no features configured -> None
+        profile["smoke_test"] = {
+            "prompt": "What is 2+2?",
+            "response": "Four.",
+            "expected_risk": "LOW",
+        }
+        passed, reason = validator.run_smoke_test(profile)
+        assert passed is False, reason
+
 
 # ---------------------------------------------------------------------------
 # RegistryClient tests
