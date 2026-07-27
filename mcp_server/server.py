@@ -176,6 +176,7 @@ async def run_grok(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        usage=provider_result.get("usage"),
     )
     logger.info(
         "run_grok: model=%s risk=%s confidence=%.2f",
@@ -222,6 +223,7 @@ async def run_gemini(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        usage=provider_result.get("usage"),
     )
     logger.info(
         "run_gemini: model=%s risk=%s confidence=%.2f",
@@ -271,6 +273,7 @@ async def run_ollama(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        output_tokens=provider_result.get("eval_count"),
     )
     logger.info(
         "run_ollama: model=%s risk=%s confidence=%.2f",
@@ -322,6 +325,7 @@ async def run_together(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        usage=provider_result.get("usage"),
     )
     logger.info(
         "run_together: model=%s risk=%s confidence=%.2f",

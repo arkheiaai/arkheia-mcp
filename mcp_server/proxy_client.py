@@ -10,7 +10,7 @@ Failures surface as UNKNOWN risk with error field set.
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
@@ -48,6 +48,9 @@ class ProxyClient:
         response: str,
         model_id: str,
         session_id: Optional[str] = None,
+        usage: Optional[dict[str, Any]] = None,
+        output_tokens: Any = None,
+        is_function_call: Any = None,
     ) -> dict:
         """
         Detect fabrication in a model response.
@@ -57,7 +60,15 @@ class ProxyClient:
         """
         # Try local proxy first (if last attempt didn't fail with ConnectError)
         if self._local_available:
-            result = await self._verify_local(prompt, response, model_id, session_id)
+            result = await self._verify_local(
+                prompt,
+                response,
+                model_id,
+                session_id,
+                usage=usage,
+                output_tokens=output_tokens,
+                is_function_call=is_function_call,
+            )
             if result.get("error") not in ("proxy_unavailable", "proxy_timeout"):
                 return result
             # Local proxy down -- fall through to hosted
@@ -85,6 +96,9 @@ class ProxyClient:
         response: str,
         model_id: str,
         session_id: Optional[str] = None,
+        usage: Optional[dict[str, Any]] = None,
+        output_tokens: Any = None,
+        is_function_call: Any = None,
     ) -> dict:
         """POST /detect/verify on local Enterprise Proxy."""
         payload = {
@@ -94,6 +108,12 @@ class ProxyClient:
         }
         if session_id:
             payload["session_id"] = session_id
+        if usage is not None:
+            payload["usage"] = usage
+        if output_tokens is not None:
+            payload["output_tokens"] = output_tokens
+        if is_function_call is not None:
+            payload["is_function_call"] = is_function_call
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:

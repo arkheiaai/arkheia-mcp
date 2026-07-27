@@ -14,7 +14,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
@@ -41,6 +41,12 @@ class VerifyRequest(BaseModel):
     response: str
     model_id: str
     session_id: Optional[str] = None
+    # Optional structural provider metadata. `output_tokens` is usage metadata,
+    # not derived from the response body; it is what makes the empty-output gate
+    # live without inspecting prompt/response content.
+    output_tokens: Any = None
+    is_function_call: Any = None
+    usage: Optional[dict[str, Any]] = None
 
 
 class VerifyResponse(BaseModel):
@@ -186,6 +192,21 @@ def _signal(
     return verify
 
 
+def _output_tokens_from_usage(usage: Optional[dict[str, Any]]) -> Any:
+    if not isinstance(usage, dict):
+        return None
+    for key in (
+        "output_tokens",
+        "completion_tokens",
+        "candidatesTokenCount",
+        "eval_count",
+        "response_tokens",
+    ):
+        if key in usage:
+            return usage[key]
+    return None
+
+
 @router.post("/detect/verify", response_model=VerifyResponse)
 async def detect_verify(req: VerifyRequest, request: Request, http_response: Response):
     """
@@ -217,7 +238,13 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
             await audit.write(_audit_record(r, req, "pass"))
         return _signal(http_response, r, "pass", "advise")
 
-    if not req.response:
+    output_tokens = (
+        req.output_tokens
+        if req.output_tokens is not None
+        else _output_tokens_from_usage(req.usage)
+    )
+
+    if not req.response and output_tokens is None:
         r = _unknown(model_id=req.model_id, error="response_empty")
         if audit:
             await audit.write(_audit_record(r, req, "pass"))
@@ -230,7 +257,13 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
         return _signal(http_response, r, "pass", "advise")
 
     try:
-        result = await engine.verify(req.prompt, req.response, req.model_id)
+        result = await engine.verify(
+            req.prompt,
+            req.response,
+            req.model_id,
+            output_tokens=output_tokens,
+            is_function_call=req.is_function_call,
+        )
     except Exception as e:
         logger.error("Detection engine error for model=%s: %s", req.model_id, e)
         r = _unknown(model_id=req.model_id, error="engine_error")

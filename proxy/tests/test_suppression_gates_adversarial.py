@@ -463,20 +463,36 @@ class TestTokenCountIsActuallyAWordCount:
 # 6. WHAT NEITHER GATE CAN REACH TODAY
 # ===========================================================================
 
-class TestTheEmptyOutputGateIsUnreachableInThisRepo:
-    """HONEST SCOPE. Nothing in arkheia-mcp ever writes `output_tokens` (or
-    `is_function_call`) into a signals dict: `extract_structural_features` does not
-    produce them and `DetectionEngine.verify` does not add them. So on every in-repo
-    path the empty-output gate is dead code and the mode gate's function-call arm never
-    fires — the only live suppression is the token/word-count arm.
+class TestExplicitMetadataMakesTheGateReachable:
+    """HONEST SCOPE. `output_tokens` is now reachable through explicit request/provider
+    metadata only. The detector still must not infer it from response text, because
+    "empty string" and "provider usage says zero output tokens" are different facts."""
 
-    That is why the adversarial cases above are proven at the FUNCTION boundary: the
-    values are unreachable through today's callers but the gate is a shared,
-    proxy-parity component that other builders feed. This test states the reachability
-    so nobody reads a green suite as 'the vector is live and defended'.
-    """
+    @pytest.mark.asyncio
+    async def test_engine_uses_explicit_zero_output_metadata(self):
+        from proxy.detection.engine import DetectionEngine
 
-    def test_no_in_repo_caller_populates_output_tokens_or_is_function_call(self):
+        class Router:
+            def get(self, _model):
+                return UNGATED_PROFILE
+
+        result = await DetectionEngine(Router()).verify(
+            "prompt",
+            "",
+            "test-model",
+            output_tokens=0,
+        )
+        assert result.risk_level == "LOW"
+        assert result.detection_method == "empty_output_suppressed"
+        assert result.gate_reason == "output_tokens_below_1"
+
+    def test_response_text_extraction_still_produces_neither_metadata_signal(self):
+        from proxy.detection.features import extract_structural_features
+        f = extract_structural_features("a b c d e", token_count=5)
+        assert "output_tokens" not in f
+        assert "is_function_call" not in f
+
+    def test_only_ingress_paths_populate_output_tokens_or_is_function_call(self):
         import re
         offenders = []
         for path in sorted(_REPO_ROOT.rglob("*.py")):
@@ -486,6 +502,12 @@ class TestTheEmptyOutputGateIsUnreachableInThisRepo:
                 continue
             if rel == "proxy/detection/features.py":
                 continue
+            if rel in {
+                "proxy/detection/engine.py",
+                "proxy/endpoints/detect.py",
+                "mcp_server/proxy_client.py",
+            }:
+                continue
             text = path.read_text(encoding="utf-8", errors="replace")
             for key in ("output_tokens", "is_function_call"):
                 # An ASSIGNMENT into a signals-shaped mapping, not a read.
@@ -494,12 +516,7 @@ class TestTheEmptyOutputGateIsUnreachableInThisRepo:
                    re.search(rf'''["']{key}["']\s*:''', text):
                     offenders.append(f"{rel}:{key}")
         assert offenders == [], (
-            "A caller now populates a gate signal. The unreachability note in this "
-            f"class is stale and the adversarial cases became LIVE: {offenders}"
+            "A new path now populates suppression metadata. Either route it through the "
+            "explicit /detect/verify metadata contract, or update this floor with a "
+            f"new reviewed ingress: {offenders}"
         )
-
-    def test_extract_structural_features_produces_neither(self):
-        from proxy.detection.features import extract_structural_features
-        f = extract_structural_features("a b c d e", token_count=5)
-        assert "output_tokens" not in f
-        assert "is_function_call" not in f
