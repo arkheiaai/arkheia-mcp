@@ -12,40 +12,6 @@ const CONFIG_FILE_NAME = "config.json";
 const ARKHEIA_DIR_MODE = 0o700;
 const ARKHEIA_CONFIG_MODE = 0o600;
 
-const CLAUDE_MD_MARKERS = [
-  "Fabrication Detection - Arkheia",
-  "Fabrication Detection — Arkheia",
-];
-
-const CLAUDE_MD_SECTION = `
-# Fabrication Detection - Arkheia
-
-This project uses Arkheia for runtime fabrication detection.
-The \`arkheia_verify\` MCP tool is available in every conversation.
-
-## Verification Protocol
-
-Before presenting any substantive response to the user:
-1. Call \`arkheia_verify\` with the model name, prompt, and response
-2. Check the \`risk\` field in the result
-
-### Risk Handling
-- **LOW**: Present normally
-- **MEDIUM**: Present with caveat: "Detection flagged medium confidence on this response. Key claims should be verified."
-- **HIGH**: Do not present as-is. Investigate the specific claims against known sources. If claims cannot be verified, regenerate or escalate to the user with the detection result.
-
-### Sub-Agent Outputs
-When spawning background agents or parallel workers:
-- Verify each agent's output independently before merging
-- A HIGH risk from any agent blocks the merge until investigated
-- Log all detection results for audit
-
-### What NOT to Do
-- Do not skip verification because the response "looks correct"
-- Do not suppress HIGH findings; the user needs to know
-- Do not retry the same prompt expecting a different risk score; the fingerprint is consistent
-`;
-
 function homeDir(env = process.env) {
   return env.HOME || env.USERPROFILE || "/tmp";
 }
@@ -67,10 +33,6 @@ function truthy(value) {
 function parseOptions(argv = process.argv.slice(2), env = process.env) {
   return {
     dryRun: argv.includes("--dry-run") || truthy(env.ARKHEIA_SETUP_DRY_RUN),
-    installClaudeMd:
-      argv.includes("--install-claude-md") ||
-      truthy(env.ARKHEIA_INSTALL_CLAUDE_MD) ||
-      truthy(env.npm_config_arkheia_install_claude_md),
   };
 }
 
@@ -155,29 +117,6 @@ function checkPython() {
   return null;
 }
 
-function installClaudeMd(options = {}) {
-  const home = options.home || homeDir(options.env);
-  const { claudeDir, claudeMdPath } = pathsForHome(home);
-
-  if (options.dryRun) {
-    return { changed: false, dryRun: true, claudeMdPath };
-  }
-
-  if (fs.existsSync(claudeMdPath)) {
-    const existing = fs.readFileSync(claudeMdPath, "utf-8");
-    if (CLAUDE_MD_MARKERS.some((marker) => existing.includes(marker))) {
-      return { changed: false, dryRun: false, claudeMdPath };
-    }
-  }
-
-  if (!fs.existsSync(claudeDir)) {
-    fs.mkdirSync(claudeDir, { recursive: true });
-  }
-
-  fs.appendFileSync(claudeMdPath, CLAUDE_MD_SECTION, "utf-8");
-  return { changed: true, dryRun: false, claudeMdPath };
-}
-
 function main() {
   const options = parseOptions();
   const python = checkPython();
@@ -231,24 +170,13 @@ function main() {
   `);
   }
 
-  if (options.installClaudeMd) {
-    const result = installClaudeMd(options);
-    const action = result.dryRun ? "Would install" : result.changed ? "Installed" : "Already installed";
-    console.log(`  [arkheia] ${action} Claude protocol at ${result.claudeMdPath}`);
-  } else {
-    const { claudeMdPath } = pathsForHome(homeDir());
-    console.log(
-      `  [arkheia] Global Claude instructions not modified. ` +
-        `Set ARKHEIA_INSTALL_CLAUDE_MD=1 to append ${claudeMdPath}.`
-    );
-  }
+  console.log("  [arkheia] Global Claude instructions not modified by postinstall.");
 }
 
 module.exports = {
   ARKHEIA_CONFIG_MODE,
   ARKHEIA_DIR_MODE,
   checkApiKey,
-  installClaudeMd,
   main,
   parseOptions,
   pathsForHome,

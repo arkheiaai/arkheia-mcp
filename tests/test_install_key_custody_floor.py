@@ -30,9 +30,7 @@ def _base_env(home: Path, *, api_key: str | None = PRIMARY_VALUE) -> dict[str, s
     env.pop("APPDATA", None)
     env.pop(PERSIST_ENV, None)
     env.pop("ARKHEIA_SETUP_DRY_RUN", None)
-    env.pop("ARKHEIA_INSTALL_CLAUDE_MD", None)
     env.pop("npm_config_arkheia_persist_api_key", None)
-    env.pop("npm_config_arkheia_install_claude_md", None)
     env.pop("ARKHEIA_INSTALL_TEST_FAIL_AFTER_WRITE", None)
     if api_key is None:
         env.pop(KEY_ENV, None)
@@ -166,17 +164,14 @@ def test_npm_persist_opt_in_is_noop_for_api_key_storage(tmp_path: Path):
 def test_npm_dry_run_writes_nothing_even_with_opt_ins(tmp_path: Path):
     result = _run_setup(
         tmp_path,
-        env_extra={
-            PERSIST_ENV: "1",
-            "ARKHEIA_INSTALL_CLAUDE_MD": "1",
-        },
+        env_extra={PERSIST_ENV: "1"},
         args=["--dry-run"],
     )
 
     assert PRIMARY_VALUE not in _combined(result)
     assert not (tmp_path / ".arkheia").exists()
     assert not (tmp_path / ".claude").exists()
-    assert "Would install Claude protocol" in result.stdout
+    assert "Global Claude instructions not modified" in result.stdout
 
 
 def test_install_sh_dry_run_writes_nothing_and_does_not_echo_key(tmp_path: Path):
