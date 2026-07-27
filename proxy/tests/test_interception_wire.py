@@ -297,18 +297,33 @@ class TestPathConfinement:
         makes. If the resolved path leaves ``/v1/``, the decision was made about
         a different request than the one that was sent — with the caller's
         ``Authorization`` attached to the escape.
+
+        TIGHTENED (round 2). This assertion used to read ``forwarded == [] or
+        not forwarded[-1].target.startswith(escaped)`` — a permissive ``OR``,
+        the same shape as the ``status >= 500 or b"upstream" in body`` this
+        branch shipped and the campaign caught. Two ways it was weak: a request
+        forwarded to a DIFFERENT escaped path satisfies the second disjunct, and
+        a proxy that had stopped forwarding anything at all satisfies the first
+        while proving nothing. Each fact is now asserted separately, and the
+        refusal itself is asserted rather than inferred from an absence.
         """
         upstream, _ = sinks
         n0 = len(upstream.requests)
-        _, status, hdrs, _ = raw_request(
+        _, status, hdrs, body = raw_request(
             proxy.port, target, body=BODY,
             extra_headers=[("Authorization", "Bearer CALLER-SECRET")],
         )
         forwarded = upstream.requests[n0:]
-        assert forwarded == [] or not forwarded[-1].target.startswith(escaped), (
-            f"{target!r} was forwarded to {forwarded[-1].target!r} — it escaped "
-            f"the /v1/ prefix that authorised interception"
+        assert forwarded == [], (
+            f"{target!r} was forwarded to "
+            f"{[r.target for r in forwarded]!r} — it escaped the /v1/ prefix "
+            f"that authorised interception"
         )
+        assert status == 400, f"the escape was not refused; status={status}"
+        assert json.loads(body)["deny_code"] in (
+            "path_escapes_prefix", "unsafe_path_encoding"
+        ), f"refused without a classified deny code: {body!r}"
+        assert resp_header(hdrs, "x-arkheia-risk") == "REFUSED"
 
     def test_escaped_request_does_not_carry_the_caller_credential(
         self, proxy, sinks

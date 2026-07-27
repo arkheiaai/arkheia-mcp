@@ -836,6 +836,34 @@ class TestForwardHeadersAreAnAllowList:
             ]))
         assert exc.value.deny_code == "duplicate_credential_header"
 
+    def test_a_duplicated_credential_THIS_PROXY_NEVER_FORWARDS_still_refuses(self):
+        """
+        THE ordering case that actually distinguishes the two designs, found by
+        the mutation campaign: moving the duplicate check AFTER the allow-list
+        SURVIVED, because ``authorization`` / ``x-api-key`` / ``api-key`` are
+        all forwardable and so still reach the check either way.
+
+        ``proxy-authorization`` is the one that is not. It is a credential
+        addressed to THIS hop, so it is never forwarded — and under the moved
+        check it would never be examined either, so two of them would be
+        silently tolerated. Which credential applies is exactly as ambiguous as
+        it is for ``authorization``, and the ambiguity is at the door of the
+        proxy's own auth layer rather than the provider's.
+        """
+        with _pytest.raises(InterceptionRefusal) as exc:
+            _forward_headers(self._headers([
+                ("proxy-authorization", "Basic LEGIT"),
+                ("proxy-authorization", "Basic ATTACKER"),
+            ]))
+        assert exc.value.deny_code == "duplicate_credential_header"
+
+    def test_control_a_single_unforwarded_credential_is_not_refused(self):
+        """The refusal is about DUPLICATION, not about the header existing."""
+        assert _forward_headers(self._headers([
+            ("proxy-authorization", "Basic ONLY-ONE"),
+            ("content-type", "application/json"),
+        ])) == [("content-type", "application/json")]
+
 
 class TestReceiptStatusIsDerivedNotAsserted:
     """
@@ -951,6 +979,15 @@ class TestReceiptStatusIsDerivedNotAsserted:
 
 
 class TestFailSafeDefaults:
+    """
+    Every case here supplies the EARNED gate (``gate_action="block"``) on
+    purpose. Since the gate became a required conjunct, an unearned profile
+    stops a block on its own — so a test that left the gate at ``advise`` would
+    go green no matter what the policy default was, and the fail-safe would be
+    invisible. The mutation campaign said exactly that: M43 (the absent-policy
+    default flipped from ``warn`` to ``block``) SURVIVED once the gate landed,
+    because nothing was left holding the block open for the policy to decide.
+    """
 
     async def test_a_config_with_no_high_risk_action_warns_rather_than_blocks(self):
         """
@@ -959,18 +996,23 @@ class TestFailSafeDefaults:
         that never configured a policy silently starts withholding answers —
         and every test that sets the action explicitly would still be green.
         """
-        app, _ = build(risk="HIGH")
+        app, _ = build(risk="HIGH", gate_action="block")
         del app.state.settings.detection.high_risk_action
         async with client(app) as c:
             r = await c.post("/v1/chat/completions", json=REQ)
         assert r.headers["x-arkheia-action"] == "warn"
+        assert r.headers["x-arkheia-policy-action"] == "warn", (
+            "the policy default is not 'warn', so an unconfigured deployment "
+            "withholds answers"
+        )
         assert b"arkheia_blocked" not in r.content
         assert r.content == UPSTREAM_BODY
 
     async def test_a_missing_detection_config_also_warns(self):
-        app, _ = build(risk="HIGH")
+        app, _ = build(risk="HIGH", gate_action="block")
         del app.state.settings.detection
         async with client(app) as c:
             r = await c.post("/v1/chat/completions", json=REQ)
         assert r.headers["x-arkheia-action"] == "warn"
+        assert r.headers["x-arkheia-policy-action"] == "warn"
         assert b"arkheia_blocked" not in r.content
