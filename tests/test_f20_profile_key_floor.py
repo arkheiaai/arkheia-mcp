@@ -167,7 +167,12 @@ def _constant_names(tree: ast.Module) -> dict[str, str]:
 
 #: Constructions/calls in the lifespan that TAKE a governed decision. Each must
 #: appear after the writer. Discovered by name in the AST, not by line matching.
-DECISION_SITES = ("ProfileRouter", "DynamicKeyLoader", "_record_key_load_posture")
+DECISION_SITES = ("ProfileRouter", "DynamicKeyLoader", "_resolve_profile_key")
+
+#: The sites the lifespan MUST contain. Without this, a rename drops a site from
+#: DECISION_SITES silently and the ordering check becomes a permanent pass over a
+#: shrinking population — the "looked in the wrong place" failure of v1.19.
+REQUIRED_IN_LIFESPAN = ("ProfileRouter", "_resolve_profile_key")
 
 
 def _lifespan_ordering(tree: ast.Module) -> tuple[int | None, dict[str, int]]:
@@ -211,6 +216,12 @@ def test_inv1_audit_writer_is_constructed_before_every_decision_site():
     assert sites, (
         "no governed decision site found inside lifespan(). Expected at least one "
         f"of {DECISION_SITES}. A scan that examines nothing cannot clear anything."
+    )
+    missing = [name for name in REQUIRED_IN_LIFESPAN if name not in sites]
+    assert not missing, (
+        f"the lifespan no longer calls {missing}. Either the site moved out of "
+        f"lifespan() or it was renamed and this list was not — and a renamed site "
+        f"is one this ordering check silently stops looking for."
     )
 
     late = {name: line for name, line in sites.items() if line < writer_line}

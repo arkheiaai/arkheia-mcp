@@ -18,6 +18,7 @@ load_dotenv(find_dotenv(usecwd=True), override=True)
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI
@@ -41,18 +42,66 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-async def _record_key_load_posture(audit_writer, profiles_dir: Path, profile_router) -> str:
+def _preconfigured_profile_key() -> Optional[bytes]:
     """
-    Run step 1b's key load and receipt the decision it reaches, whichever it is.
+    A profile-decryption key this installation pins at deploy time, if any.
 
-    Returns the ``receipt_status`` of the record written for the branch taken —
-    ``"enqueued"`` or ``"unavailable"``, never ``"recorded"``: ``AuditWriter`` is
-    fire-and-forget and cannot acknowledge that anything landed.
+    Returns ``None`` today: no configuration surface supplies one, and inventing
+    an env var that carries raw key material is not a change to make in passing.
+    The seam is real rather than decorative — ``ProfileRouter(decryption_key=...)``
+    is a supported construction and an enterprise install may pin one — and it has
+    to be consulted HERE, before the router is built, because the router's first
+    ``load_all()`` is the thing whose verdict the key changes.
+
+    It replaces the previous ``if profile_router._decryption_key:`` test, which
+    was equally unreachable from this lifespan (nothing ever passed a key to the
+    router) and, worse, could only be evaluated AFTER the load it was meant to
+    inform.
+    """
+    return None
+
+
+async def _resolve_profile_key(
+    audit_writer,
+    profiles_dir: Path,
+    preconfigured_key: Optional[bytes] = None,
+) -> tuple[Optional[bytes], str]:
+    """
+    Decide which key this process will trust, receipt that decision, and return
+    the key — **before any profile is loaded**.
+
+    Returns ``(key_or_None, receipt_status)``. The status is ``"enqueued"`` or
+    ``"unavailable"``, never ``"recorded"``: ``AuditWriter`` is fire-and-forget
+    and cannot acknowledge that anything landed.
+
+    WHY THE ORDER IS THE FIX
+    -----------------------
+    This ran at step 1b, *after* ``ProfileRouter`` was constructed at step 1. The
+    router's ``__init__`` calls ``load_all()``, which — finding encrypted profiles
+    and no key — journalled ``skipped_no_key``: *these surfaces went dark*. The
+    very next statement fetched the key and every one of those surfaces
+    authenticated. A real boot wrote::
+
+        skipped_no_key  ->  fetched_from_hosted  ->  authenticated
+
+    (Codex, PR #34.) That is auditable and it is false: it records surfaces going
+    dark for a startup that never served them dark. It is the inverse of the
+    failure this flow has been chasing — the rail received a too-ALARMING value
+    rather than a too-reassuring one — and it is the same defect underneath, since
+    in both cases the record does not describe what happened. A false alarm erodes
+    an audit trail exactly as much as a false all-clear.
+
+    The fix is ORDERING, never suppression. The key decision is conclusive before
+    the router exists, so the router loads once, holding whatever key this process
+    is going to have. ``skipped_no_key`` is now journalled if and only if key
+    loading genuinely came back empty — and a keyless startup still says so.
+    ``proxy/tests/test_f20_lifespan_ordering.py`` holds both halves: the boot that
+    must NOT report dark surfaces, and the boot that must.
 
     Extracted from the lifespan body so the decision has one testable entry point
-    rather than living inside a 100-line startup coroutine that only a running
-    app can exercise. ``audit_writer`` is a PARAMETER, which is the whole point:
-    the writer is built before this is called and there is no arrangement of this
+    rather than living inside a 100-line startup coroutine that only a running app
+    can exercise. ``audit_writer`` is a PARAMETER, which is the whole point: the
+    writer is built before this is called and there is no arrangement of this
     function in which it is not.
     """
     from proxy.audit.decision_journal import (
@@ -74,19 +123,19 @@ async def _record_key_load_posture(audit_writer, profiles_dir: Path, profile_rou
     )
 
     if not enc_files:
-        return await emit(audit_writer, build_key_load_record(
+        return preconfigured_key, await emit(audit_writer, build_key_load_record(
             outcome=KEY_LOAD_NO_ENCRYPTED_PROFILES,
             key_source=KEY_SOURCE_NONE,
             revocation_state=REVOCATION_NOT_APPLICABLE,
             encrypted_profile_count=0,
         ))
 
-    if profile_router._decryption_key:
-        return await emit(audit_writer, build_key_load_record(
+    if preconfigured_key:
+        return preconfigured_key, await emit(audit_writer, build_key_load_record(
             outcome=KEY_LOAD_KEY_PRECONFIGURED,
             key_source=KEY_SOURCE_PRECONFIGURED,
             revocation_state=REVOCATION_NOT_APPLICABLE,
-            key=profile_router._decryption_key,
+            key=preconfigured_key,
             encrypted_profile_count=len(enc_files),
         ))
 
@@ -96,7 +145,7 @@ async def _record_key_load_posture(audit_writer, profiles_dir: Path, profile_rou
             "Encrypted profiles found but no ARKHEIA_API_KEY — "
             "set key or provide decryption_key"
         )
-        return await emit(audit_writer, build_key_load_record(
+        return None, await emit(audit_writer, build_key_load_record(
             outcome=KEY_LOAD_NO_API_KEY,
             key_source=KEY_SOURCE_NONE,
             revocation_state=REVOCATION_NOT_APPLICABLE,
@@ -116,27 +165,20 @@ async def _record_key_load_posture(audit_writer, profiles_dir: Path, profile_rou
             audit_writer=audit_writer,
         )
         key = await loader.fetch_key()
-        if key:
-            profile_router.set_decryption_key(key)
-            await profile_router.flush_decision_journal()
-            logger.info(
-                "Decryption key loaded — %d encrypted profiles available",
-                profile_router.loaded_count,
-            )
-        else:
+        if not key:
             logger.warning(
                 "Could not fetch decryption key — encrypted profiles unavailable"
             )
         # fetch_key() has already written its own record naming the source and
         # the revocation state; re-emitting here would double-count the decision.
         # Report the status IT got, rather than asserting one.
-        return loader.last_receipt_status
+        return key, loader.last_receipt_status
     except Exception as exc:
         logger.warning(
             "DynamicKeyLoader failed (continuing without encrypted profiles): %s",
             exc,
         )
-        return await emit(audit_writer, build_key_load_record(
+        return None, await emit(audit_writer, build_key_load_record(
             outcome=KEY_LOAD_LOADER_ERROR,
             key_source=KEY_SOURCE_NONE,
             revocation_state=REVOCATION_NOT_APPLICABLE,
@@ -206,7 +248,6 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # fail-open: never block startup on the self-check
         logger.warning("Audit hash-chain startup self-check skipped: %s", exc)
 
-    # 1. Profile router -- loads all YAML profiles
     profiles_dir = Path(settings.detection.profile_dir)
     if not profiles_dir.is_dir():
         logger.error(
@@ -215,8 +256,33 @@ async def lifespan(app: FastAPI):
             profiles_dir,
         )
         raise RuntimeError(f"Cannot start: required directory/config missing")
+
+    # ----------------------------------------------------------------
+    # 1. Which key will this process trust? — BEFORE the router, because the
+    #    router's first (and now only) load_all() decides whether each encrypted
+    #    profile authenticated, and that verdict depends on holding the key.
+    #
+    #    Every branch is a decision about which key to trust and every branch
+    #    leaves a row, including the two that are not failures. "This deployment
+    #    has no encrypted profiles and never fetched a key" is the branch that
+    #    fires in production today (0 of 60 profiles are encrypted), and a
+    #    governance plane that only hears about the exotic branches cannot tell a
+    #    dormant control from a working one.
+    #
+    #    Ordering matters for a second reason, and it is the one Codex found:
+    #    when the router ran first it journalled skipped_no_key — "these surfaces
+    #    went dark" — for a startup that then fetched the key and authenticated
+    #    every surface. See _resolve_profile_key's docstring.
+    # ----------------------------------------------------------------
+    decryption_key, _key_receipt_status = await _resolve_profile_key(
+        audit_writer, profiles_dir, preconfigured_key=_preconfigured_profile_key(),
+    )
+
+    # 2. Profile router -- loads all YAML profiles, ONCE, holding the key the
+    #    step above concluded on.
     profile_router = ProfileRouter(
         settings.detection.profile_dir,
+        decryption_key=decryption_key,
         # The rail, at construction. load_all() runs inside __init__ and is
         # synchronous, so each per-profile authentication decision is journalled
         # with its true decided_at and drained below; every record carries
@@ -245,19 +311,7 @@ async def lifespan(app: FastAPI):
             settings.detection.profile_dir,
         )
 
-    # ----------------------------------------------------------------
-    # 1b. Dynamic key loading for encrypted profiles.
-    #
-    # EVERY branch here is a decision about which key this process will trust,
-    # and every branch now leaves a row — including the two that are not
-    # failures. "This deployment has no encrypted profiles and never fetched a
-    # key" is the branch that actually fires in production today (0 of 60
-    # profiles are encrypted), and a governance plane that only hears about the
-    # exotic branches cannot tell a dormant control from a working one.
-    # ----------------------------------------------------------------
-    await _record_key_load_posture(audit_writer, profiles_dir, profile_router)
-
-    # 2. Detection engine
+    # 3. Detection engine
     engine = DetectionEngine(profile_router)
 
     # 4. Registry client (only if API key configured)

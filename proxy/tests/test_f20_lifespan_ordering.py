@@ -250,16 +250,13 @@ def test_a_real_boot_with_a_preconfigured_key_receipts_a_TAMPER(
     corrupt[10] ^= 0xFF
     (profiles / "bad.yaml.enc").write_bytes(bytes(corrupt))
 
-    # Give the router the key the way an enterprise licence would: preconfigured
-    # on construction, so the boot exercises the decrypt loop for real.
+    # Give the process the key the way an enterprise licence would: pinned at
+    # deploy time, so the boot exercises the decrypt loop for real. This is the
+    # seam the lifespan actually reads — patched at the production function
+    # rather than by substituting the router class, so the branch under test is
+    # the branch that runs.
     import proxy.main as proxy_main
-    real_router_cls = proxy_main.ProfileRouter
-
-    class _KeyedRouter(real_router_cls):
-        def __init__(self, profile_dir, decryption_key=None, **kwargs):
-            super().__init__(profile_dir, decryption_key=key, **kwargs)
-
-    monkeypatch.setattr(proxy_main, "ProfileRouter", _KeyedRouter)
+    monkeypatch.setattr(proxy_main, "_preconfigured_profile_key", lambda: key)
 
     probe = booted(profiles)
 

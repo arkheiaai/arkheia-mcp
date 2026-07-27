@@ -575,16 +575,15 @@ async def test_a_deployment_with_no_encrypted_profiles_still_leaves_a_row(probe,
     in production. A control whose only evidence appears on the exotic paths is
     indistinguishable, from the outside, from a control that is switched off.
     """
-    from proxy.main import _record_key_load_posture
-    from proxy.router.profile_router import ProfileRouter
+    from proxy.main import _resolve_profile_key
 
     profiles = tmp_path / "profiles"
     profiles.mkdir()
-    router = ProfileRouter(str(profiles), audit_writer=probe.writer)
 
-    status = await _record_key_load_posture(probe.writer, profiles, router)
+    key, status = await _resolve_profile_key(probe.writer, profiles)
     await probe.writer._queue.join()
 
+    assert key is None
     assert status == RECEIPT_ENQUEUED
     rows = [r for r in probe.rows() if r["event_type"] == EVENT_KEY_LOAD]
     assert len(rows) == 1
@@ -599,8 +598,7 @@ async def test_a_deployment_with_no_encrypted_profiles_still_leaves_a_row(probe,
 
 
 async def test_encrypted_profiles_without_an_api_key_leave_a_row(probe, tmp_path, monkeypatch):
-    from proxy.main import _record_key_load_posture
-    from proxy.router.profile_router import ProfileRouter
+    from proxy.main import _resolve_profile_key
 
     profiles = tmp_path / "profiles"
     profiles.mkdir()
@@ -608,9 +606,13 @@ async def test_encrypted_profiles_without_an_api_key_leave_a_row(probe, tmp_path
     (profiles / "b.yaml.enc").write_bytes(b"y" * 64)
     monkeypatch.delenv("ARKHEIA_API_KEY", raising=False)
 
-    router = ProfileRouter(str(profiles), audit_writer=probe.writer)
-    await _record_key_load_posture(probe.writer, profiles, router)
+    key, _status = await _resolve_profile_key(probe.writer, profiles)
     await probe.writer._queue.join()
+
+    assert key is None, (
+        "no API key and no preconfigured key: the caller must be told it has "
+        "nothing to decrypt with, or the router will be built as if it had"
+    )
 
     rows = [r for r in probe.rows() if r["event_type"] == EVENT_KEY_LOAD]
     assert len(rows) == 1
@@ -621,17 +623,19 @@ async def test_encrypted_profiles_without_an_api_key_leave_a_row(probe, tmp_path
 
 
 async def test_a_preconfigured_key_is_recorded_as_such(probe, tmp_path):
-    from proxy.main import _record_key_load_posture
-    from proxy.router.profile_router import ProfileRouter
+    from proxy.main import _resolve_profile_key
 
     profiles = tmp_path / "profiles"
     profiles.mkdir()
     (profiles / "a.yaml.enc").write_bytes(b"x" * 64)
     key = _key()
 
-    router = ProfileRouter(str(profiles), decryption_key=key, audit_writer=probe.writer)
-    await _record_key_load_posture(probe.writer, profiles, router)
+    resolved, _status = await _resolve_profile_key(
+        probe.writer, profiles, preconfigured_key=key,
+    )
     await probe.writer._queue.join()
+
+    assert resolved == key, "a pinned key must be handed back, not merely recorded"
 
     rows = [r for r in probe.rows() if r["event_type"] == EVENT_KEY_LOAD]
     assert len(rows) == 1
@@ -660,10 +664,10 @@ async def test_a_loader_that_explodes_leaves_a_row_naming_the_failure(
 
     monkeypatch.setattr(pc, "DynamicKeyLoader", _Exploding)
 
-    router = ProfileRouter(str(profiles), audit_writer=probe.writer)
-    status = await proxy_main._record_key_load_posture(probe.writer, profiles, router)
+    key, status = await proxy_main._resolve_profile_key(probe.writer, profiles)
     await probe.writer._queue.join()
 
+    assert key is None
     assert status == RECEIPT_ENQUEUED
     rows = [r for r in probe.rows() if r["event_type"] == EVENT_KEY_LOAD]
     assert len(rows) == 1
