@@ -32,6 +32,7 @@ Each test names the pre-fix state it discriminates, per DONE.md v1.15.
 """
 from __future__ import annotations
 
+import dataclasses
 import gzip
 import json
 from dataclasses import dataclass
@@ -656,7 +657,7 @@ async def test_duplicate_credential_header_is_refused(route, path, credential_he
     assert log.count == 0
     body = resp.json()
     assert body["error"] == "invalid_credential_header"
-    assert body["deny_code"] == pt.DENY_DUPLICATE_CREDENTIAL
+    assert body["deny_code"] == pt.DENY_MULTIPLE_CREDENTIALS
 
 
 async def test_single_credential_header_is_forwarded_verbatim():
@@ -832,7 +833,7 @@ async def test_two_credentials_a_destination_both_accepts_is_still_refused():
             headers=[("authorization", "Bearer " + FAKE), ("x-api-key", FAKE)],
         )
     assert (resp.status, log.count) == (400, 0)
-    assert resp.json()["deny_code"] == pt.DENY_DUPLICATE_CREDENTIAL
+    assert resp.json()["deny_code"] == pt.DENY_MULTIPLE_CREDENTIALS
 
     # Control rows: EITHER alone is accepted and forwarded verbatim.
     for header in ("authorization", "x-api-key"):
@@ -1045,3 +1046,248 @@ async def test_every_deny_code_is_in_the_closed_taxonomy():
     assert codes == set(pt.DENY_TAXONOMY)
     for code, (reason, remedy) in pt.DENY_TAXONOMY.items():
         assert reason and remedy, code
+
+
+# ---------------------------------------------------------------------------
+# ADV-9 — the credential MULTIPLICITY is per destination, over every channel
+#
+# WHAT EARNED THIS (2026-07-27, second vendor — Codex, gpt-5.5)
+# ---------------------------------------------------------------------------
+# The round-2 screen counted credential HEADERS. Its own lesson had been "a
+# per-header rule cannot see a cross-header interaction", and a header count is
+# blind to a header <-> QUERY interaction in precisely the same way. Codex
+# proved both remaining shapes on Gemini — the one destination that accepts
+# three credential FORMS:
+#
+#     Authorization: Bearer …  +  ?key=…    -> 200, BOTH forwarded to Google
+#     ?key=FIRST&key=SECOND                 -> 200, SECOND forwarded, FIRST
+#                                              silently discarded
+#
+# The table below is DERIVED from `pt.PROVIDERS` x `pt.CREDENTIAL_CHANNELS`, not
+# written out: a fifth provider, a fifth credential header or a second Gemini
+# query parameter is covered the day it is added, without anyone remembering
+# this file exists. Four row kinds, and the SINGLE rows are what make it a
+# boundary rather than a ban.
+# ---------------------------------------------------------------------------
+
+#: (channel name, credential name) -> how it is placed on a request.
+def _present(channel_name: str, name: str, value: str):
+    """Return (headers, query_string) placing ONE credential on the request."""
+    if channel_name == "header":
+        return [(name, value)], b""
+    if channel_name == "query":
+        return [], f"{name}={value}".encode()
+    raise AssertionError(
+        f"unknown credential channel {channel_name!r}: this test enumerates "
+        f"channels from the module, and it does not know how to put a "
+        f"credential on this one — which means the sweep would silently skip it"
+    )
+
+
+def _combine(presentations: list[tuple[str, str, str]]):
+    headers: list[tuple[str, str]] = []
+    query: list[str] = []
+    for channel_name, name, value in presentations:
+        h, q = _present(channel_name, name, value)
+        headers += h
+        if q:
+            query.append(q.decode())
+    return headers, "&".join(query).encode()
+
+
+def _accepted_presentations(provider) -> list[tuple[str, str]]:
+    """Every (channel, name) THIS destination accepts — from the provider row."""
+    return [
+        (channel.name, name)
+        for channel in pt.CREDENTIAL_CHANNELS
+        for name in sorted(getattr(provider, channel.provider_field))
+    ]
+
+
+def _vocabulary_presentations() -> list[tuple[str, str]]:
+    """Every (channel, name) ANY destination could be sent."""
+    return [
+        (channel.name, name)
+        for channel in pt.CREDENTIAL_CHANNELS
+        for name in sorted(channel.vocabulary)
+    ]
+
+
+def _multiplicity_rows():
+    """
+    Four kinds of row, derived:
+
+      SINGLE  one accepted credential          -> 200, forwarded verbatim
+      PAIR    two DIFFERENT accepted ones      -> 400 multiple_credentials
+      REPEAT  the same accepted one, twice     -> 400 multiple_credentials
+      FOREIGN one this destination never uses  -> 400 foreign_credential
+    """
+    rows = []
+    for route_key, (_prefix, provider, _origin) in ROUTES.items():
+        accepted = _accepted_presentations(provider)
+        for channel_name, name in accepted:
+            rows.append(("SINGLE", route_key, [(channel_name, name)]))
+            rows.append(("REPEAT", route_key, [(channel_name, name),
+                                               (channel_name, name)]))
+        for i, first in enumerate(accepted):
+            for second in accepted[i + 1:]:
+                rows.append(("PAIR", route_key, [first, second]))
+        for presentation in _vocabulary_presentations():
+            if presentation not in accepted:
+                rows.append(("FOREIGN", route_key, [presentation]))
+    return rows
+
+
+MULTIPLICITY_ROWS = _multiplicity_rows()
+
+#: A derived table that derived nothing is a green check over an empty set.
+#: Lower bounds, with the reason each is knowable: four destinations must each
+#: contribute at least one SINGLE and one REPEAT, Gemini alone contributes three
+#: PAIRs (three accepted forms) and Anthropic one, and every destination has at
+#: least one credential in the vocabulary it does not accept.
+assert len([r for r in MULTIPLICITY_ROWS if r[0] == "SINGLE"]) >= 7
+assert len([r for r in MULTIPLICITY_ROWS if r[0] == "REPEAT"]) >= 7
+assert len([r for r in MULTIPLICITY_ROWS if r[0] == "PAIR"]) >= 4
+assert len([r for r in MULTIPLICITY_ROWS if r[0] == "FOREIGN"]) >= 20
+
+
+@pytest.mark.parametrize(
+    "kind,route_key,presentations",
+    MULTIPLICITY_ROWS,
+    ids=[f"{k}-{r}-" + "+".join(f"{c}:{n}" for c, n in p)
+         for k, r, p in MULTIPLICITY_ROWS],
+)
+async def test_credential_multiplicity_is_counted_per_destination(
+    kind, route_key, presentations
+):
+    """
+    Pre-fix state discriminated: every PAIR row that mixes a header with a query
+    parameter, and every REPEAT row on the query channel, was FORWARDED — the
+    screen counted headers, so neither was visible to it. The header-only PAIR
+    and REPEAT rows were already refused; they stay in the table because a fix
+    that broke them would be a regression, and because a table whose every row
+    is new cannot show that.
+    """
+    prefix, _provider, _origin = ROUTES[route_key]
+    values = [f"{FAKE}-{i}" for i in range(len(presentations))]
+    headers, query = _combine([
+        (channel, name, value)
+        for (channel, name), value in zip(presentations, values)
+    ])
+
+    app = make_app()
+    responder = json_response({"choices": [{"message": {"content": "ok"}}],
+                               "content": [], "candidates": []})
+    with capture_upstream(responder) as log:
+        resp = await asgi_request(
+            app, "POST", prefix + LEGIT_PATH[route_key],
+            headers=headers, query_string=query,
+        )
+
+    if kind == "SINGLE":
+        (channel_name, name), value = presentations[0], values[0]
+        assert resp.status == 200, (
+            f"a caller supplying exactly one credential this destination "
+            f"accepts was refused: {resp.body!r}"
+        )
+        assert log.count == 1
+        if channel_name == "header":
+            assert log.last.headers[name] == value
+        else:
+            assert log.last.url.params[name] == value
+        return
+
+    expected = (pt.DENY_FOREIGN_CREDENTIAL if kind == "FOREIGN"
+                else pt.DENY_MULTIPLE_CREDENTIALS)
+    assert resp.status == 400, f"{kind} was accepted at {route_key}: {resp.body!r}"
+    assert log.count == 0, "a refused request produced upstream traffic"
+    assert resp.json()["deny_code"] == expected
+    # Never the value, on any surface the caller or an operator reads.
+    assert not any(v in json.dumps(resp.json()) for v in values)
+
+
+async def test_every_credential_channel_the_provider_table_declares_is_counted():
+    """
+    THE SHAPE INVARIANT, one level up from the defect.
+
+    A `Provider` field naming a credential channel that no channel row reads is
+    a credential the screen cannot count — which is exactly what
+    `credential_query_params` was to a header-counting screen. Derived from the
+    dataclass, so a sixth channel added next year fails here rather than putting
+    a second secret on the wire.
+    """
+    declared = {f.name for f in dataclasses.fields(pt.Provider)
+                if f.name.startswith("credential_")}
+    assert declared, "no credential fields discovered — this check observed nothing"
+    counted = {c.provider_field for c in pt.CREDENTIAL_CHANNELS}
+    assert declared == counted, (
+        f"channels the screen does not read: {sorted(declared - counted)}; "
+        f"channels with no provider field: {sorted(counted - declared)}"
+    )
+    # And each channel's vocabulary is the superset that makes "foreign"
+    # decidable there, for every destination.
+    for channel in pt.CREDENTIAL_CHANNELS:
+        for provider in pt.PROVIDERS:
+            assert getattr(provider, channel.provider_field) <= channel.vocabulary, (
+                f"{provider.name}.{channel.provider_field} names a credential "
+                f"the {channel.name} channel's vocabulary does not recognise"
+            )
+
+
+async def test_a_repeated_ordinary_parameter_is_relayed_not_collapsed():
+    """
+    The counterpart to the refuse ruling. `dict(request.query_params)` dropped
+    the first of ANY repeated parameter, credential or not — a silent rewrite of
+    the caller's request. Credentials are refused; everything else is relayed as
+    sent.
+    """
+    app = make_app()
+    with capture_upstream() as log:
+        resp = await asgi_request(
+            app, "POST", "/proxy/grok/v1/chat/completions",
+            query_string=b"tag=alpha&tag=beta&stream=true",
+        )
+    assert resp.status == 200
+    assert log.last.url.params.get_list("tag") == ["alpha", "beta"]
+    assert log.last.url.params["stream"] == "true"
+
+
+async def test_a_repeated_ordinary_header_is_relayed_not_collapsed():
+    """The same, on the header channel: `headers.items()` kept only the last."""
+    app = make_app()
+    with capture_upstream() as log:
+        resp = await asgi_request(
+            app, "POST", "/proxy/grok/v1/chat/completions",
+            headers=[("authorization", "Bearer " + FAKE),
+                     ("accept", "application/json"),
+                     ("accept", "text/event-stream")],
+        )
+    assert resp.status == 200
+    assert log.last.headers.get_list("accept") == [
+        "application/json", "text/event-stream",
+    ]
+
+
+async def test_a_multiple_credential_refusal_names_the_way_out():
+    """
+    Gate-9 legibility for the broadened verdict. The reason must describe what
+    actually happened — the old code was named `duplicate_credential_header`,
+    which is a false statement about a bearer plus a `?key=`.
+    """
+    app = make_app()
+    with capture_upstream() as log:
+        resp = await asgi_request(
+            app, "POST", "/v1beta/" + LEGIT_PATH["gemini"],
+            headers=[("authorization", "Bearer " + FAKE)],
+            query_string=f"key={FAKE}".encode(),
+        )
+    assert (resp.status, log.count) == (400, 0)
+    body = resp.json()
+    assert body["error"] == "invalid_credential_header"
+    assert body["deny_code"] == pt.DENY_MULTIPLE_CREDENTIALS
+    assert body["deny_code"] == "multiple_credentials"
+    assert body["credential_headers"] == ["authorization", "x-goog-api-key"]
+    assert body["credential_query_params"] == ["key"]
+    assert "query parameter" in body["reason"]
+    assert body["remedy"]
+    assert FAKE not in json.dumps(body), "the refusal echoed the credential VALUE"

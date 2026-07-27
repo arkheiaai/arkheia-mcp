@@ -68,16 +68,29 @@ a key they can see in their own config is reaching a provider it never reaches.
 The same rule closes the query string, where a Google ``?key=`` addressed to the
 Grok route used to leave for api.x.ai.
 
+How MANY credentials may be addressed to a destination is a second, separate
+question, and it is counted PER DESTINATION over every channel at once (see
+``CREDENTIAL_CHANNELS``) — never per header name, and never per channel. A rule
+that counts headers is blind to a header ⇄ query-parameter interaction in
+exactly the way a rule that counted one header name was blind to two: Gemini
+accepts ``authorization``, ``x-goog-api-key`` and ``?key=``, so a bearer plus a
+``?key=`` was two credentials the header count read as one, and both left for
+Google. More than one credential for one destination is REFUSED
+(``multiple_credentials``); more than one permitted credential FORM is fine, and
+any single one of them still forwards.
+
 Security:
   - Only allowlisted headers are forwarded upstream (no cookie/internal header leak)
   - Credentials are attached per destination; a foreign credential is refused
-  - Duplicate credential headers are refused rather than silently last-wins
+  - More than one credential for one destination is refused, counted across
+    headers and query parameters together, rather than silently last-wins
   - The full RFC 9110 hop-by-hop set (plus content-length) is stripped from the
     relayed response
   - Error details are never exposed to clients
   - Every refusal is receipted to the audit rail with a deny code
 """
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -85,7 +98,7 @@ import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlsplit
 
 import httpx
@@ -211,7 +224,12 @@ DENY_PATH_NOT_ALLOWLISTED   = "path_not_allowlisted"
 DENY_PATH_TRAVERSAL         = "path_traversal"
 DENY_PATH_ILLEGAL_CHARACTER = "path_illegal_character"
 DENY_UPSTREAM_TARGET_ESCAPED = "upstream_target_escaped"
-DENY_DUPLICATE_CREDENTIAL   = "duplicate_credential_header"
+#: Renamed from ``duplicate_credential_header`` (branch-local, never released).
+#: The old name described the CHANNEL the old rule could see, and it became a
+#: false statement the moment the rule spanned channels: a bearer header plus a
+#: ``?key=`` is neither a duplicate nor two headers. A deny code that misnames
+#: what happened is a "computer says no" with the wrong receipt attached.
+DENY_MULTIPLE_CREDENTIALS   = "multiple_credentials"
 DENY_FOREIGN_CREDENTIAL     = "foreign_credential"
 
 #: deny code -> (operator-facing reason, what would clear it)
@@ -235,12 +253,15 @@ DENY_TAXONOMY: dict[str, tuple[str, str]] = {
         "request was refused before any credential was attached.",
         "Call one of the allowlisted paths listed in `allowed`.",
     ),
-    DENY_DUPLICATE_CREDENTIAL: (
-        "The request carried more than one credential header, so the credential "
-        "this proxy would forward is ambiguous.",
-        "Send exactly one credential header. Two different credential headers "
-        "are two credentials, not two spellings of one, and this proxy will not "
-        "guess which was meant for this provider.",
+    DENY_MULTIPLE_CREDENTIALS: (
+        "The request carried more than one credential for this provider — "
+        "counted across every channel a credential can arrive on, headers and "
+        "query parameters alike — so the credential this proxy would forward is "
+        "ambiguous.",
+        "Send exactly one credential, by exactly one of the channels this "
+        "provider accepts (see `credential_headers` and "
+        "`credential_query_params`). Two credentials are two credentials, not "
+        "two spellings of one, and this proxy will not guess which was meant.",
     ),
     DENY_FOREIGN_CREDENTIAL: (
         "The request carried a credential this provider does not use. It was "
@@ -253,10 +274,9 @@ DENY_TAXONOMY: dict[str, tuple[str, str]] = {
 }
 
 #: Deny codes about the caller's credentials rather than the caller's path. They
-#: share a wire error name, which was the pre-existing contract for the
-#: duplicate case.
+#: share one wire error name.
 _CREDENTIAL_DENY_CODES = frozenset({
-    DENY_DUPLICATE_CREDENTIAL, DENY_FOREIGN_CREDENTIAL,
+    DENY_MULTIPLE_CREDENTIALS, DENY_FOREIGN_CREDENTIAL,
 })
 
 
@@ -384,43 +404,123 @@ del _provider, _unknown, _unknown_params
 
 
 # ---------------------------------------------------------------------------
+# Credential channels — every way a secret can reach a destination
+# ---------------------------------------------------------------------------
+# WHAT EARNED THIS (2026-07-27, second vendor — Codex, gpt-5.5)
+#
+# The previous screen counted credential HEADERS. Its own stated lesson was that
+# "a per-header rule cannot see a cross-header interaction" — and a rule that
+# counts headers cannot see a header <-> QUERY-PARAMETER interaction either. On
+# Gemini, which genuinely accepts `authorization`, `x-goog-api-key` AND `?key=`,
+# a bearer plus a `?key=` passed the screen and BOTH left for Google; and
+# `?key=FIRST&key=SECOND` passed and collapsed to the last value in the forward
+# path, silently discarding a credential the caller sent.
+#
+# THE INVARIANT IS OVER THE SHAPE OF THE CREDENTIAL SET FOR A DESTINATION: how
+# many credentials are addressed to it, whatever channel each arrives on. Not
+# over any one channel's contents. So the channels are a TABLE, each row
+# carrying the whole of that channel's definition, and the screen iterates the
+# table rather than naming a channel.
+
+@dataclass(frozen=True)
+class CredentialChannel:
+    """
+    One way a credential can travel to a destination.
+
+    ``read`` returns EVERY occurrence, in arrival order, including repeats. That
+    is the load-bearing property: every duplicate-collapsing accessor
+    (``headers[...]``, ``dict(query_params)``, ``query_params.keys()``) turns two
+    credentials into one and hides the second from the count.
+    """
+    name: str
+    #: Every name recognisable as a credential ON THIS CHANNEL — the vocabulary
+    #: that makes "foreign" decidable, not what any one destination accepts.
+    vocabulary: frozenset
+    #: The ``Provider`` field naming what THIS destination accepts here.
+    provider_field: str
+    read: Callable[[Request], list[str]]
+    #: How a name on this channel is written in an operator-facing message.
+    label: Callable[[str], str]
+
+
+def _header_names(request: Request) -> list[str]:
+    """Every header name on the request, repeats included, from the RAW list."""
+    return [raw_key.decode("latin-1").lower() for raw_key, _ in request.headers.raw]
+
+
+def _query_param_names(request: Request) -> list[str]:
+    """Every query parameter name, repeats included."""
+    return [key.lower() for key, _ in request.query_params.multi_items()]
+
+
+CREDENTIAL_CHANNELS: tuple[CredentialChannel, ...] = (
+    CredentialChannel(
+        "header", _CREDENTIAL_HEADERS, "credential_headers",
+        _header_names, lambda name: name,
+    ),
+    CredentialChannel(
+        "query", _CREDENTIAL_QUERY_PARAMS, "credential_query_params",
+        _query_param_names, lambda name: f"?{name}",
+    ),
+)
+
+#: A ``Provider`` field that declares a credential channel but that no channel
+#: row reads is a credential the screen cannot count — the exact shape of the
+#: defect above, one level up. Derived from the dataclass, so a fifth channel
+#: field added to ``Provider`` next year raises HERE rather than forwarding a
+#: second secret. Checked again statically in the floor tier, so it also holds
+#: on a branch that never imports this module.
+_DECLARED_CREDENTIAL_FIELDS = {
+    field.name for field in dataclasses.fields(Provider)
+    if field.name.startswith("credential_")
+}
+_CHANNELLED_CREDENTIAL_FIELDS = {c.provider_field for c in CREDENTIAL_CHANNELS}
+if _DECLARED_CREDENTIAL_FIELDS != _CHANNELLED_CREDENTIAL_FIELDS:
+    raise RuntimeError(
+        "credential channel table is out of step with Provider: fields with no "
+        f"channel {sorted(_DECLARED_CREDENTIAL_FIELDS - _CHANNELLED_CREDENTIAL_FIELDS)}, "
+        f"channels with no field {sorted(_CHANNELLED_CREDENTIAL_FIELDS - _DECLARED_CREDENTIAL_FIELDS)}; "
+        "a credential channel the screen does not read cannot be counted, and "
+        "an uncounted credential is a second secret on the wire"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Forwarding gate
 # ---------------------------------------------------------------------------
 
-def _credential_header_counts(request: Request) -> dict[str, int]:
+def _credential_presentations(request: Request) -> list[tuple[str, str]]:
     """
-    How many times each credential header appears, read from the RAW headers.
+    Every credential occurrence on the request, as ``(channel, name)``.
 
-    Raw, because the mapping view collapses repeats and a dict comprehension
-    over it keeps the LAST — which is how a duplicate credential silently
-    changed which key this proxy authenticated with.
+    ONE ENTRY PER OCCURRENCE, not per distinct name: ``?key=A&key=B`` is two
+    entries, and that is what makes it countable. Values never appear.
     """
-    seen: dict[str, int] = {}
-    for raw_key, _ in request.headers.raw:
-        key = raw_key.decode("latin-1").lower()
-        if key in _CREDENTIAL_HEADERS:
-            seen[key] = seen.get(key, 0) + 1
-    return seen
+    found: list[tuple[str, str]] = []
+    for channel in CREDENTIAL_CHANNELS:
+        for name in channel.read(request):
+            if name in channel.vocabulary:
+                found.append((channel.name, name))
+    return found
+
+
+_CHANNEL_BY_NAME = {channel.name: channel for channel in CREDENTIAL_CHANNELS}
 
 
 def _foreign_credentials(request: Request, provider: Provider) -> list[str]:
     """
-    Credentials on the request that ``provider`` does not use.
+    Credentials on the request that ``provider`` does not use, on any channel.
 
     This is the cross-vendor disclosure: forwarding one of these hands a secret
     the caller issued for vendor A to vendor B, inside a request the caller
     authorised for something else entirely. Names only ever leave this function
     — never values.
     """
-    foreign = [
-        name for name in _credential_header_counts(request)
-        if name not in provider.credential_headers
-    ]
-    foreign += [
-        f"?{name}" for name in {k.lower() for k in request.query_params.keys()}
-        if name in _CREDENTIAL_QUERY_PARAMS
-        and name not in provider.credential_query_params
-    ]
+    foreign = set()
+    for channel_name, name in _credential_presentations(request):
+        channel = _CHANNEL_BY_NAME[channel_name]
+        if name not in getattr(provider, channel.provider_field):
+            foreign.add(channel.label(name))
     return sorted(foreign)
 
 
@@ -430,26 +530,41 @@ def _screen_credentials(request: Request, provider: Provider) -> Optional[str]:
     this destination uses (or none at all).
 
     THE RULE: the credential forwarded to a provider is the one that provider
-    uses, and only that one.
+    uses, and only that one — where "one" is counted PER DESTINATION, over the
+    union of every channel, never per header name and never per channel.
 
-    Three refusable shapes, and the second is the one a per-header rule cannot
-    see:
+    Two refusable shapes:
 
-      1. a credential this destination does not use            -> FOREIGN
-      2. two DIFFERENT credential headers, both usable here     -> DUPLICATE
-      3. the same credential header more than once              -> DUPLICATE
+      1. a credential this destination does not use, on any channel -> FOREIGN
+      2. more than one credential addressed to this destination     -> MULTIPLE
 
-    (1) is checked first because it is the disclosure; the others are ambiguity.
+    (1) is checked first because it is the disclosure; (2) is ambiguity. (2)
+    subsumes every shape the previous per-header rule enumerated and the two it
+    could not see:
+
+        the same header twice                    (last-wins on the header)
+        two different headers                    (both forwarded)
+        a header AND a query parameter           <- invisible to a header rule
+        the same query parameter twice           <- invisible to a header rule
+
+    RULING ON THE LAST TWO: REFUSE, exactly as for the header cases, and for the
+    same reason. Silently taking the last value (what the forward path did) or
+    the first would trade an integrity bug for an honesty bug: the caller keeps
+    a credential in their config that they believe reaches the provider and
+    which this proxy discards without a word. A refusal is legible, receipted,
+    and tells them what would clear it.
+
+    WHAT THIS DELIBERATELY DOES NOT DO: it does not refuse a destination for
+    accepting more than one credential FORM. Gemini accepts three, and any ONE
+    of them, by any channel, still forwards — see the control rows in
+    ``proxy/tests/test_passthrough_credential_wire.py``. The defect is more than
+    one AT ONCE.
     """
-    foreign = _foreign_credentials(request, provider)
-    if foreign:
+    if _foreign_credentials(request, provider):
         return DENY_FOREIGN_CREDENTIAL
 
-    counts = _credential_header_counts(request)
-    if any(n > 1 for n in counts.values()):
-        return DENY_DUPLICATE_CREDENTIAL
-    if len(counts) > 1:
-        return DENY_DUPLICATE_CREDENTIAL
+    if len(_credential_presentations(request)) > 1:
+        return DENY_MULTIPLE_CREDENTIALS
     return None
 
 
@@ -611,9 +726,11 @@ async def _receipt_refusal(
         "attempted_path": attempted_path[:_MAX_RECORDED_PATH],
         "attempted_path_sha256": hashlib.sha256(attempted_path.encode()).hexdigest(),
         "attempted_method": request.method,
-        # Header/query KEY NAMES only — never values.
-        "request_header_names": sorted({k.lower() for k in request.headers.keys()}),
-        "query_param_names": sorted(set(request.query_params.keys())),
+        # Header/query KEY NAMES only — never values. Read through the same
+        # multiplicity-preserving accessors the screen uses, so the receipt
+        # cannot describe a request the screen did not see.
+        "request_header_names": sorted(set(_header_names(request))),
+        "query_param_names": sorted(set(_query_param_names(request))),
         "client_host": request.client.host if request.client else None,
     }
 
@@ -843,6 +960,22 @@ def _filter_response_headers(upstream_headers) -> dict:
     Also honours ``Connection: <token>`` — RFC 9110 lets an origin nominate
     additional headers as connection-specific, and a proxy that ignores the
     nomination relays exactly the headers the origin asked it not to.
+
+    NOTE — A SIBLING FOUND AND DELIBERATELY NOT FIXED HERE (2026-07-27, round 3).
+    ``upstream_headers.items()`` is the same duplicate-collapsing accessor the
+    request side carried: httpx folds two ``set-cookie`` lines into
+    ``set-cookie: a=1, b=2``, which RFC 6265 s3 forbids. Measured, httpx 0.28.1:
+        Headers([("set-cookie","a=1"),("set-cookie","b=2")]).items()
+            -> [("set-cookie", "a=1, b=2")]
+        .multi_items()
+            -> [("set-cookie","a=1"), ("set-cookie","b=2")]
+    It is on the RESPONSE path, carries no credential, and closing it changes the
+    relay contract of all four endpoints (``Response(headers=...)`` takes a
+    Mapping, so the pairs would have to be written onto ``raw_headers``) and reds
+    eight PRE-EXISTING tests whose fixture hands this function a plain ``dict``
+    — the tier the mutation counterfactual is anchored on. Recorded in the
+    ledger under ``findings_recorded_not_fixed`` rather than folded into a
+    credential fix, so the scope of the change stays reviewable.
     """
     skip = set(_HOP_BY_HOP_HEADERS)
     connection_value = upstream_headers.get("connection")
@@ -857,7 +990,7 @@ def _filter_response_headers(upstream_headers) -> dict:
     }
 
 
-def _forwardable_headers(request: Request, provider: Provider) -> dict:
+def _forwardable_headers(request: Request, provider: Provider) -> list[tuple[str, str]]:
     """
     The headers that may leave, for THIS destination.
 
@@ -866,28 +999,45 @@ def _forwardable_headers(request: Request, provider: Provider) -> dict:
     not this provider's is not here, and the gate has already refused the
     request that carried one — two independent controls, so a weakening of
     either alone is not a disclosure.
+
+    A LIST, from the RAW header list, not a dict: a dict comprehension over
+    ``headers.items()`` keeps the LAST of any repeated name, which is the
+    mechanism that made a duplicate credential silently change which key this
+    proxy authenticated with. The gate refuses a repeated CREDENTIAL, so nothing
+    here depends on that; the collapse is removed anyway, because a forward path
+    that quietly rewrites the caller's request is the defect whatever field it
+    drops.
     """
     allowed = (
         _SAFE_TRANSPORT_HEADERS
         | provider.credential_headers
         | provider.extra_headers
     )
-    return {k: v for k, v in request.headers.items() if k.lower() in allowed}
+    return [
+        (raw_key.decode("latin-1"), raw_value.decode("latin-1"))
+        for raw_key, raw_value in request.headers.raw
+        if raw_key.decode("latin-1").lower() in allowed
+    ]
 
 
-def _forwardable_params(request: Request, provider: Provider) -> dict:
+def _forwardable_params(request: Request, provider: Provider) -> list[tuple[str, str]]:
     """
     The query parameters that may leave, for THIS destination.
 
     A credential-bearing parameter (``key``, ``access_token``, …) is forwarded
     only to a provider that uses it. Everything else passes: providers carry
     ordinary parameters and dropping them would break real calls.
+
+    ``multi_items()``, not ``items()``, for the reason above: ``dict(...)`` over
+    the query string relayed ``?alt=sse&alt=json`` as ``alt=json``, and relayed
+    ``?key=FIRST&key=SECOND`` as the SECOND credential alone. Repeats are the
+    caller's request; this proxy does not get to pick one.
     """
-    return {
-        k: v for k, v in request.query_params.items()
-        if k.lower() not in _CREDENTIAL_QUERY_PARAMS
-        or k.lower() in provider.credential_query_params
-    }
+    return [
+        (key, value) for key, value in request.query_params.multi_items()
+        if key.lower() not in _CREDENTIAL_QUERY_PARAMS
+        or key.lower() in provider.credential_query_params
+    ]
 
 
 async def _forward(

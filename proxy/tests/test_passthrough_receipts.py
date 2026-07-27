@@ -178,7 +178,7 @@ async def test_duplicate_credential_refusal_reaches_disk(probe):
     assert log.count == 0
     await asyncio.wait_for(probe.writer._queue.join(), timeout=5.0)
     row = probe.require(resp.json()["receipt_id"])
-    assert row["deny_code"] == pt.DENY_DUPLICATE_CREDENTIAL
+    assert row["deny_code"] == pt.DENY_MULTIPLE_CREDENTIALS
     assert row["attempted_path"] == "chat/completions"
 
 
