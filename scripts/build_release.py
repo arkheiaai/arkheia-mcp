@@ -27,6 +27,17 @@ except ImportError:
     ]
 
 
+COMPILED_ARTIFACT_GLOBS = ("*.so", "*.pyd")
+
+
+class EmptyManifest(ValueError):
+    """Raised when a build step would emit an integrity manifest with no modules."""
+
+
+class UnrecordedModule(ValueError):
+    """Raised when a configured compiled module is absent from all manifests."""
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build the Arkheia release artifacts")
     parser.add_argument(
@@ -96,7 +107,22 @@ def step_generate_manifest(module_dir: Path, output_path: Path | None = None) ->
     print(f"\n=== Step 3: Generate integrity manifest ({module_dir}) ===")
     manifest_path = output_path or module_dir / "integrity_manifest.json"
     manifest = generate_manifest(module_dir, manifest_path)
+
+    if not manifest:
+        if manifest_path.exists():
+            manifest_path.unlink()
+        raise EmptyManifest(
+            f"refusing to write an empty integrity manifest for {module_dir}: "
+            f"no {' / '.join(COMPILED_ARTIFACT_GLOBS)} found there, so the "
+            f"manifest would certify zero modules. Current verify_integrity() "
+            f"treats that as tamper evidence, and the release build must stop "
+            f"before sources are removed. Run the Cython compile step (drop "
+            f"--skip-compile) or remove its modules from COMPILED_MODULES."
+        )
+
     print(f"  Manifest written: {manifest_path} ({len(manifest)} modules)")
+    for name in sorted(manifest):
+        print(f"    - {name}")
     return manifest
 
 
@@ -107,6 +133,44 @@ def compiled_module_dirs(repo_root: Path = REPO_ROOT) -> list[Path]:
         if module_dir not in seen:
             seen.append(module_dir)
     return seen
+
+
+def check_every_module_is_recorded(
+    manifests: dict[str, dict[str, str]],
+    repo_root: Path = REPO_ROOT,
+) -> None:
+    """
+    Require one manifest entry for every source file listed in ``COMPILED_MODULES``.
+
+    Manifests are generated per directory. One compiled sibling can make the
+    directory manifest non-empty while another configured module in that same
+    directory produced no binary at all. This check names those missing units
+    before step 4 removes their sources.
+    """
+    recorded_stems: dict[Path, set[str]] = {}
+    for manifest_path, manifest in manifests.items():
+        directory = Path(manifest_path).parent
+        recorded_stems.setdefault(directory, set()).update(
+            name.split(".", 1)[0] for name in manifest
+        )
+
+    missing: list[str] = []
+    for module_path in COMPILED_MODULES:
+        source = repo_root / module_path
+        if source.stem not in recorded_stems.get(source.parent, set()):
+            missing.append(module_path)
+
+    if missing:
+        raise UnrecordedModule(
+            f"{len(missing)} of {len(COMPILED_MODULES)} modules have no compiled "
+            f"artifact in any integrity manifest: {', '.join(missing)}. Their "
+            f"sources would be deleted by step 4 while nothing verifies them."
+        )
+
+    print(
+        f"\n=== Step 3b: Integrity coverage ===\n"
+        f"  {len(COMPILED_MODULES)} of {len(COMPILED_MODULES)} modules recorded."
+    )
 
 
 def step_remove_source(repo_root: Path = REPO_ROOT) -> list[Path]:
@@ -161,6 +225,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         for module_dir in compiled_module_dirs(REPO_ROOT):
             manifest_path = module_dir / "integrity_manifest.json"
             manifests[str(manifest_path)] = step_generate_manifest(module_dir, manifest_path)
+
+        check_every_module_is_recorded(manifests, REPO_ROOT)
 
         removed = step_remove_source(REPO_ROOT)
         print_summary(
