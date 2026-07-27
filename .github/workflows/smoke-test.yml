@@ -1,10 +1,15 @@
 name: Smoke Test — MCP Server E2E
 
 on:
+  # The default branch of this repo is `master`. This workflow used to trigger on
+  # [main, staging] — branches that do not exist here — so its push/pull_request
+  # triggers could NEVER fire. It did still run weekly via `schedule` (which runs
+  # against the default branch), so it was not dead; what it could never do is
+  # GATE A COMMIT. See PR body item 1.
   push:
-    branches: [main, staging]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
   schedule:
     - cron: '23 7 * * 1'  # Monday 07:23 UTC (off-minute)
   workflow_dispatch:
@@ -29,7 +34,8 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install -r mcp_server/requirements.txt
-          pip install pytest pytest-asyncio pytest-timeout
+          # NO ad-hoc installs — pytest/pytest-asyncio/pytest-timeout are declared
+          # in requirements.txt. Enforced by tests/test_ci_enforcement_floor.py.
 
       - name: Run smoke tests
         env:

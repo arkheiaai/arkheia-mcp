@@ -30,6 +30,16 @@ class DetectionResult:
     detection_id: str        # UUID
     error: Optional[str] = None
     evidence_depth_limited: bool = True
+    # How the verdict was reached. "profile_<strategy>" when features were scored;
+    # "tool_surface_suppressed" / "empty_output_suppressed" when a GATE fired and NO
+    # feature was scored. A suppressed LOW is a couldn't-assess, not a clean bill of
+    # health, so a consumer that cannot see this cannot tell the two apart.
+    detection_method: Optional[str] = None
+    # The model_id of the profile that ACTUALLY scored this response, which is not
+    # always model_id: ProfileRouter falls back through prefix and family matching, so
+    # e.g. "grok-3" resolves to the "grok-3-mini-fast" fingerprint. None when no
+    # profile matched. Compare against model_id to detect a substitution.
+    profile_model_id: Optional[str] = None
     # Gate eligibility (2026-06-28 containment). Consumers MUST only hard-block when this
     # is "block"; default "advise" so an unvalidated/UNKNOWN profile can never block.
     gate_action: str = "advise"
@@ -74,6 +84,15 @@ class DetectionEngine:
                 error="no_profile_for_model",
             )
 
+        # Identify the profile that will actually score this response. ProfileRouter
+        # resolves through exact -> prefix -> family, so this is NOT necessarily
+        # model_id, and the difference changes what the verdict means.
+        profile_model_id = (
+            profile.get("model")
+            or profile.get("metadata", {}).get("model_id")
+            or None
+        )
+
         # Build signals from response text
         # For /detect/verify we only have text -- no logprobs or timing
         signals = extract_structural_features(response)
@@ -102,6 +121,7 @@ class DetectionEngine:
                 timestamp=timestamp,
                 detection_id=detection_id,
                 error="no_computable_features",
+                profile_model_id=profile_model_id,
             )
 
         profile_version = str(
@@ -118,6 +138,8 @@ class DetectionEngine:
             timestamp=timestamp,
             detection_id=detection_id,
             evidence_depth_limited=result.get("evidence_depth_limited", True),
+            detection_method=result.get("detection_method"),
+            profile_model_id=profile_model_id,
             gate_action=result.get("gate_action", "advise"),
             metrics=result.get("metrics", {}),
         )

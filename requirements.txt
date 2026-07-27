@@ -43,6 +43,20 @@ pyyaml>=6.0
 # Async file I/O
 aiofiles>=23.0
 
+# Crypto -- AES-256-GCM encrypt/decrypt for profiles.
+# `proxy/crypto/profile_crypto.py` imports `cryptography` DIRECTLY, and
+# `proxy/main.py` imports `dotenv` DIRECTLY, but neither was declared here.
+# They were only ever satisfied TRANSITIVELY (verified 2026-07-26 in a venv built
+# from this file alone): cryptography arrives via `mcp==1.28.1 -> pyjwt[crypto] ->
+# cryptography`, and python-dotenv via `pydantic-settings -> python-dotenv`.
+# So the documented install in docs/DEPLOYMENT.md did NOT crash -- but the repo
+# was relying on an EXTRA of a transitive dependency to supply a direct import,
+# and, more importantly, the CVE floor already pinned in proxy/requirements.txt
+# was NOT enforced on this install path at all. Declared explicitly so the pin is
+# real and so an upstream dropping `[crypto]` cannot silently break the proxy.
+cryptography>=48.0.1  # CVE-2026-39892 (buffer overflow) + CVE-2026-26007 (EC key validation) + GHSA-537c-gmf6-5ccf (bundled OpenSSL, high; fixed 48.0.1) fixes -- mirrors proxy/requirements.txt
+python-dotenv>=1.2.2  # CVE-2026-28684 (symlink attack in set_key/unset_key) fix -- imported unconditionally by proxy/main.py; mirrors proxy/requirements.txt
+
 # Build / compilation dependency for release pipeline
 Cython>=3.0
 setuptools>=83.0.0  # CVE-2025-47273 (PackageIndex path traversal) + CVE-2026-59890 (MANIFEST.in NFD/NFC exclude bypass, medium; fixed 83.0.0) fixes -- imported by setup_cython.py
@@ -61,24 +75,26 @@ setuptools>=83.0.0  # CVE-2025-47273 (PackageIndex path traversal) + CVE-2026-59
 #     own pytest/pytest-asyncio.
 # Everything else — `tools/*` (no requirements file of its own), `scripts/*`,
 # `tests/*`, and every CI job, all of which install THIS file first — lands here.
+#
+# pytest-timeout and respx were installed AD HOC by the workflows and declared in
+# NO requirements file, so CI green did not mean the declared manifest could run
+# the suite. Both proven red 2026-07-26 against a venv built from this file alone:
+#   `pytest tests --timeout=120` -> "unrecognized arguments: --timeout=120"
+#   `pytest tests/test_detection_adapter.py` -> 5 ERRORs (respx_mock fixture absent)
+# `--timeout=` is passed by FOUR consumers and none of them declared it:
+# unit-tests.yml (--timeout=120), smoke-test.yml (--timeout=60),
+# tools/mutate_f18_integrity_manifest.py (--timeout=180), and
+# tools/mutate_f1_tool_gate.py. Both workflows carried a bare `pip install
+# pytest-timeout` line, so CI was green while a fresh install of our own declared
+# environment could not run the harness at all -- an evidence-reproducibility
+# defect rather than a runtime one, since the proof that mutants are killed
+# cannot be re-derived from what we declare. The ad-hoc pip lines are the
+# masking, exactly as they were for `cryptography` above.
 pytest>=8.0
 pytest-asyncio>=0.23
-
-# Provides `--timeout=`, which four consumers pass and NOTHING declared:
-# tools/mutate_f18_integrity_manifest.py (--timeout=180) and
-# tools/mutate_f1_tool_gate.py, .github/workflows/unit-tests.yml (--timeout=120)
-# and .github/workflows/smoke-test.yml (--timeout=60). Both workflows carried a
-# bare `pip install pytest-timeout` line, so CI was green while a fresh install of
-# our own declared environment could not run the harness at all:
-#   pytest: error: unrecognized arguments: --timeout=180
-# An evidence-reproducibility defect rather than a runtime one — the proof that
-# 19/19 mutants are killed cannot be re-derived from what we declare. The ad-hoc
-# pip lines are the masking, exactly as they were for `cryptography`.
-pytest-timeout>=2.3
-
-# Transport mock imported by tests/test_detection_adapter.py. Undeclared for the
-# same reason and found by the same sweep; unit-tests.yml installed it ad hoc.
-respx>=0.21
+pytest-timeout>=2.3  # provides --timeout=; unit-tests.yml, smoke-test.yml,
+                      # tools/mutate_f18_integrity_manifest.py, tools/mutate_f1_tool_gate.py
+respx>=0.21           # respx_mock fixture, tests/test_detection_adapter.py
 
 # Load testing (optional, Phase 2)
 # locust>=2.20.0

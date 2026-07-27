@@ -235,10 +235,16 @@ async def lifespan(app: FastAPI):
     try:
         chain = audit_writer.verify_chain()
         if not chain.get("ok", True):
+            # "ok": False now covers two distinct causes (2026-07-27): a genuine
+            # broken link (breaks non-empty), or content that could not be
+            # verified at all — e.g. every line unparseable, or the walk raised
+            # (chain["error"] set, breaks empty). Both are surfaced here rather
+            # than the second one silently reading as "0 breaks == fine".
             logger.warning(
                 "Audit hash-chain integrity check FAILED on startup: "
-                "%d record(s) verified, %d break(s) detected — possible tampering",
+                "%d record(s) verified, %d break(s) detected%s — possible tampering",
                 chain.get("verified", 0), len(chain.get("breaks", [])),
+                f" ({chain['error']})" if chain.get("error") else "",
             )
         else:
             logger.info(
@@ -311,10 +317,106 @@ async def lifespan(app: FastAPI):
             settings.detection.profile_dir,
         )
 
-    # 3. Detection engine
+    # 3. Binary integrity self-check for the compiled detection modules.
+    #
+    # proxy/license/integrity.py documents itself as "At startup, verifies that
+    # compiled detection modules (.so/.pyd) have not been tampered with" — but
+    # verify_integrity() had ZERO production call sites, so no startup ever
+    # verified anything and the advertised tamper-evidence was inert. This is the
+    # live call site. It mirrors the verify_chain() self-check above (step 0).
+    #
+    # scripts/build_release.py writes an `integrity_manifest.json` into each
+    # compiled-module directory, so the dirs to check are discovered by looking
+    # for that manifest rather than by duplicating COMPILED_MODULES here (which
+    # would silently drift when the build's module list changes).
+    #
+    # FAIL-OPEN / FAIL-CLOSED SPLIT (Codex finding 4, ruled 2026-07-26).
+    # This block used to catch every exception, TamperDetected included, and
+    # continue — so a tampered detection engine produced "error log plus service
+    # ready". Those are two different states and must not be collapsed:
+    #
+    #   ABSENT / UNVERIFIABLE  = absence of evidence. A source checkout has no
+    #       manifest; a module might be unreadable. FAIL OPEN: log, continue, and
+    #       publish the unverified state on app.state.integrity so /admin/health
+    #       shows it. Silence would be the real defect (DONE.md floor invariant
+    #       9(d): an outcome that produced no observation is not a success).
+    #
+    #   TamperDetected         = EVIDENCE. Hash mismatch, a manifest module missing
+    #       from disk, or a manifest that exists and cannot be parsed. DO NOT
+    #       START. A tampered detection engine that reports LOW is worse than no
+    #       detection at all, because it is trusted: every downstream verdict,
+    #       audit record and governance receipt would carry that engine's
+    #       authority. Halting is a deliberate availability trade — see the
+    #       failure mode named in the PR body.
+    integrity_reports = []
+    try:
+        from proxy.license.integrity import TamperDetected, verify_all
+
+        integrity_reports = verify_all()
+    except TamperDetected as exc:
+        logger.critical(
+            "[FATAL] BINARY INTEGRITY TAMPER DETECTED — refusing to start: %s. "
+            "This is a POSITIVE finding, not a failed check: a compiled detection "
+            "module does not match its build-time hash (or its manifest is "
+            "unreadable). A tampered detection engine would be TRUSTED, so the "
+            "proxy must not serve traffic. Restore the verified artifact from the "
+            "release build, or remove the integrity manifest only if you are "
+            "deliberately running unverified from source.",
+            exc,
+        )
+        app.state.integrity = {
+            "status": "TAMPERED",
+            "verified": False,
+            "startup_blocked": True,
+            "detail": str(exc),
+        }
+        raise
+    except Exception as exc:  # fail-open: an UNVERIFIABLE environment may boot
+        logger.error(
+            "Binary integrity self-check could not be completed: %s. Continuing "
+            "(fail-open) because this is an absence of evidence, not a tamper "
+            "finding — but the modules are NOT verified and that is published on "
+            "/admin/health.",
+            exc,
+        )
+        app.state.integrity = {
+            "status": "UNVERIFIABLE",
+            "verified": False,
+            "startup_blocked": False,
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    else:
+        verified = all(r.verified for r in integrity_reports)
+        app.state.integrity = {
+            "status": "VERIFIED" if verified else integrity_reports[0].status,
+            "verified": verified,
+            "startup_blocked": False,
+            "directories": [r.module_dir for r in integrity_reports],
+            "modules_checked": sum(r.modules_checked for r in integrity_reports),
+            "detail": "; ".join(r.detail for r in integrity_reports),
+        }
+        if verified:
+            logger.info(
+                "Binary integrity VERIFIED: %d module(s) across %d director%s (%s)",
+                app.state.integrity["modules_checked"],
+                len(integrity_reports),
+                "y" if len(integrity_reports) == 1 else "ies",
+                "; ".join(r.module_dir for r in integrity_reports),
+            )
+        else:
+            # WARNING, not INFO: "not verified" must not read like a pass. It is
+            # the normal state for a source deployment, which is why it does not
+            # block startup — but it is published, not swallowed.
+            logger.warning(
+                "Binary integrity NOT VERIFIED (%s) — continuing fail-open: %s",
+                app.state.integrity["status"],
+                app.state.integrity["detail"],
+            )
+
+    # 4. Detection engine
     engine = DetectionEngine(profile_router)
 
-    # 4. Registry client (only if API key configured)
+    # 5. Registry client (only if API key configured)
     registry_client = RegistryClient(
         base_url=settings.registry.url,
         api_key=settings.arkheia_api_key,
@@ -330,7 +432,7 @@ async def lifespan(app: FastAPI):
     app.state.registry_client = registry_client
     app.state.settings = settings
 
-    # 5. Registry pull on startup (if configured and key present)
+    # 6. Registry pull on startup (if configured and key present)
     key_value = settings.arkheia_api_key.get_secret_value()
     if settings.registry.pull_on_startup and key_value:
         logger.info("Pulling profile updates from registry on startup...")
@@ -340,7 +442,7 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Startup registry pull failed (continuing): %s", e)
 
-    # 6. Start scheduled pull background task
+    # 7. Start scheduled pull background task
     if key_value and settings.registry.pull_interval_hours > 0:
         await registry_client.start_scheduled_pull(settings.registry.pull_interval_hours)
 
