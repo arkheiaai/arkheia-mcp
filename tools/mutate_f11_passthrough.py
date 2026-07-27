@@ -66,6 +66,7 @@ NEW_TIER = [
     "proxy/tests/test_passthrough_adversarial.py",
     "proxy/tests/test_passthrough_receipts.py",
     "proxy/tests/test_passthrough_wire.py",
+    "proxy/tests/test_passthrough_credential_wire.py",
     "tests/test_passthrough_ssrf_floor.py",
 ]
 PREEXISTING_TIER = ["proxy/tests/test_passthrough.py"]
@@ -169,19 +170,30 @@ MUTANTS: list[Mutant] = [
            "postcondition"),
 
     # -- gate ordering and credentials -------------------------------------
-    Mutant("M21", "gate no longer checks duplicate credential headers",
-           "    dups = _duplicate_credential_headers(request)\n"
-           "    if dups:\n"
-           "        return None, DENY_DUPLICATE_CREDENTIAL\n", "", "credentials"),
+    # M21/M22 REPOINTED (2026-07-27). Their original anchors — `dups =
+    # _duplicate_credential_headers(request)` in the gate, and that helper's
+    # `n > 1` — no longer exist: the credential screen absorbed both when the
+    # mapping went per-destination, and the helper became dead code and was
+    # deleted. The FAULTS they express are unchanged; only the anchors moved.
+    # Left un-repointed they would have scored NOT_OBSERVED, which is a
+    # measurement of nothing, not a pass.
+    Mutant("M21", "gate no longer refuses a repeated credential header",
+           "    if any(n > 1 for n in counts.values()):\n"
+           "        return DENY_DUPLICATE_CREDENTIAL\n", "", "credentials"),
     Mutant("M22", "duplicate detection needs three occurrences, not two",
-           "return sorted(k for k, n in seen.items() if n > 1)",
-           "return sorted(k for k, n in seen.items() if n > 2)", "credentials"),
-    Mutant("M23", "no header is treated as a credential",
-           '_CREDENTIAL_HEADERS = frozenset({"authorization", "x-api-key"})',
-           "_CREDENTIAL_HEADERS = frozenset()", "credentials"),
-    Mutant("M24", "cookie added to the upstream forward allowlist",
-           '    "authorization",       # provider API key (Bearer token)\n',
-           '    "authorization",       # provider API key (Bearer token)\n    "cookie",\n',
+           "    if any(n > 1 for n in counts.values()):",
+           "    if any(n > 2 for n in counts.values()):", "credentials"),
+    # M23 REPLACED by M23R — the anchor it targeted no longer exists.
+    # `_CREDENTIAL_HEADERS` is now the multi-line screen vocabulary rather than a
+    # one-line frozenset, and emptying it is still the same fault: nothing is
+    # recognised as a credential, so neither duplication nor foreignness can be
+    # seen.
+    Mutant("M23R", "no header is recognised as a credential",
+           '        if key in _CREDENTIAL_HEADERS:',
+           '        if key in frozenset():', "credentials"),
+    Mutant("M24", "cookie added to the shared forward allowlist",
+           '_SAFE_TRANSPORT_HEADERS = frozenset({\n    "content-type",\n',
+           '_SAFE_TRANSPORT_HEADERS = frozenset({\n    "cookie",\n    "content-type",\n',
            "credentials"),
     Mutant("M25", "gate screens the path but ignores the verdict",
            "    deny = _screen_path(provider, path)\n    if deny:\n        return None, deny\n",
@@ -245,6 +257,97 @@ MUTANTS: list[Mutant] = [
     Mutant("M42", "the refusal stops telling the caller what would clear it",
            '        body["allowed"] = list(provider.allowed)',
            '        body["allowed"] = []', "receipts"),
+
+    # -- the credential boundary (2026-07-27, cross-provider disclosure) -----
+    # Each of these is a way back to the defect Codex reproduced: one vendor's
+    # credential delivered to another vendor on the accepted path.
+    Mutant("M43", "restore the exact pre-fix shape: ONE shared allowlist "
+                  "holding both credential headers, applied to every provider",
+           "    allowed = (\n"
+           "        _SAFE_TRANSPORT_HEADERS\n"
+           "        | provider.credential_headers\n"
+           "        | provider.extra_headers\n"
+           "    )\n",
+           "    allowed = _SAFE_TRANSPORT_HEADERS | _CREDENTIAL_HEADERS | frozenset({\n"
+           '        "anthropic-version", "anthropic-beta"})\n',
+           "credential-boundary"),
+    Mutant("M44", "the gate stops screening credentials entirely",
+           "    deny = _screen_credentials(request, provider)\n"
+           "    if deny:\n        return None, deny\n", "", "credential-boundary"),
+    Mutant("M45", "a foreign credential is dropped silently instead of refused "
+                  "(the alternative ruling, planted as a fault)",
+           "    foreign = _foreign_credentials(request, provider)\n"
+           "    if foreign:\n"
+           "        return DENY_FOREIGN_CREDENTIAL\n", "", "credential-boundary"),
+    Mutant("M46", "every provider accepts every credential the screen knows",
+           "    foreign = [\n"
+           "        name for name in _credential_header_counts(request)\n"
+           "        if name not in provider.credential_headers\n"
+           "    ]",
+           "    foreign = [\n"
+           "        name for name in _credential_header_counts(request)\n"
+           "        if name not in _CREDENTIAL_HEADERS\n"
+           "    ]", "credential-boundary"),
+    Mutant("M47", "two DIFFERENT credential headers are allowed through "
+                  "(the exact blind spot of a per-header rule)",
+           "    if len(counts) > 1:\n"
+           "        return DENY_DUPLICATE_CREDENTIAL\n", "", "credential-boundary"),
+    # Deliberately redundant with the gate screen, so a single-edit mutant would
+    # be equivalent: the filter and the screen must BOTH be removed for the
+    # credential to reach the wire.
+    Mutant("M48", "delete BOTH credential-header controls: the per-destination "
+                  "forward filter and the gate's foreign screen",
+           "    allowed = (\n"
+           "        _SAFE_TRANSPORT_HEADERS\n"
+           "        | provider.credential_headers\n"
+           "        | provider.extra_headers\n"
+           "    )\n",
+           "    allowed = _SAFE_TRANSPORT_HEADERS | _CREDENTIAL_HEADERS | frozenset({\n"
+           '        "anthropic-version", "anthropic-beta"})\n',
+           "credential-boundary",
+           extra=((
+               "    foreign = _foreign_credentials(request, provider)\n"
+               "    if foreign:\n"
+               "        return DENY_FOREIGN_CREDENTIAL\n", ""),)),
+    Mutant("M49", "delete BOTH credential-PARAMETER controls: the per-destination "
+                  "param filter and the gate's foreign screen",
+           "        if k.lower() not in _CREDENTIAL_QUERY_PARAMS\n"
+           "        or k.lower() in provider.credential_query_params\n",
+           "        if True\n",
+           "credential-boundary",
+           extra=((
+               '        f"?{name}" for name in {k.lower() for k in request.query_params.keys()}\n'
+               "        if name in _CREDENTIAL_QUERY_PARAMS\n"
+               "        and name not in provider.credential_query_params\n",
+               '        f"?{name}" for name in set()\n'
+               "        if name in _CREDENTIAL_QUERY_PARAMS\n"
+               "        and name not in provider.credential_query_params\n"),)),
+    Mutant("M50", "no query parameter is recognised as credential-bearing",
+           '_CREDENTIAL_QUERY_PARAMS = frozenset({\n'
+           '    "key", "api_key", "apikey", "access_token", "auth_token", "token",\n})',
+           "_CREDENTIAL_QUERY_PARAMS = frozenset()", "credential-boundary"),
+    Mutant("M51", "the anthropic credential set widens to every known credential",
+           '    credential_headers=frozenset({"x-api-key", "authorization"}),',
+           "    credential_headers=_CREDENTIAL_HEADERS,", "credential-boundary"),
+    Mutant("M52", "the grok credential set widens to every known credential",
+           '    # xAI is OpenAI-compatible: `Authorization: Bearer <xai key>`, and nothing\n'
+           "    # else. It has no x-api-key surface at all.\n"
+           '    credential_headers=frozenset({"authorization"}),',
+           "    credential_headers=_CREDENTIAL_HEADERS,", "credential-boundary"),
+    Mutant("M53", "provider-specific headers travel to every destination again",
+           "        | provider.extra_headers\n",
+           '        | frozenset({"anthropic-version", "anthropic-beta"})\n',
+           "credential-boundary"),
+    Mutant("M54", "the refusal stops naming the credential this provider uses",
+           '        body["credential_headers"] = sorted(provider.credential_headers)',
+           '        body["credential_headers"] = []', "credential-boundary"),
+    Mutant("M55", "the credential refusal is reported as a path problem",
+           "        \"error\": (\n"
+           '            "invalid_credential_header"\n'
+           "            if deny_code in _CREDENTIAL_DENY_CODES\n"
+           '            else "invalid_path"\n'
+           "        ),",
+           '        "error": "invalid_path",', "credential-boundary"),
 ]
 
 
