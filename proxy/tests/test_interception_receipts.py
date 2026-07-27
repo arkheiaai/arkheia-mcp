@@ -262,3 +262,68 @@ class TestScopeOfReceipting:
         assert {r["action_taken"] for r in rows} == {"warn"}
         for r in responses:
             probe.require(r.headers["x-arkheia-detection-id"])
+
+
+# ---------------------------------------------------------------------------
+# Refusals leave evidence too
+# ---------------------------------------------------------------------------
+
+class TestRefusalReceipts:
+    """
+    A refusal is an adverse verdict against a caller who may be entirely
+    legitimate. Without a record, "the proxy refused me" is unanswerable — and
+    without the DENY CODE on that record, it is unanswerable even with one.
+
+    Driven by configuring a ``file://`` upstream, which is refused on the
+    config before any client exists, so no path normalisation by the test
+    client can interfere.
+    """
+
+    async def _drive_refusal(self, tmp_path, n=1):
+        log = tmp_path / "audit.jsonl"
+        writer = AuditWriter(str(log))
+        await writer.start()
+        try:
+            app, _ = build(risk="LOW", audit=writer,
+                           upstream_url="file:///etc/passwd")
+            responses = []
+            async with client(app) as c:
+                for _ in range(n):
+                    responses.append(await c.post("/v1/chat/completions", json=REQ))
+        finally:
+            await writer.stop()
+        return ReceiptProbe(log), responses
+
+    async def test_the_refusal_is_recorded_with_its_deny_code(self, tmp_path):
+        probe, responses = await self._drive_refusal(tmp_path)
+        payload = json.loads(responses[0].content)
+        assert payload["deny_code"] == "upstream_scheme_not_allowed"
+        row = probe.require(payload["detection_id"])
+        assert row["deny_code"] == "upstream_scheme_not_allowed", (
+            "a refusal record with no deny code cannot be triaged"
+        )
+        assert row["action_taken"] == "refused"
+        assert row["reason"]
+
+    async def test_a_refusal_is_not_counted_as_a_screened_request(self, tmp_path):
+        """
+        ``/audit/log`` buckets by ``risk_level``. A refusal filed as LOW would
+        be counted in the summary as a request that was screened and found
+        clean — the opposite of what happened.
+        """
+        probe, _ = await self._drive_refusal(tmp_path, n=4)
+        assert {r["risk_level"] for r in probe.rows()} == {"REFUSED"}
+
+    async def test_the_refused_surface_is_named(self, tmp_path):
+        probe, _ = await self._drive_refusal(tmp_path)
+        assert probe.rows()[0]["path"] == "/v1/chat/completions"
+        assert probe.rows()[0]["method"] == "POST"
+
+    async def test_no_file_was_read_by_the_refused_upstream(self, tmp_path):
+        """
+        The point of refusing a ``file://`` upstream: nothing is dereferenced.
+        Asserted on the response bytes the caller actually received.
+        """
+        _, responses = await self._drive_refusal(tmp_path)
+        assert b"root:" not in responses[0].content
+        assert responses[0].status_code == 400

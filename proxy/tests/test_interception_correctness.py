@@ -408,3 +408,204 @@ class TestReportedGaps:
         async with client(app) as c:
             r = await c.post("/proxy/grok/v1/chat/completions", json=REQ)
         assert "x-arkheia-risk" not in r.headers
+
+
+# ---------------------------------------------------------------------------
+# The destination resolver, driven directly
+# ---------------------------------------------------------------------------
+
+import httpx as _httpx  # noqa: E402
+import pytest as _pytest  # noqa: E402
+
+from proxy.middleware.interception import (  # noqa: E402
+    InterceptionRefusal,
+    _check_raw_path,
+    _confine,
+    _forward_headers,
+    _resolve_upstream,
+)
+from starlette.datastructures import Headers  # noqa: E402
+
+
+class TestDestinationResolver:
+    """
+    Driven at the boundary that OWNS the decision, not only through the live
+    route.
+
+    Some arms of the post-condition cannot be tripped by a caller today —
+    ``httpx`` will not let an appended path move the authority, which is the
+    good news of this flow and is measured on a real socket in
+    ``test_interception_wire.py``. But "cannot be tripped today" is what makes
+    a check decoration, and the mutation campaign said so: five arms survived
+    every wire attack. They are now driven directly with a base and a target
+    that disagree — exactly the skew a per-tenant or per-provider upstream
+    would introduce, which is the direction this config is heading.
+    """
+
+    def test_a_base_with_a_path_component_confines_to_that_subtree(self):
+        url = _resolve_upstream("http://up.internal:8080/api", "/v1/chat", "")
+        assert str(url) == "http://up.internal:8080/api/v1/chat"
+
+    def test_a_path_that_reaches_a_sibling_subtree_is_refused(self):
+        """
+        With a base path, ``startswith`` and "contains" stop agreeing: the
+        resolved ``/api/zzz/api/v1/x`` CONTAINS ``/api/v1/`` while starting
+        somewhere else entirely.
+        """
+        with _pytest.raises(InterceptionRefusal) as exc:
+            _resolve_upstream("http://up.internal:8080/api",
+                              "/v1/../zzz/api/v1/x", "")
+        assert exc.value.deny_code == "path_escapes_prefix"
+
+    def test_the_base_path_is_part_of_the_expectation(self):
+        """A confinement that forgot the base path would refuse the legal case."""
+        url = _resolve_upstream("http://up.internal:8080/api", "/v1/ok", "")
+        assert url.path == "/api/v1/ok"
+
+    @_pytest.mark.parametrize("scheme_url", [
+        "file:///etc/passwd",
+        "gopher://127.0.0.1:11211/_stats",
+        "ftp://internal/",
+        "data:text/plain,x",
+    ])
+    def test_a_non_http_upstream_is_refused_before_any_client_exists(self, scheme_url):
+        """
+        ``file://`` and ``gopher://`` as a forwarding destination are not
+        transport misconfigurations, they are exfiltration and
+        protocol-smuggling primitives. Refused on the CONFIG, before a client
+        is constructed.
+        """
+        with _pytest.raises(InterceptionRefusal) as exc:
+            _resolve_upstream(scheme_url, "/v1/x", "")
+        assert exc.value.deny_code == "upstream_scheme_not_allowed"
+
+    def test_userinfo_appearing_in_the_resolved_url_is_refused(self):
+        """
+        Skewed directly: a target whose authority carries credentials the
+        configured base does not. Unreachable through the live route today
+        (asserted on the wire); load-bearing the moment the base is composed
+        from anything richer than a literal.
+        """
+        with _pytest.raises(InterceptionRefusal) as exc:
+            _confine(_httpx.URL("http://user:pw@up.internal:8080/v1/x"),
+                     _httpx.URL("http://up.internal:8080"))
+        assert exc.value.deny_code == "path_escapes_prefix"
+
+    def test_control_a_base_that_legitimately_carries_userinfo_is_allowed(self):
+        """
+        The comparison is verifier-owned, not a blanket ban: an upstream
+        configured WITH credentials must keep working, or the check is an
+        outage rather than a control.
+        """
+        _confine(_httpx.URL("http://user:pw@up.internal:8080/v1/x"),
+                 _httpx.URL("http://user:pw@up.internal:8080"))
+
+    @_pytest.mark.parametrize("target,base", [
+        ("https://up.internal:8080/v1/x", "http://up.internal:8080"),   # scheme
+        ("http://other.internal:8080/v1/x", "http://up.internal:8080"),  # host
+        ("http://up.internal:9999/v1/x", "http://up.internal:8080"),     # port
+    ])
+    def test_every_authority_part_is_compared_against_the_configured_base(
+        self, target, base
+    ):
+        with _pytest.raises(InterceptionRefusal):
+            _confine(_httpx.URL(target), _httpx.URL(base))
+
+    def test_the_legal_destination_is_not_refused(self):
+        """Control: the post-condition must not reject the thing it exists for."""
+        _confine(_httpx.URL("http://up.internal:8080/v1/x"),
+                 _httpx.URL("http://up.internal:8080"))
+
+
+class TestRawPathPreCondition:
+    """
+    ``_confine`` inspects the URL httpx BUILT, and httpx leaves ``%2f`` /
+    ``%5c`` / ``%2e`` percent-encoded. So a double-encoded escape passes the
+    post-condition while a lenient origin decodes it and escapes anyway. This
+    pre-condition is the only thing that sees those, and the mutation campaign
+    proved the wire corpus alone could not tell.
+    """
+
+    @_pytest.mark.parametrize("path", [
+        "/v1/%2e%2e/admin",          # single-decoded by uvicorn from %252e
+        "/v1/..%2fadmin",
+        "/v1/..%2Fadmin",            # uppercase — matching must be case-folded
+        "/v1/..%5cadmin",
+        "/v1/..\\..\\admin",         # literal backslash, no encoding at all
+        "/v1/x\x00.evil",
+    ])
+    def test_encoded_separators_and_backslashes_are_refused(self, path):
+        with _pytest.raises(InterceptionRefusal) as exc:
+            _check_raw_path(path)
+        assert exc.value.deny_code == "unsafe_path_encoding"
+
+    @_pytest.mark.parametrize("path", [
+        "/v1/chat/completions",
+        "/v1/messages",
+        "/v1/models/gpt-4o",
+        "/v1/files/file-abc123",
+    ])
+    def test_control_ordinary_provider_paths_are_not_refused(self, path):
+        _check_raw_path(path)
+
+
+class TestForwardHeaderBoundary:
+    """
+    Framing headers, driven at the boundary. ``httpx`` HONOURS an explicit
+    ``content-length`` in the header list — measured: a request built with
+    ``content-length: 3`` and a ten-byte body goes out declaring 3 — so
+    relaying the caller's framing is a smuggling primitive even though uvicorn
+    happens to make the caller's own value truthful today.
+    """
+
+    def _headers(self, pairs):
+        return Headers(raw=[(k.encode(), v.encode()) for k, v in pairs])
+
+    def test_caller_framing_headers_are_never_relayed(self):
+        out = _forward_headers(self._headers([
+            ("host", "proxy.local:8098"),
+            ("content-length", "3"),
+            ("content-type", "application/json"),
+        ]))
+        names = {k.lower() for k, _ in out}
+        assert "content-length" not in names
+        assert "host" not in names
+        assert "content-type" in names          # control: it does relay things
+
+    def test_legitimate_repeated_headers_survive(self):
+        """
+        The pre-fix dict comprehension silently collapsed repeats. Refusing is
+        right for a credential; dropping one of two ``accept`` values is just
+        data loss.
+        """
+        out = _forward_headers(self._headers([
+            ("accept", "application/json"), ("accept", "text/event-stream"),
+        ]))
+        assert sorted(v for k, v in out if k == "accept") == [
+            "application/json", "text/event-stream"]
+
+
+class TestFailSafeDefaults:
+
+    async def test_a_config_with_no_high_risk_action_warns_rather_than_blocks(self):
+        """
+        The fallback when ``high_risk_action`` is absent must be the
+        non-destructive one. A default of ``block`` would mean a deployment
+        that never configured a policy silently starts withholding answers —
+        and every test that sets the action explicitly would still be green.
+        """
+        app, _ = build(risk="HIGH")
+        del app.state.settings.detection.high_risk_action
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert r.headers["x-arkheia-action"] == "warn"
+        assert b"arkheia_blocked" not in r.content
+        assert r.content == UPSTREAM_BODY
+
+    async def test_a_missing_detection_config_also_warns(self):
+        app, _ = build(risk="HIGH")
+        del app.state.settings.detection
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert r.headers["x-arkheia-action"] == "warn"
+        assert b"arkheia_blocked" not in r.content

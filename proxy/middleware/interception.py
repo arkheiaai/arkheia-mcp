@@ -253,7 +253,7 @@ def _confine(target: httpx.URL, base: httpx.URL) -> None:
         raise InterceptionRefusal("path_escapes_prefix", prefix=INTERCEPT_PREFIX)
     if target.port != base.port:
         raise InterceptionRefusal("path_escapes_prefix", prefix=INTERCEPT_PREFIX)
-    if target.userinfo:
+    if target.userinfo != base.userinfo:
         raise InterceptionRefusal("path_escapes_prefix", prefix=INTERCEPT_PREFIX)
     expected_prefix = base.path.rstrip("/") + INTERCEPT_PREFIX
     if not target.path.startswith(expected_prefix):

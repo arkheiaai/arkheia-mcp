@@ -236,7 +236,57 @@ ESCAPE_VECTORS = [
 ]
 
 
+#: Double-encoded escapes. uvicorn decodes ONCE, so ``%252f`` arrives as the
+#: literal text ``%2f`` — which httpx then leaves encoded, so the resolved-URL
+#: post-condition sees a confined path while a lenient origin decodes the
+#: escape and leaves ``/v1/`` anyway. Only the raw-path pre-condition sees it.
+DOUBLE_ENCODED_VECTORS = [
+    "/v1/..%252fadmin",
+    "/v1/..%252Fadmin",          # uppercase: the marker match must be case-folded
+    "/v1/%252e%252e/admin",
+    "/v1/..%255c..%255cadmin",
+    "/v1/..\\..\\admin",     # literal backslash, no encoding at all
+]
+
+
 class TestPathConfinement:
+
+    @pytest.mark.parametrize("target", DOUBLE_ENCODED_VECTORS)
+    def test_double_encoded_and_backslash_escapes_are_refused_at_the_route(
+        self, proxy, sinks, target
+    ):
+        """
+        Driven end to end, because the pre-condition being CALLED is a separate
+        fact from the pre-condition being CORRECT — the campaign showed a
+        mutant that deleted the call site surviving a corpus that only tested
+        the function.
+        """
+        upstream, _ = sinks
+        n0 = len(upstream.requests)
+        _, status, hdrs, body = raw_request(proxy.port, target, body=BODY)
+        assert len(upstream.requests) == n0, (
+            f"{target!r} was forwarded as "
+            f"{upstream.requests[-1].target!r}"
+        )
+        assert json.loads(body)["deny_code"] == "unsafe_path_encoding"
+        assert resp_header(hdrs, "x-arkheia-risk") == "REFUSED"
+
+    def test_the_callers_host_header_is_not_relayed_to_the_provider(
+        self, proxy, sinks
+    ):
+        """
+        httpx HONOURS an explicit ``host`` in the header list while still
+        connecting to the URL's authority, so relaying the caller's Host sends
+        a provider a request addressed to somewhere else — a routing and
+        cache-poisoning primitive.
+        """
+        upstream, _ = sinks
+        n0 = len(upstream.requests)
+        raw_request(proxy.port, "/v1/chat/completions", body=BODY,
+                    extra_headers=[("X-Probe", "1")])
+        assert len(upstream.requests) == n0 + 1
+        assert upstream.requests[-1].host == upstream.authority
+        assert len(upstream.requests[-1].header_values("host")) == 1
 
     @pytest.mark.parametrize("target,escaped", ESCAPE_VECTORS)
     def test_path_may_not_escape_the_v1_prefix_that_authorised_it(
@@ -546,6 +596,11 @@ class TestFailOpenDoesNotFabricate:
         assert b'"content":"local"' not in body, (
             "an unreachable upstream was answered from the proxy's own routes"
         )
-        assert status >= 500 or b"upstream" in body.lower(), (
+        # An `or` here would be a permissive assertion: a 200 carrying the word
+        # "upstream" would satisfy it, and the mutation campaign caught exactly
+        # that (M35 survived the weaker form). The status line is what every
+        # client SDK branches on, so it is asserted on its own.
+        assert status == 502, (
             f"upstream outage surfaced as status={status} body={body!r}"
         )
+        assert json.loads(body)["deny_code"] == "upstream_unreachable"
