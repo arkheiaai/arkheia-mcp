@@ -109,6 +109,7 @@ def _write_fake_python(fakebin: Path) -> None:
                         "PIP_REQUIRE_VIRTUALENV": os.environ.get("PIP_REQUIRE_VIRTUALENV"),
                         "PYTHONPATH": os.environ.get("PYTHONPATH"),
                         "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE"),
+                        "ARKHEIA_API_KEY": os.environ.get("ARKHEIA_API_KEY"),
                     }},
                 }}) + "\\n")
 
@@ -227,6 +228,9 @@ def test_dependency_install_is_bounded_to_verified_package_requirements(tmp_path
     assert [e["kind"] for e in events].count("pip_install") == 1
     assert [e["kind"] for e in events].count("server") == 2
 
+    create_venv_event = next(e for e in events if e["kind"] == "create_venv")
+    assert create_venv_event["env"]["ARKHEIA_API_KEY"] is None
+
     pip_event = next(e for e in events if e["kind"] == "pip_install")
     pip_args = pip_event["argv"]
     assert pip_args[:3] == ["-m", "pip", "install"]
@@ -237,11 +241,13 @@ def test_dependency_install_is_bounded_to_verified_package_requirements(tmp_path
     assert pip_event["env"]["PIP_DISABLE_PIP_VERSION_CHECK"] == "1"
     assert pip_event["env"]["PIP_NO_INPUT"] == "1"
     assert pip_event["env"]["PIP_REQUIRE_VIRTUALENV"] == "1"
+    assert pip_event["env"]["ARKHEIA_API_KEY"] is None
 
     server_event = next(e for e in events if e["kind"] == "server")
     assert Path(server_event["cwd"]) == package / "python"
     assert Path(server_event["env"]["PYTHONPATH"]) == package / "python"
     assert server_event["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert server_event["env"]["ARKHEIA_API_KEY"] == _fixture_arkheia_key()
 
     provenance = json.loads(
         (package / "python" / _PROVENANCE).read_text(encoding="utf-8")
@@ -296,3 +302,9 @@ def test_launcher_recreates_unmarked_existing_venv_before_execution(tmp_path):
     assert [e["kind"] for e in events].count("create_venv") == 1
     assert [e["kind"] for e in events].count("pip_install") == 1
     assert [e["kind"] for e in events].count("server") == 1
+    create_venv_event = next(e for e in events if e["kind"] == "create_venv")
+    pip_event = next(e for e in events if e["kind"] == "pip_install")
+    server_event = next(e for e in events if e["kind"] == "server")
+    assert create_venv_event["env"]["ARKHEIA_API_KEY"] is None
+    assert pip_event["env"]["ARKHEIA_API_KEY"] is None
+    assert server_event["env"]["ARKHEIA_API_KEY"] == _fixture_arkheia_key()

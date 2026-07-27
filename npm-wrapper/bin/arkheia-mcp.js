@@ -40,6 +40,19 @@ const PROVENANCE_PATH = path.join(BUNDLED_PYTHON_DIR, PROVENANCE_RELATIVE);
 const REQUIREMENTS = path.join(BUNDLED_PYTHON_DIR, REQUIREMENTS_RELATIVE);
 const PROVENANCE_SCHEMA = "arkheia.npm.bundle-provenance.v1";
 const VENV_SCHEMA = "arkheia.npm.venv.v1";
+const BOOTSTRAP_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "SystemRoot",
+  "WINDIR",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "ARKHEIA_TEST_LOG",
+];
 
 function fail(message) {
   process.stderr.write(`[arkheia] Error: ${message}\n`);
@@ -116,6 +129,16 @@ function findExecutableOnPath(command) {
     }
   }
   return null;
+}
+
+function bootstrapEnv(extra = {}) {
+  const env = {};
+  for (const name of BOOTSTRAP_ENV_ALLOWLIST) {
+    if (process.env[name]) {
+      env[name] = process.env[name];
+    }
+  }
+  return { ...env, ...extra };
 }
 
 function collectBundleFiles(dir, relative = "") {
@@ -330,6 +353,7 @@ function ensureVenv(python, bundle) {
   execFileSync(python, ["-m", "venv", VENV_DIR], {
     stdio: "inherit",
     timeout: 120000,
+    env: bootstrapEnv(),
   });
   if (!fs.existsSync(venvPython)) {
     fail(`virtual environment did not create expected interpreter at ${venvPython}`);
@@ -378,12 +402,11 @@ function installDeps(venvPython, bundle) {
     {
       stdio: "inherit",
       timeout: 120000,
-      env: {
-        ...process.env,
+      env: bootstrapEnv({
         PIP_DISABLE_PIP_VERSION_CHECK: "1",
         PIP_NO_INPUT: "1",
         PIP_REQUIRE_VIRTUALENV: "1",
-      },
+      }),
     }
   );
 
