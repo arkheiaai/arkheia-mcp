@@ -41,9 +41,93 @@ def _compute_hash(record: dict, prev_hash: str) -> str:
 
     Hashes the JSON-serialised record (sort_keys for determinism) concatenated
     with prev_hash. The record passed in must NOT contain 'this_hash' yet.
+
+    Callers within this module always pass a record that has already been
+    through ``_sanitize_for_json`` (see its docstring), so this stays a
+    strict ``json.dumps`` with no ``default=`` fallback: by the time a record
+    reaches here it must already be fully JSON-native, and a TypeError at
+    this point is a bug in the sanitiser, not an expected input shape.
     """
     content = json.dumps(record, sort_keys=True) + prev_hash
     return hashlib.sha256(content.encode()).hexdigest()
+
+
+_JSON_SCALARS = (str, int, float, bool, type(None))
+
+
+def _sanitize_for_json(obj):
+    """
+    Recursively coerce a value into something json.dumps can always serialise,
+    and report whether anything had to be coerced.
+
+    CHOSEN POSTURE — degrade, don't drop (see module docstring / the "audit
+    loss" incident this closes, 2026-07-27): a field such as raw ``bytes`` or
+    a ``set`` cannot be shaped by the string-anchored redactor and previously
+    reached ``json.dumps`` unchanged inside ``_writer_loop``'s try block,
+    which raised ``TypeError``. Because that raise happened AFTER
+    ``self._seq`` had already been incremented, the whole record was dropped
+    silently (no leak, but a lost audit record AND a hole in the hash chain
+    a verifier could not tell apart from a deletion).
+
+    Refusing the record outright was the other defensible option (surface
+    loudly, write nothing) — rejected here because a HIGH-risk detection
+    event is exactly the record you most need on disk, and refusing it is
+    strictly worse than a degraded-but-present one for anyone auditing later.
+    Sanitising BEFORE either hashing or writing means both operations see the
+    identical, already-safe structure, and the failure mode this function
+    exists to prevent has been designed out before either of those steps
+    runs — not merely made survivable by wrapping them in a wider except.
+
+    Returns (sanitised_value, changed). The caller logs once, loudly, when
+    `changed` is True — coercion must never be quiet either; "degrade, don't
+    drop" is not "degrade, don't tell".
+    """
+    if isinstance(obj, dict):
+        changed = False
+        out = {}
+        for k, v in obj.items():
+            if isinstance(k, str):
+                key = k
+            else:
+                key, _ = _sanitize_for_json(k)
+                key = str(key)
+                changed = True
+            value, v_changed = _sanitize_for_json(v)
+            changed = changed or v_changed
+            out[key] = value
+        return out, changed
+
+    if isinstance(obj, (list, tuple)):
+        changed = False
+        out = []
+        for item in obj:
+            value, v_changed = _sanitize_for_json(item)
+            changed = changed or v_changed
+            out.append(value)
+        return out, changed
+
+    if isinstance(obj, (set, frozenset)):
+        # A set has no stable JSON shape at all -- becoming a sorted list is
+        # itself the degradation, regardless of whether its elements are.
+        try:
+            ordered = sorted(obj, key=repr)
+        except Exception:
+            ordered = list(obj)
+        out = [_sanitize_for_json(item)[0] for item in ordered]
+        return out, True
+
+    if isinstance(obj, _JSON_SCALARS):
+        return obj, False
+
+    if isinstance(obj, (bytes, bytearray)):
+        digest = hashlib.sha256(bytes(obj)).hexdigest()[:16]
+        return f"<unserialisable:bytes len={len(obj)} sha256={digest}>", True
+
+    try:
+        text = repr(obj)
+    except Exception:
+        text = "<repr() failed>"
+    return f"<unserialisable:{type(obj).__name__} {text[:200]}>", True
 
 
 def _load_chain_state(log_path: Path) -> tuple[str, int]:
@@ -148,9 +232,28 @@ class AuditWriter:
                 # 1. Redact secrets before anything touches disk
                 clean = redact(record)
 
-                # 2. Add chain fields (seq, prev_hash) — but not this_hash yet
-                self._seq += 1
-                clean["seq"]       = self._seq
+                # 1b. Guarantee JSON-serialisability. A value the redactor
+                #     passes through unchanged (bytes, set, ...) would
+                #     otherwise reach json.dumps() below and raise -- see
+                #     _sanitize_for_json's docstring for why this is a
+                #     "degrade, don't drop" coercion rather than a refusal.
+                clean, degraded = _sanitize_for_json(clean)
+                if degraded:
+                    logger.warning(
+                        "AuditWriter: record %s contained non-JSON-serialisable "
+                        "field(s) — writing a degraded-but-present form instead "
+                        "of dropping it",
+                        record.get("detection_id", "?"),
+                    )
+
+                # 2. Compute the NEXT chain position without committing to it
+                #    yet. seq/last_hash are only written into self._seq /
+                #    self._last_hash after the disk write below actually
+                #    succeeds (step 5) — a write that never lands must never
+                #    consume a sequence number, or the persisted chain gets a
+                #    hole a verifier cannot tell apart from a deleted record.
+                next_seq = self._seq + 1
+                clean["seq"]       = next_seq
                 clean["prev_hash"] = self._last_hash
 
                 # 3. Compute this_hash over the clean record (no this_hash yet)
@@ -161,11 +264,17 @@ class AuditWriter:
                 with open(self.log_path, "a", encoding="utf-8") as f:
                     f.write(json.dumps(clean) + "\n")
 
-                # 5. Advance chain state
+                # 5. Only now commit chain state — the write above is the
+                #    last thing that can fail before this point.
+                self._seq = next_seq
                 self._last_hash = this_hash
 
             except Exception as e:
-                logger.error("AuditWriter: failed to write record: %s", e)
+                logger.error(
+                    "AuditWriter: failed to write record %s — sequence NOT "
+                    "advanced (chain state unchanged, no gap created): %s",
+                    record.get("detection_id", "?"), e,
+                )
             finally:
                 self._queue.task_done()
 
@@ -221,10 +330,10 @@ class AuditWriter:
 
     def verify_chain(self, limit: int = 1000) -> dict:
         """
-        Walk the hash chain and report any breaks.
+        Walk the hash chain and report any breaks or sequence gaps.
 
         Returns {"ok": bool, "verified": n, "breaks": [{seq, expected, got}],
-        "error": str|None}
+        "gaps": [{after_seq, expected_seq, got_seq}], "error": str|None}
 
         "ok" is only True for a chain that was actually walked without incident
         (including the legitimate case of a log that does not exist yet -- a
@@ -237,14 +346,29 @@ class AuditWriter:
         an intact chain, and must not read the same as one (Codex adversarial
         review, 2026-07-27; sibling of the integrity.py empty-manifest defect).
 
+        `gaps` is a SEPARATE signal from `breaks`, added 2026-07-27 alongside
+        the writer-loop fix that stopped `self._seq` from being consumed by a
+        write that never landed on disk. A dropped write leaves every hash
+        LINK between the records that DID make it to disk fully intact --
+        prev_hash of the record after the hole really does equal this_hash of
+        the record before it, because `self._last_hash` was only ever advanced
+        on writes that succeeded. So a seq gap (1, 2, 4 -- 3 missing) produces
+        zero hash breaks and, before this method tracked seq continuity, read
+        exactly like a genuinely intact chain. `ok` folds both signals: a
+        chain with no hash breaks but a seq gap is not "ok" either -- it is
+        evidence that something existed and is not on disk, which a verifier
+        must not be unable to tell apart from a chain where nothing is missing.
+
         Hook for enterprise upgrade: expose this via /admin/verify-chain endpoint
         and run it on a schedule to detect log tampering.
         """
         if not self.log_path.exists():
-            return {"ok": True, "verified": 0, "breaks": [], "error": None}
+            return {"ok": True, "verified": 0, "breaks": [], "gaps": [], "error": None}
 
         breaks = []
+        gaps = []
         prev_hash = "0" * 64
+        expected_seq: Optional[int] = None
         verified = 0
         total_lines = 0
         unparseable = 0
@@ -265,15 +389,34 @@ class AuditWriter:
 
                     stored_this  = record.pop("this_hash", None)
                     stored_prev  = record.get("prev_hash", "")
+                    seq          = record.get("seq")
 
                     expected = _compute_hash(record, prev_hash)
 
                     if stored_this != expected or stored_prev != prev_hash:
                         breaks.append({
-                            "seq":      record.get("seq"),
+                            "seq":      seq,
                             "expected": expected,
                             "got":      stored_this,
                         })
+
+                    # Sequence continuity: independent of the hash-link check
+                    # above, and catches what it structurally cannot -- a
+                    # record whose write never happened at all leaves no line
+                    # to hash-compare against, only a hole in `seq`.
+                    if isinstance(seq, int):
+                        if expected_seq is not None and seq != expected_seq:
+                            gaps.append({
+                                "after_seq":    expected_seq - 1,
+                                "expected_seq": expected_seq,
+                                "got_seq":      seq,
+                            })
+                        expected_seq = seq + 1
+                    else:
+                        # No usable seq on this record -- stop asserting
+                        # continuity until we see a real one again rather
+                        # than compare against a stale expectation.
+                        expected_seq = None
 
                     prev_hash = stored_this or expected
                     verified += 1
@@ -287,7 +430,7 @@ class AuditWriter:
         if error is not None:
             # The walk did not complete -- we cannot claim anything about the
             # chain's integrity, so this must not be reported as ok=True.
-            return {"ok": False, "verified": verified, "breaks": breaks, "error": error}
+            return {"ok": False, "verified": verified, "breaks": breaks, "gaps": gaps, "error": error}
 
         if total_lines > 0 and verified == 0:
             # The log has content, but every line failed to parse. That is
@@ -298,11 +441,18 @@ class AuditWriter:
                 "ok": False,
                 "verified": 0,
                 "breaks": breaks,
+                "gaps": gaps,
                 "error": f"{unparseable} log line(s) present but none parseable "
                          f"-- cannot verify chain integrity",
             }
 
-        return {"ok": len(breaks) == 0, "verified": verified, "breaks": breaks, "error": None}
+        return {
+            "ok": len(breaks) == 0 and len(gaps) == 0,
+            "verified": verified,
+            "breaks": breaks,
+            "gaps": gaps,
+            "error": None,
+        }
 
     def purge_old_records(self) -> int:
         """Remove records older than retention_days. Returns count deleted."""

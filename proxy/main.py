@@ -232,15 +232,20 @@ async def lifespan(app: FastAPI):
     try:
         chain = audit_writer.verify_chain()
         if not chain.get("ok", True):
-            # "ok": False now covers two distinct causes (2026-07-27): a genuine
-            # broken link (breaks non-empty), or content that could not be
-            # verified at all — e.g. every line unparseable, or the walk raised
-            # (chain["error"] set, breaks empty). Both are surfaced here rather
-            # than the second one silently reading as "0 breaks == fine".
+            # "ok": False now covers three distinct causes (2026-07-27): a
+            # genuine broken link (breaks non-empty), content that could not
+            # be verified at all — e.g. every line unparseable, or the walk
+            # raised (chain["error"] set, breaks empty) — or a sequence gap
+            # (gaps non-empty, breaks empty: a record was numbered but never
+            # written, see AuditWriter.verify_chain's docstring). All three
+            # are surfaced here rather than any of them silently reading as
+            # "0 breaks == fine".
             logger.warning(
                 "Audit hash-chain integrity check FAILED on startup: "
-                "%d record(s) verified, %d break(s) detected%s — possible tampering",
+                "%d record(s) verified, %d break(s), %d sequence gap(s) detected%s "
+                "— possible tampering or a lost audit record",
                 chain.get("verified", 0), len(chain.get("breaks", [])),
+                len(chain.get("gaps", [])),
                 f" ({chain['error']})" if chain.get("error") else "",
             )
         else:

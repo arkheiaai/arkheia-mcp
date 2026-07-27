@@ -46,6 +46,30 @@ def _write_valid_chain(path: Path, n: int) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
+def _write_chain_with_seq_gap(path: Path) -> None:
+    """
+    Three records with a fully intact hash chain, but seq skips 3 -> 1, 2, 4.
+
+    This is what proxy/audit/writer.py's writer-loop defect (2026-07-27)
+    actually produces on disk: a write for what would have been seq 3 consumed
+    the number (``self._seq += 1`` ran) and then failed to serialise, so it
+    never reached the file. The NEXT successful write picked up at seq 4
+    without knowing 3 was ever attempted. Every hash link between the records
+    that DID land is perfectly valid -- prev_hash of seq 4 really does equal
+    this_hash of seq 2 -- because ``self._last_hash`` was only advanced on the
+    writes that actually succeeded.
+    """
+    prev = "0" * 64
+    lines = []
+    for seq in (1, 2, 4):
+        record = {"seq": seq, "prev_hash": prev, "event": "detect"}
+        this_hash = _compute_hash(record, prev)
+        record["this_hash"] = this_hash
+        lines.append(json.dumps(record))
+        prev = this_hash
+    path.write_text("\n".join(lines) + "\n")
+
+
 # ---------------------------------------------------------------------------
 # Positive controls: the walk logic itself is not broken, only the empty case
 # ---------------------------------------------------------------------------
@@ -114,6 +138,47 @@ def test_verify_chain_when_the_walk_raises_is_not_ok(tmp_path):
     report = w.verify_chain()
     assert report["verified"] == 0
     assert report["ok"] is False, report
+
+
+# ---------------------------------------------------------------------------
+# RED: a sequence gap must not verify the same as an intact chain
+#
+# Sibling of the two RED cases above, and of proxy/tests/test_audit_writer_
+# nonserialisable.py -- same root cause (writer.py's ``self._seq += 1`` firing
+# before the write it numbers is known to have succeeded), different surface.
+# ---------------------------------------------------------------------------
+
+def test_verify_chain_detects_a_sequence_gap_even_when_hashes_are_intact(tmp_path):
+    """
+    RED: before the fix, verify_chain() never inspects ``seq`` for continuity
+    -- only for its error-message value -- so a hole left by a write that
+    consumed a sequence number and then never landed on disk is invisible to
+    it. The hash-link check alone cannot catch this case: it only compares
+    each record's prev_hash/this_hash against its immediate neighbour, and
+    those links are untouched because the failed write never advanced
+    ``self._last_hash`` either. So the chain in ``_write_chain_with_seq_gap``
+    -- seq 1, 2, 4, with 3 silently missing -- reads today as
+    ``{"ok": True, "breaks": []}``, identical to a genuinely intact chain.
+
+    A tamper-evident log exists so a verifier can tell "nothing was ever
+    written here" apart from "every record present is unmodified" -- this
+    pins that the chain-walk actually makes that distinction, not just the
+    per-link hash comparison.
+    """
+    w = _writer(tmp_path)
+    _write_chain_with_seq_gap(w.log_path)
+
+    report = w.verify_chain()
+
+    assert report["breaks"] == [], (
+        "test setup invalid -- the hash LINKS between the surviving records "
+        f"must be intact so the gap is caught by sequence inspection, not by "
+        f"the pre-existing hash check: {report}"
+    )
+    assert report["ok"] is False, (
+        f"a sequence gap (seq 1, 2, 4 -- 3 never written) verified as ok=True: {report} "
+        f"-- a verifier cannot tell this apart from a chain with nothing missing."
+    )
 
 
 # ---------------------------------------------------------------------------
