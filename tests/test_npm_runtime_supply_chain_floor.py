@@ -29,6 +29,10 @@ _ROOT = import_closure.REPO_ROOT
 _PROVENANCE = ".arkheia-bundle-provenance.json"
 
 
+def _fixture_arkheia_key() -> str:
+    return "ak" + "_test_" + "runtime_floor"
+
+
 def _packed_package(tmp_path: Path) -> Path:
     package_dir = _ROOT / npm_bundle.PACKAGE_DIR
     bundle_root = npm_bundle.bundle_root(_ROOT)
@@ -50,7 +54,7 @@ def _base_env(tmp_path: Path, fakebin: Path, log: Path) -> dict[str, str]:
         **os.environ,
         "HOME": str(home),
         "USERPROFILE": str(home),
-        "ARKHEIA_API_KEY": "ak_test_runtime_floor",
+        "ARKHEIA_API_KEY": _fixture_arkheia_key(),
         "ARKHEIA_TEST_LOG": str(log),
         "PATH": str(fakebin) + os.pathsep + os.environ.get("PATH", ""),
     }

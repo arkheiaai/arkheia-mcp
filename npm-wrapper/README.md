@@ -29,7 +29,7 @@ Add to your agent config (Claude Code, Claude Desktop, Cursor, or any MCP-compat
       "command": "npx",
       "args": ["-y", "@arkheia/mcp-server"],
       "env": {
-        "ARKHEIA_API_KEY": "ak_live_your_key_here"
+        "ARKHEIA_API_KEY": "<arkheia-api-key>"
       }
     }
   }

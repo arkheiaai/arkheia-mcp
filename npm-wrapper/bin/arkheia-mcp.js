@@ -363,7 +363,7 @@ function main() {
     process.stderr.write(
       "[arkheia] Warning: ARKHEIA_API_KEY not set.\n" +
         "Get a free API key at https://arkheia.ai/mcp\n" +
-        "Then set: export ARKHEIA_API_KEY=ak_live_...\n\n"
+        "Then set: export ARKHEIA_API_KEY=<arkheia-api-key>\n\n"
     );
   }
 
