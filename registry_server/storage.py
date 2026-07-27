@@ -18,6 +18,14 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+PUBLIC_PROFILE_METADATA_KEYS = (
+    "model_id",
+    "version",
+    "checksum",
+    "download_url",
+    "updated_at",
+)
+
 
 class ProfileStorage:
     def __init__(self, profile_dir: str, base_url: str):
@@ -85,7 +93,7 @@ class ProfileStorage:
         checksum = hashlib.sha256(content).hexdigest()
         download_url = f"{self.base_url}/profiles/{model_id}/download"
 
-        return {
+        meta = {
             "model_id": model_id,
             "version": version,
             "checksum": checksum,
@@ -94,3 +102,4 @@ class ProfileStorage:
                 path.stat().st_mtime, tz=timezone.utc
             ).isoformat(),
         }
+        return {key: meta[key] for key in PUBLIC_PROFILE_METADATA_KEYS}
