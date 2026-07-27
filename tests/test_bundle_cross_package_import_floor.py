@@ -473,6 +473,55 @@ def test_removing_the_cross_package_files_breaks_the_import(with_edge: _StagedPa
     )
 
 
+@pytest.mark.parametrize(
+    "escaping",
+    ["../escaped.py", "/etc/passwd", "mcp_server/../../escaped.py"],
+    ids=["parent", "absolute", "embedded-parent"],
+)
+def test_the_build_refuses_a_copy_set_that_escapes_the_repo(tmp_path, escaping):
+    """
+    The copy set is now DATA CROSSING A PROCESS BOUNDARY — JSON out of a
+    subprocess, driving `fs` writes. The producer is our own stdlib-only resolver
+    reading our own repo, so this is defence in depth rather than a live hole; but
+    "the producer is trusted" is exactly the assumption that stops being true after
+    a refactor nobody re-audited, and an unchecked path here writes outside the
+    bundle or reads outside the repo.
+
+    Substitute a resolver that emits an escaping path and require the build to
+    abort. Run per shape, because a check that only rejects a leading `..` still
+    admits an absolute path and an embedded one.
+    """
+    staged = tmp_path / f"escape-{escaping!r}".replace("/", "_").replace("'", "")
+    first_party = import_closure.first_party_roots(_ROOT)
+    package_dir = npm_bundle.stage_package_copy(staged, set(first_party), _ROOT)
+
+    (staged / "tests" / "floor_support" / "import_closure.py").write_text(
+        "import json, sys\n"
+        f"print(json.dumps({['mcp_server/__init__.py', escaping]!r}))\n",
+        encoding="utf-8",
+    )
+
+    node = shutil.which("node")
+    assert node, "node is not on PATH, so the build cannot be exercised"
+    result = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [node, "scripts/build.js"],
+        cwd=str(package_dir),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    assert result.returncode != 0, (
+        f"the build accepted a copy set containing {escaping!r} and exited 0. It "
+        f"will read or write outside its own trees on any resolver fault.\n"
+        f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+    )
+    assert "[build]" in result.stderr, (
+        f"the build failed on {escaping!r} without its own diagnostic, so it "
+        f"failed for some other reason:\n{result.stderr}"
+    )
+
+
 def test_the_resolver_cli_the_build_depends_on_is_present_and_answers():
     """
     The build derives its copy set by running the shared resolver as a script. If

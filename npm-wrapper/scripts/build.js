@@ -183,20 +183,77 @@ function requiredSources() {
         `(${JSON.stringify(sources)}), so it did not walk the entry point.`
     );
   }
+  sources.forEach(assertContained);
   return sources;
 }
 
-function copyDir(src, dest) {
+/**
+ * A path from the resolver must be repo-relative and stay inside BOTH trees.
+ *
+ * The copy set is now DATA CROSSING A PROCESS BOUNDARY — it comes back from a
+ * subprocess as JSON and then drives `fs` writes. That is a real change in shape,
+ * even though the producer is our own stdlib-only resolver reading our own repo,
+ * so the containment is checked here rather than assumed: an absolute path, a
+ * `..` segment, or a symlinked source that escapes would otherwise let a buggy or
+ * substituted resolver read outside the repo or write outside the bundle.
+ *
+ * Both ends are checked, because they can fail independently: `src` is resolved
+ * with symlinks followed (`realpathSync`) and must stay under the repo, and
+ * `dest` must stay under the bundle root. Failure aborts the pack — a build that
+ * has been asked to copy something it cannot vouch for does not get to guess.
+ */
+function assertContained(source) {
+  if (typeof source !== "string" || source.length === 0) {
+    fail(`the resolver returned a non-path entry: ${JSON.stringify(source)}`);
+  }
+  if (path.isAbsolute(source) || /^[A-Za-z]:/.test(source)) {
+    fail(`the resolver returned an absolute path: ${source}`);
+  }
+  const normalised = path.normalize(source);
+  if (normalised.split(/[\\/]/).includes("..")) {
+    fail(`the resolver returned a path escaping the repo: ${source}`);
+  }
+
+  const src = path.resolve(REPO_ROOT, normalised);
+  const dest = path.resolve(BUNDLE_ROOT, normalised);
+  const inside = (child, parent) =>
+    child === parent || child.startsWith(parent + path.sep);
+
+  if (!inside(dest, BUNDLE_ROOT)) {
+    fail(`copying "${source}" would write outside the bundle, to ${dest}`);
+  }
+  if (!fs.existsSync(src)) {
+    fail(`required source "${source}" does not exist at ${src}`);
+  }
+  if (!inside(fs.realpathSync(src), fs.realpathSync(REPO_ROOT))) {
+    fail(
+      `"${source}" resolves outside the repo, to ${fs.realpathSync(src)} — a ` +
+        `symlink escaping the tree is not a bundle source`
+    );
+  }
+}
+
+/**
+ * Recursive copy, bounded to `dest`.
+ *
+ * `entry.name` cannot contain a path separator, but the containment check is kept
+ * anyway: it costs nothing and it means the bound holds for the whole walk rather
+ * than only for the root the walk started from.
+ */
+function copyDir(src, dest, bound) {
   if (!fs.existsSync(dest)) {
     fs.mkdirSync(dest, { recursive: true });
   }
   for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
     if (SKIP_NAMES.has(entry.name)) continue;
+    const srcPath = path.resolve(src, entry.name);
+    const destPath = path.resolve(dest, entry.name);
+    if (!destPath.startsWith(bound + path.sep)) {
+      fail(`refusing to write ${destPath}, which is outside ${bound}`);
+    }
     if (entry.isDirectory()) {
-      copyDir(srcPath, destPath);
-    } else if (entry.name.endsWith(".py")) {
+      copyDir(srcPath, destPath, bound);
+    } else if (entry.isFile() && entry.name.endsWith(".py")) {
       fs.copyFileSync(srcPath, destPath);
     }
   }
@@ -205,19 +262,17 @@ function copyDir(src, dest) {
 /**
  * Copy one repo-relative source to the SAME relative path under the bundle root.
  * Path-preserving by construction, so an import path in the repo is the identical
- * import path in the bundle.
+ * import path in the bundle. `assertContained` has already vouched for `source`.
  */
 function copySource(source) {
-  const src = path.resolve(REPO_ROOT, source);
-  const dest = path.join(BUNDLE_ROOT, source);
+  assertContained(source);
+  const normalised = path.normalize(source);
+  const src = path.resolve(REPO_ROOT, normalised);
+  const dest = path.resolve(BUNDLE_ROOT, normalised);
 
-  if (!fs.existsSync(src)) {
-    fail(`required source "${source}" does not exist at ${src}`);
-  }
-
-  console.log(`Copying ${source}`);
+  console.log(`Copying ${normalised}`);
   if (fs.statSync(src).isDirectory()) {
-    copyDir(src, dest);
+    copyDir(src, dest, BUNDLE_ROOT);
   } else {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(src, dest);
