@@ -627,8 +627,17 @@ async def test_connection_nominated_headers_are_stripped():
 # ADV-6 — credentials
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("credential_header", ["authorization", "x-api-key"])
-async def test_duplicate_credential_header_is_refused(credential_header):
+@pytest.mark.parametrize("route,path,credential_header", [
+    # Each header is duplicated at a destination that LEGITIMATELY uses it, so
+    # what this test discriminates is duplication and nothing else. (Duplicating
+    # x-api-key at the Grok route is refused too — as `foreign_credential`,
+    # covered by the CRED tests below, because it is a different fault.)
+    ("/proxy/grok/v1/chat/completions",     "grok",      "authorization"),
+    ("/proxy/together/v1/chat/completions", "together",  "authorization"),
+    ("/v1/messages",                        "anthropic", "x-api-key"),
+    ("/v1/messages",                        "anthropic", "authorization"),
+])
+async def test_duplicate_credential_header_is_refused(route, path, credential_header):
     """
     Pre-fix state discriminated: the forward-header dict comprehension kept the
     LAST occurrence, so ``Authorization: LEGIT`` + ``Authorization: ATTACKER``
@@ -636,10 +645,11 @@ async def test_duplicate_credential_header_is_refused(credential_header):
     request: ``authorization: Bearer ATTACKER``.
     """
     app = make_app()
-    with capture_upstream() as log:
+    with capture_upstream(json_response({"content": []})) as log:
         resp = await asgi_request(
-            app, "POST", "/proxy/grok/v1/chat/completions",
-            headers=[(credential_header, "LEGIT"), (credential_header, "ATTACKER")],
+            app, "POST", route,
+            headers=[(credential_header, "NOT-A-REAL-CREDENTIAL-first"),
+                     (credential_header, "NOT-A-REAL-CREDENTIAL-second")],
         )
 
     assert resp.status == 400
@@ -696,6 +706,288 @@ async def test_only_allowlisted_request_headers_are_forwarded():
                    "x-arkheia-internal", "proxy-authorization"):
         assert leaked not in sent, f"{leaked} was forwarded upstream"
     assert "authorization" in sent  # positive control
+
+
+# ---------------------------------------------------------------------------
+# ADV-8 — the credential boundary: which secret may reach which vendor
+#
+# THE DEFECT. The forwarded-header allowlist was GLOBAL and held BOTH
+# `authorization` and `x-api-key`, and `_forward()` applied it to every
+# provider. A caller carrying both had both delivered to whichever single
+# destination the route resolved to — reproduced by a second vendor with Grok
+# receiving a Bearer token AND an Anthropic-style x-api-key.
+#
+# WHY THE PREVIOUS ROUND MISSED IT. The duplicate-credential check counts
+# REPEATED INSTANCES OF ONE header name. This is TWO DIFFERENT header names,
+# each appearing once. A per-header rule cannot see a cross-header interaction.
+#
+# The wire-level proof at a real socket sink is in
+# `proxy/tests/test_passthrough_credential_wire.py`; this block is the exhaustive
+# matrix at the boundary that owns the decision.
+# ---------------------------------------------------------------------------
+
+#: Every (route, credential header) pair, and whether that destination uses it.
+#: Written out per destination on purpose — a table derived from the module
+#: under test would agree with whatever the module says.
+CREDENTIAL_MATRIX = [
+    # route key,    header,             belongs to this destination
+    ("grok",        "authorization",    True),
+    ("grok",        "x-api-key",        False),
+    ("grok",        "x-goog-api-key",   False),
+    ("together",    "authorization",    True),
+    ("together",    "x-api-key",        False),
+    ("together",    "x-goog-api-key",   False),
+    ("gemini",      "authorization",    True),
+    ("gemini",      "x-goog-api-key",   True),
+    ("gemini",      "x-api-key",        False),
+    ("anthropic",   "x-api-key",        True),
+    ("anthropic",   "authorization",    True),
+    ("anthropic",   "x-goog-api-key",   False),
+]
+
+LEGIT_PATH = {"grok": "chat/completions", "together": "chat/completions",
+              "gemini": "models/gemini-2.5-flash:generateContent",
+              "anthropic": "messages"}
+
+#: Obviously-synthetic. No vendor prefix (`sk-`, `xai-`, `AIza`) appears — those
+#: shapes are what secret scanners match, and a fixture that trips one costs a
+#: CI cycle for nothing.
+FAKE = "NOT-A-REAL-CREDENTIAL-fixture"
+
+
+@pytest.mark.parametrize("route_key,header,belongs", CREDENTIAL_MATRIX)
+async def test_only_this_destinations_credential_is_ever_forwarded(
+    route_key, header, belongs
+):
+    """
+    The whole rule, as one table. A credential this destination does not use is
+    refused and never leaves; the one it does use is forwarded verbatim.
+
+    Pre-fix state discriminated: every False row was FORWARDED — the global
+    allowlist contained `authorization` and `x-api-key` and applied to all four
+    providers, so a no-op fix fails half this table.
+    """
+    prefix, _provider, _origin = ROUTES[route_key]
+    app = make_app(engine=None)
+    responder = json_response({"choices": [{"message": {"content": "ok"}}],
+                               "content": [], "candidates": []})
+    with capture_upstream(responder) as log:
+        resp = await asgi_request(
+            app, "POST", prefix + LEGIT_PATH[route_key],
+            headers=[(header, FAKE)],
+        )
+
+    if belongs:
+        assert resp.status == 200, resp.body
+        assert log.count == 1
+        assert log.last.headers[header] == FAKE          # forwarded verbatim
+    else:
+        assert resp.status == 400, (
+            f"{header} was accepted at the {route_key} route: {resp.body!r}"
+        )
+        assert log.count == 0, (
+            f"{header} reached {log.urls()!r} — a credential for another vendor "
+            f"left this process"
+        )
+        assert resp.json()["deny_code"] == pt.DENY_FOREIGN_CREDENTIAL
+
+
+@pytest.mark.parametrize("route_key", ["grok", "together", "gemini"])
+async def test_the_reproduced_case_both_credentials_at_once(route_key):
+    """
+    CODEX'S EXACT CASE at the ASGI boundary: one request carrying both an
+    `authorization` and an `x-api-key`.
+
+    Pre-fix: 200, and the outgoing httpx.Request carried both.
+    """
+    prefix, _provider, _origin = ROUTES[route_key]
+    app = make_app()
+    with capture_upstream() as log:
+        resp = await asgi_request(
+            app, "POST", prefix + LEGIT_PATH[route_key],
+            headers=[("authorization", "Bearer " + FAKE), ("x-api-key", FAKE)],
+        )
+
+    assert resp.status == 400
+    assert log.count == 0
+    for request in log.requests:   # belt and braces: nothing left, and if it
+        assert "x-api-key" not in request.headers   # ever does, not with this
+    assert resp.json()["deny_code"] == pt.DENY_FOREIGN_CREDENTIAL
+
+
+async def test_two_credentials_a_destination_both_accepts_is_still_refused():
+    """
+    Anthropic accepts EITHER `x-api-key` OR an OAuth `authorization`. Both at
+    once is not two spellings of one credential — it is two credentials, at most
+    one of which the caller meant for this vendor, and the proxy cannot tell
+    which. It refuses rather than choosing, exactly as it does for a repeated
+    header.
+
+    Pre-fix: forwarded, both headers on the wire.
+    """
+    app = make_app()
+    with capture_upstream(json_response({"content": []})) as log:
+        resp = await asgi_request(
+            app, "POST", "/v1/messages",
+            headers=[("authorization", "Bearer " + FAKE), ("x-api-key", FAKE)],
+        )
+    assert (resp.status, log.count) == (400, 0)
+    assert resp.json()["deny_code"] == pt.DENY_DUPLICATE_CREDENTIAL
+
+    # Control rows: EITHER alone is accepted and forwarded verbatim.
+    for header in ("authorization", "x-api-key"):
+        with capture_upstream(json_response({"content": []})) as log2:
+            ok = await asgi_request(app, "POST", "/v1/messages",
+                                    headers=[(header, FAKE)])
+        assert ok.status == 200
+        assert log2.last.headers[header] == FAKE
+
+
+@pytest.mark.parametrize("route_key,param,belongs", [
+    ("gemini",    "key",          True),
+    ("grok",      "key",          False),
+    ("together",  "key",          False),
+    ("anthropic", "key",          False),
+    ("gemini",    "access_token", False),
+    ("grok",      "access_token", False),
+])
+async def test_credential_query_parameters_are_per_destination_too(
+    route_key, param, belongs
+):
+    """
+    The sibling in another spelling. `params=dict(request.query_params)` was a
+    shared allowlist by omission: every parameter to every destination, so a
+    Google `?key=` addressed to the Grok route left for api.x.ai.
+
+    Pre-fix state discriminated: every False row was forwarded.
+    """
+    prefix, _provider, _origin = ROUTES[route_key]
+    app = make_app()
+    responder = json_response({"choices": [{"message": {"content": "ok"}}],
+                               "content": [], "candidates": []})
+    with capture_upstream(responder) as log:
+        resp = await asgi_request(
+            app, "POST", prefix + LEGIT_PATH[route_key],
+            query_string=f"{param}={FAKE}".encode(),
+        )
+
+    if belongs:
+        assert resp.status == 200
+        assert log.last.url.params[param] == FAKE
+    else:
+        assert resp.status == 400, f"?{param} was accepted at {route_key}"
+        assert log.count == 0
+        assert resp.json()["deny_code"] == pt.DENY_FOREIGN_CREDENTIAL
+
+
+async def test_ordinary_query_parameters_still_pass_through():
+    """
+    The parameter filter must not become a blanket ban — otherwise the table
+    above passes for the wrong reason, and real provider calls break.
+    """
+    app = make_app()
+    with capture_upstream() as log:
+        resp = await asgi_request(
+            app, "POST", "/proxy/grok/v1/chat/completions",
+            query_string=b"stream=true&limit=5",
+        )
+    assert resp.status == 200
+    assert log.last.url.params["stream"] == "true"
+    assert log.last.url.params["limit"] == "5"
+
+
+async def test_no_credential_header_is_in_the_shared_forward_allowlist():
+    """
+    The structural property, asserted at the boundary that owns it: the set
+    applied to EVERY destination contains no credential at all, so the class of
+    defect cannot be reintroduced by adding a name to one list.
+
+    Pre-fix state discriminated: `_FORWARDED_HEADERS` held `authorization` and
+    `x-api-key`.
+    """
+    assert pt._SAFE_TRANSPORT_HEADERS & pt._CREDENTIAL_HEADERS == frozenset()
+    # ... and every provider's credential set is recognised by the screen, or a
+    # header could be a credential in one place and invisible in another.
+    assert pt.PROVIDERS, "no providers discovered — this check observed nothing"
+    for provider in pt.PROVIDERS:
+        assert provider.credential_headers, (
+            f"{provider.name} forwards no credential at all; every route here "
+            f"relays a caller credential, so this is a discovery failure"
+        )
+        assert provider.credential_headers <= pt._CREDENTIAL_HEADERS, provider.name
+        assert provider.credential_query_params <= pt._CREDENTIAL_QUERY_PARAMS
+
+
+async def test_provider_specific_headers_do_not_travel_to_other_vendors():
+    """
+    `anthropic-version` / `anthropic-beta` are not secrets, but they are one
+    vendor's vocabulary and were being relayed to all four. Same derivation, so
+    the same rule.
+    """
+    app = make_app()
+    with capture_upstream() as log:
+        await asgi_request(
+            app, "POST", "/proxy/grok/v1/chat/completions",
+            headers=[("authorization", "Bearer " + FAKE),
+                     ("anthropic-version", "2023-06-01"),
+                     ("anthropic-beta", "some-flag")],
+        )
+    sent = {k.lower() for k in log.last.headers.keys()}
+    assert "anthropic-version" not in sent
+    assert "anthropic-beta" not in sent
+    assert "authorization" in sent            # positive control
+
+    with capture_upstream(json_response({"content": []})) as log2:
+        await asgi_request(
+            app, "POST", "/v1/messages",
+            headers=[("x-api-key", FAKE), ("anthropic-version", "2023-06-01")],
+        )
+    assert log2.last.headers["anthropic-version"] == "2023-06-01"
+
+
+async def test_a_foreign_credential_refusal_names_the_way_out():
+    """
+    Gate-9 legibility for the new verdict: the caller is told which credential
+    this destination uses, so a misconfiguration is one edit from fixed. Header
+    NAMES only — the value the caller sent is never echoed.
+    """
+    app = make_app()
+    with capture_upstream():
+        resp = await asgi_request(
+            app, "POST", "/proxy/grok/v1/chat/completions",
+            headers=[("x-api-key", FAKE)],
+        )
+    body = resp.json()
+    assert body["error"] == "invalid_credential_header"
+    assert body["deny_code"] == pt.DENY_FOREIGN_CREDENTIAL
+    assert body["credential_headers"] == ["authorization"]
+    assert body["credential_query_params"] == []
+    assert body["reason"] and body["remedy"]
+    assert len(body["receipt_id"]) == 36
+    assert FAKE not in json.dumps(body), "the refusal echoed the credential VALUE"
+
+
+async def test_a_refused_credential_is_receipted_by_name_never_by_value():
+    """A blocked disclosure must be investigable, and must not itself become one."""
+    written: list[dict] = []
+
+    class Rail:
+        async def write(self, record):
+            written.append(record)
+
+    app = make_app(audit_writer=Rail())
+    with capture_upstream() as log:
+        await asgi_request(
+            app, "POST", "/proxy/grok/v1/chat/completions",
+            headers=[("x-api-key", FAKE)],
+        )
+    assert log.count == 0
+    assert len(written) == 1
+    record = written[0]
+    assert record["deny_code"] == pt.DENY_FOREIGN_CREDENTIAL
+    assert record["action_taken"] == "refuse"
+    assert "x-api-key" in record["request_header_names"]
+    assert FAKE not in json.dumps(record), "the receipt recorded a credential VALUE"
 
 
 # ---------------------------------------------------------------------------

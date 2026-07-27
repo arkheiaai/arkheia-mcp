@@ -50,8 +50,27 @@ provider 3xx is relayed to the caller rather than fetched by us, so a redirect
 to a link-local or internal address is never dereferenced with our network
 position.
 
+Credential boundary (cross-provider disclosure containment)
+-----------------------------------------------------------
+The credential forwarded to a provider is the one THAT provider uses, and only
+that one. The mapping is per destination (``Provider.credential_headers`` /
+``credential_query_params``), not one allowlist shared by all four: a shared
+list cannot express "this key belongs to that vendor", and the previous one --
+holding both ``authorization`` and ``x-api-key`` -- delivered BOTH to whichever
+single destination the route resolved to. A caller routing Anthropic and xAI
+traffic through this proxy had their Anthropic key handed to xAI on the ACCEPTED
+path, in a request they authorised for something else.
+
+A credential the destination does not use is REFUSED, not quietly dropped
+(``foreign_credential``): a secret arriving at the wrong vendor's route is a
+caller mistake worth telling them about, and silence would leave them believing
+a key they can see in their own config is reaching a provider it never reaches.
+The same rule closes the query string, where a Google ``?key=`` addressed to the
+Grok route used to leave for api.x.ai.
+
 Security:
   - Only allowlisted headers are forwarded upstream (no cookie/internal header leak)
+  - Credentials are attached per destination; a foreign credential is refused
   - Duplicate credential headers are refused rather than silently last-wins
   - The full RFC 9110 hop-by-hop set (plus content-length) is stripped from the
     relayed response
@@ -85,10 +104,18 @@ ANTHROPIC_UPSTREAM  = "https://api.anthropic.com"
 # ---------------------------------------------------------------------------
 # Security: header allowlist for upstream forwarding
 # ---------------------------------------------------------------------------
-# Only these headers are forwarded to upstream providers. This prevents
-# leaking internal cookies, auth tokens for other services, or proxy headers.
-_FORWARDED_HEADERS = {
-    "authorization",       # provider API key (Bearer token)
+# Forwarded to EVERY destination. Nothing in this set carries a caller secret,
+# and that is the invariant — enforced statically by the floor tier, because it
+# is the property whose loss produced a cross-vendor credential disclosure.
+#
+# A GLOBAL allowlist cannot express "this key belongs to that vendor". The
+# previous one held BOTH `authorization` and `x-api-key` and was applied to all
+# four providers, so a caller carrying both — the ordinary shape for a client
+# configured for two vendors, or a gateway that attaches every credential it
+# holds — had both delivered to whichever single destination the route resolved
+# to. Credentials are therefore attached PER DESTINATION, from
+# `Provider.credential_headers`, and never from here.
+_SAFE_TRANSPORT_HEADERS = frozenset({
     "content-type",
     "accept",
     "user-agent",
@@ -99,16 +126,29 @@ _FORWARDED_HEADERS = {
     "x-stainless-package-version",
     "x-stainless-runtime",
     "x-stainless-runtime-version",
-    "x-api-key",           # Anthropic auth header
-    "anthropic-version",   # required by Anthropic API
-    "anthropic-beta",      # optional Anthropic feature flags
-}
+})
 
-#: Headers that carry a caller credential. More than one occurrence of any of
-#: these is refused: silently picking one (a dict comprehension picks the LAST)
-#: means the credential this proxy authenticates with can differ from the one a
-#: downstream or upstream inspector attributes the call to.
-_CREDENTIAL_HEADERS = frozenset({"authorization", "x-api-key"})
+#: Every header name that can carry a caller credential to ANY provider — the
+#: vocabulary the screen recognises, not the set any one destination accepts.
+#: It must be a superset of every provider's `credential_headers`; that is what
+#: makes a credential FOREIGN to a destination detectable at all. A header
+#: absent from this vocabulary is invisible to the screen, so an addition to a
+#: provider's set without an addition here would be a silent hole (the floor
+#: tier fails the build on exactly that).
+_CREDENTIAL_HEADERS = frozenset({
+    "authorization",     # OpenAI-compatible bearer (xAI, Together), Anthropic
+                         # OAuth, Google OAuth
+    "x-api-key",         # Anthropic API key
+    "x-goog-api-key",    # Google API key
+})
+
+#: Query parameters that carry a caller credential. The query string was the
+#: same shared allowlist in another spelling: `params=dict(request.query_params)`
+#: relayed every parameter to every destination, so a Google `?key=` sent to the
+#: Grok route left this process addressed to api.x.ai.
+_CREDENTIAL_QUERY_PARAMS = frozenset({
+    "key", "api_key", "apikey", "access_token", "auth_token", "token",
+})
 
 # ---------------------------------------------------------------------------
 # Security: hop-by-hop response headers
@@ -172,6 +212,7 @@ DENY_PATH_TRAVERSAL         = "path_traversal"
 DENY_PATH_ILLEGAL_CHARACTER = "path_illegal_character"
 DENY_UPSTREAM_TARGET_ESCAPED = "upstream_target_escaped"
 DENY_DUPLICATE_CREDENTIAL   = "duplicate_credential_header"
+DENY_FOREIGN_CREDENTIAL     = "foreign_credential"
 
 #: deny code -> (operator-facing reason, what would clear it)
 DENY_TAXONOMY: dict[str, tuple[str, str]] = {
@@ -197,9 +238,26 @@ DENY_TAXONOMY: dict[str, tuple[str, str]] = {
     DENY_DUPLICATE_CREDENTIAL: (
         "The request carried more than one credential header, so the credential "
         "this proxy would forward is ambiguous.",
-        "Send exactly one Authorization header and/or one X-Api-Key header.",
+        "Send exactly one credential header. Two different credential headers "
+        "are two credentials, not two spellings of one, and this proxy will not "
+        "guess which was meant for this provider.",
+    ),
+    DENY_FOREIGN_CREDENTIAL: (
+        "The request carried a credential this provider does not use. It was "
+        "NOT forwarded: sending it on would deliver one vendor's secret to a "
+        "different vendor.",
+        "Send only the credential this provider uses — see `credential_headers` "
+        "and `credential_query_params` — and route the other one to the provider "
+        "it belongs to.",
     ),
 }
+
+#: Deny codes about the caller's credentials rather than the caller's path. They
+#: share a wire error name, which was the pre-existing contract for the
+#: duplicate case.
+_CREDENTIAL_DENY_CODES = frozenset({
+    DENY_DUPLICATE_CREDENTIAL, DENY_FOREIGN_CREDENTIAL,
+})
 
 
 # ---------------------------------------------------------------------------
@@ -214,11 +272,25 @@ class Provider:
     Everything the forwarding gate compares against lives here, and nothing here
     is derived from a request. ``expected_scheme`` / ``expected_host`` /
     ``expected_port`` / ``base_path`` are parsed from ``base`` once, at import.
+
+    ``credential_headers`` / ``credential_query_params`` are the whole of the
+    credential mapping: the ONLY secrets this destination may receive. They
+    default to EMPTY, deliberately — a fifth provider added without a thought
+    about credentials forwards none, so the caller gets a 401 from the vendor
+    rather than the proxy quietly relaying somebody else's key. Fail-closed on a
+    grant path.
+
+    ``extra_headers`` carries provider-specific NON-credential headers (e.g.
+    ``anthropic-version``). They are per-destination for the same reason: a
+    header only one vendor defines has no business on a request to another.
     """
     name: str
     base: str
     path_re: re.Pattern
     allowed: tuple[str, ...]
+    credential_headers: frozenset = frozenset()
+    credential_query_params: frozenset = frozenset()
+    extra_headers: frozenset = frozenset()
 
     @property
     def _split(self):
@@ -247,32 +319,143 @@ _OPENAI_ALLOWED = (
     "audio/translations", "moderations",
 )
 
-GROK = Provider("grok", GROK_UPSTREAM, _OPENAI_PATH_RE, _OPENAI_ALLOWED)
-TOGETHER = Provider("together", TOGETHER_UPSTREAM, _OPENAI_PATH_RE, _OPENAI_ALLOWED)
+# The credential mapping, one row per destination. Each set names the
+# credential(s) THAT VENDOR'S OWN API defines; anything else a caller sends is,
+# by definition, meant for somebody else.
+GROK = Provider(
+    "grok", GROK_UPSTREAM, _OPENAI_PATH_RE, _OPENAI_ALLOWED,
+    # xAI is OpenAI-compatible: `Authorization: Bearer <xai key>`, and nothing
+    # else. It has no x-api-key surface at all.
+    credential_headers=frozenset({"authorization"}),
+)
+TOGETHER = Provider(
+    "together", TOGETHER_UPSTREAM, _OPENAI_PATH_RE, _OPENAI_ALLOWED,
+    # Likewise OpenAI-compatible bearer only.
+    credential_headers=frozenset({"authorization"}),
+)
 GEMINI = Provider(
     "gemini", GEMINI_UPSTREAM, _GEMINI_PATH_RE,
     ("models", "models/{model}", "models/{model}:{action}"),
+    # Google accepts its API key as the `x-goog-api-key` header or the `key`
+    # query parameter, and an OAuth bearer in `authorization`.
+    credential_headers=frozenset({"x-goog-api-key", "authorization"}),
+    credential_query_params=frozenset({"key"}),
 )
 ANTHROPIC = Provider(
     "anthropic", ANTHROPIC_UPSTREAM + "/v1", _ANTHROPIC_PATH_RE,
     ("messages", "models"),
+    # Anthropic accepts EITHER an API key in `x-api-key` OR an OAuth bearer in
+    # `authorization` (what the CLI sends on a subscription). Both are genuinely
+    # Anthropic credentials, so both belong here — but only one may appear on a
+    # single request; two are two credentials, and the screen refuses rather
+    # than choosing.
+    credential_headers=frozenset({"x-api-key", "authorization"}),
+    extra_headers=frozenset({"anthropic-version", "anthropic-beta"}),
 )
 
 PROVIDERS: tuple[Provider, ...] = (GROK, TOGETHER, GEMINI, ANTHROPIC)
+
+#: A provider may not accept a credential the screen cannot recognise: the
+#: screen would then be unable to call that header foreign anywhere else, which
+#: is the exact shape of the defect this mapping exists to close. Checked at
+#: import so it can never be true at runtime, and again statically in the floor
+#: tier so it cannot be true on a branch that never imports this module.
+for _provider in PROVIDERS:
+    _unknown = _provider.credential_headers - _CREDENTIAL_HEADERS
+    if _unknown:
+        raise RuntimeError(
+            f"provider {_provider.name!r} accepts credential header(s) "
+            f"{sorted(_unknown)} that _CREDENTIAL_HEADERS does not recognise; "
+            f"they would be invisible to the foreign-credential screen"
+        )
+    _unknown_params = _provider.credential_query_params - _CREDENTIAL_QUERY_PARAMS
+    if _unknown_params:
+        raise RuntimeError(
+            f"provider {_provider.name!r} accepts credential query param(s) "
+            f"{sorted(_unknown_params)} that _CREDENTIAL_QUERY_PARAMS does not "
+            f"recognise; they would be invisible to the foreign-credential screen"
+        )
+    if _provider.credential_headers & _SAFE_TRANSPORT_HEADERS:
+        raise RuntimeError(
+            f"provider {_provider.name!r} has a credential header that is also "
+            f"forwarded to every destination by _SAFE_TRANSPORT_HEADERS"
+        )
+del _provider, _unknown, _unknown_params
 
 
 # ---------------------------------------------------------------------------
 # Forwarding gate
 # ---------------------------------------------------------------------------
 
-def _duplicate_credential_headers(request: Request) -> list[str]:
-    """Credential header names that appear more than once on the request."""
+def _credential_header_counts(request: Request) -> dict[str, int]:
+    """
+    How many times each credential header appears, read from the RAW headers.
+
+    Raw, because the mapping view collapses repeats and a dict comprehension
+    over it keeps the LAST — which is how a duplicate credential silently
+    changed which key this proxy authenticated with.
+    """
     seen: dict[str, int] = {}
     for raw_key, _ in request.headers.raw:
         key = raw_key.decode("latin-1").lower()
         if key in _CREDENTIAL_HEADERS:
             seen[key] = seen.get(key, 0) + 1
-    return sorted(k for k, n in seen.items() if n > 1)
+    return seen
+
+
+def _duplicate_credential_headers(request: Request) -> list[str]:
+    """Credential header names that appear more than once on the request."""
+    return sorted(k for k, n in _credential_header_counts(request).items() if n > 1)
+
+
+def _foreign_credentials(request: Request, provider: Provider) -> list[str]:
+    """
+    Credentials on the request that ``provider`` does not use.
+
+    This is the cross-vendor disclosure: forwarding one of these hands a secret
+    the caller issued for vendor A to vendor B, inside a request the caller
+    authorised for something else entirely. Names only ever leave this function
+    — never values.
+    """
+    foreign = [
+        name for name in _credential_header_counts(request)
+        if name not in provider.credential_headers
+    ]
+    foreign += [
+        f"?{name}" for name in {k.lower() for k in request.query_params.keys()}
+        if name in _CREDENTIAL_QUERY_PARAMS
+        and name not in provider.credential_query_params
+    ]
+    return sorted(foreign)
+
+
+def _screen_credentials(request: Request, provider: Provider) -> Optional[str]:
+    """
+    Return a deny code, or None if the request carries exactly one credential
+    this destination uses (or none at all).
+
+    THE RULE: the credential forwarded to a provider is the one that provider
+    uses, and only that one.
+
+    Three refusable shapes, and the second is the one a per-header rule cannot
+    see:
+
+      1. a credential this destination does not use            -> FOREIGN
+      2. two DIFFERENT credential headers, both usable here     -> DUPLICATE
+      3. the same credential header more than once              -> DUPLICATE
+
+    (1) is checked first because it is the disclosure; the others are ambiguity.
+    """
+    foreign = _foreign_credentials(request, provider)
+    if foreign:
+        return DENY_FOREIGN_CREDENTIAL
+
+    counts = _credential_header_counts(request)
+    if any(n > 1 for n in counts.values()):
+        return DENY_DUPLICATE_CREDENTIAL
+    if len(counts) > 1:
+        return DENY_DUPLICATE_CREDENTIAL
+    return None
 
 
 def _screen_path(provider: Provider, path: str) -> Optional[str]:
@@ -347,9 +530,9 @@ def _gate(request: Request, provider: Provider, path: str) -> tuple[Optional[str
     Runs before any HTTP client exists and before any header is copied, so a
     refusal cannot leak a credential to the attempted destination.
     """
-    dups = _duplicate_credential_headers(request)
-    if dups:
-        return None, DENY_DUPLICATE_CREDENTIAL
+    deny = _screen_credentials(request, provider)
+    if deny:
+        return None, deny
 
     deny = _screen_path(provider, path)
     if deny:
@@ -477,7 +660,7 @@ async def _refuse(
         # Unchanged wire contract for the pre-existing path denies.
         "error": (
             "invalid_credential_header"
-            if deny_code == DENY_DUPLICATE_CREDENTIAL
+            if deny_code in _CREDENTIAL_DENY_CODES
             else "invalid_path"
         ),
         "deny_code": deny_code,
@@ -486,7 +669,13 @@ async def _refuse(
         "receipt_id": receipt_id,
         "receipt_status": receipt_status,
     }
-    if deny_code != DENY_DUPLICATE_CREDENTIAL:
+    if deny_code in _CREDENTIAL_DENY_CODES:
+        # Every NO carries a path to YES: name the credential(s) this
+        # destination actually uses. Header NAMES are not secrets; the values
+        # the caller sent are never echoed.
+        body["credential_headers"] = sorted(provider.credential_headers)
+        body["credential_query_params"] = sorted(provider.credential_query_params)
+    else:
         body["allowed"] = list(provider.allowed)
 
     return Response(
@@ -673,16 +862,52 @@ def _filter_response_headers(upstream_headers) -> dict:
     }
 
 
+def _forwardable_headers(request: Request, provider: Provider) -> dict:
+    """
+    The headers that may leave, for THIS destination.
+
+    Derived per destination, never from one shared allowlist: the shared list is
+    what delivered an Anthropic-style ``x-api-key`` to xAI. A credential that is
+    not this provider's is not here, and the gate has already refused the
+    request that carried one — two independent controls, so a weakening of
+    either alone is not a disclosure.
+    """
+    allowed = (
+        _SAFE_TRANSPORT_HEADERS
+        | provider.credential_headers
+        | provider.extra_headers
+    )
+    return {k: v for k, v in request.headers.items() if k.lower() in allowed}
+
+
+def _forwardable_params(request: Request, provider: Provider) -> dict:
+    """
+    The query parameters that may leave, for THIS destination.
+
+    A credential-bearing parameter (``key``, ``access_token``, …) is forwarded
+    only to a provider that uses it. Everything else passes: providers carry
+    ordinary parameters and dropping them would break real calls.
+    """
+    return {
+        k: v for k, v in request.query_params.items()
+        if k.lower() not in _CREDENTIAL_QUERY_PARAMS
+        or k.lower() in provider.credential_query_params
+    }
+
+
 async def _forward(
     request: Request,
     upstream_url: str,
+    provider: Provider,
 ) -> tuple[bytes, int, dict]:
     """
     Forward the request to upstream_url. Returns (body, status_code, headers).
     Raises on network error.
 
     Security:
-      - only allowlisted headers are forwarded (see _FORWARDED_HEADERS)
+      - only this destination's headers are forwarded (see _forwardable_headers)
+      - only this destination's credential parameters are forwarded (see
+        _forwardable_params)
       - follow_redirects is False, EXPLICITLY: a provider 3xx is relayed to the
         caller, never dereferenced by us. Relying on the library default would
         make an SSRF control a property of a dependency's release notes.
@@ -691,11 +916,7 @@ async def _forward(
     """
     body = await request.body()
 
-    # Only forward safe, allowlisted headers — never cookies, internal tokens, etc.
-    forward_headers = {
-        k: v for k, v in request.headers.items()
-        if k.lower() in _FORWARDED_HEADERS
-    }
+    forward_headers = _forwardable_headers(request, provider)
 
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
         upstream_response = await client.request(
@@ -703,7 +924,7 @@ async def _forward(
             url=upstream_url,
             content=body,
             headers=forward_headers,
-            params=dict(request.query_params),
+            params=_forwardable_params(request, provider),
         )
 
     response_headers = _filter_response_headers(upstream_response.headers)
@@ -734,7 +955,7 @@ async def grok_passthrough(path: str, request: Request):
 
     try:
         request_body = await request.body()
-        response_body, status_code, response_headers = await _forward(request, upstream_url)
+        response_body, status_code, response_headers = await _forward(request, upstream_url, GROK)
     except Exception as e:
         logger.error("grok_passthrough: upstream error: %s", e)
         return Response(
@@ -785,7 +1006,7 @@ async def together_passthrough(path: str, request: Request):
 
     try:
         request_body = await request.body()
-        response_body, status_code, response_headers = await _forward(request, upstream_url)
+        response_body, status_code, response_headers = await _forward(request, upstream_url, TOGETHER)
     except Exception as e:
         logger.error("together_passthrough: upstream error: %s", e)
         return Response(
@@ -836,7 +1057,7 @@ async def gemini_passthrough(path: str, request: Request):
 
     try:
         request_body = await request.body()
-        response_body, status_code, response_headers = await _forward(request, upstream_url)
+        response_body, status_code, response_headers = await _forward(request, upstream_url, GEMINI)
     except Exception as e:
         logger.error("gemini_passthrough: upstream error: %s", e)
         return Response(
@@ -886,7 +1107,7 @@ async def anthropic_passthrough(path: str, request: Request):
 
     try:
         request_body = await request.body()
-        response_body, status_code, response_headers = await _forward(request, upstream_url)
+        response_body, status_code, response_headers = await _forward(request, upstream_url, ANTHROPIC)
     except Exception as e:
         logger.error("anthropic_passthrough: upstream error: %s", e)
         return Response(
