@@ -298,9 +298,9 @@ async def test_policy_refusal_happens_before_any_inference(
     prov_mock = provider(prov, _provider_ok())
     screening.verify.return_value = {"risk_level": "LOW", "confidence": 0.9,
                                      "features_triggered": [], "error": None}
-    policy = tool_registry.REGISTRY[name]
+    policy = tool_registry._REGISTRY[name]
 
-    monkeypatch.delitem(tool_registry.REGISTRY, name)
+    monkeypatch.delitem(tool_registry._REGISTRY, name)
     refused = await _tool(tool)(prompt=PROMPT)
 
     assert prov_mock.await_count == 0, "the provider was called despite a policy refusal"
@@ -312,7 +312,7 @@ async def test_policy_refusal_happens_before_any_inference(
     )
 
     # POSITIVE CONTROL: with the policy restored the same call reaches both.
-    monkeypatch.setitem(tool_registry.REGISTRY, name, policy)
+    monkeypatch.setitem(tool_registry._REGISTRY, name, policy)
     allowed = await _tool(tool)(prompt=PROMPT)
     assert prov_mock.await_count == 1
     assert screening.verify.await_count == 1
@@ -343,7 +343,7 @@ async def test_refusal_and_success_shapes_are_both_pinned(
     assert success["arkheia"]["risk_level"] == "HIGH"
     assert "risk_level" not in success
 
-    monkeypatch.delitem(tool_registry.REGISTRY, name)
+    monkeypatch.delitem(tool_registry._REGISTRY, name)
     refusal = await _tool(tool)(prompt=PROMPT)
     assert refusal["risk_level"] == "UNKNOWN"
     assert "arkheia" not in refusal
