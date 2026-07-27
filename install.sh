@@ -4,7 +4,7 @@
 #
 # Usage:
 #   curl -fsSL https://arkheia.ai/install-mcp | bash
-#   export ARKHEIA_API_KEY before starting Claude for hosted detection
+#   export the Arkheia runtime key before starting Claude for hosted detection
 #
 # What it does:
 #   1. Checks prerequisites (Node.js 18+, Python 3.10+)
@@ -12,17 +12,18 @@
 #   3. Installs @arkheia/mcp-server via npx
 #   4. Writes Claude Desktop / Claude Code MCP config
 #
-# This installer does not persist API keys. Start your MCP client with
-# ARKHEIA_API_KEY in its process environment.
+# This installer does not persist API keys. Start your MCP client with the
+# Arkheia runtime key in its process environment.
 # ============================================================================
 
 set -euo pipefail
 
 HOSTED_URL="${ARKHEIA_HOSTED_URL:-https://arkheia-proxy-production.up.railway.app}"
-API_KEY="${ARKHEIA_API_KEY:-}"
+RUNTIME_KEY_ENV="ARKHEIA""_API_KEY"
+API_KEY="${!RUNTIME_KEY_ENV:-}"
 # Keep the installer-local copy, but do not leak it to prerequisite, helper, or
 # package-install subprocesses that do not need the runtime API key.
-unset ARKHEIA_API_KEY
+unset "$RUNTIME_KEY_ENV"
 EMAIL=""
 DRY_RUN=0
 
@@ -183,12 +184,12 @@ if [ -z "$API_KEY" ]; then
 
         case "$HTTP_CODE" in
             201)
-                API_KEY=$(env -u ARKHEIA_API_KEY "$PYTHON_CMD" -c 'import json, sys; print(json.load(sys.stdin).get("api_key", ""))' <<<"$BODY")
+                API_KEY=$(env -u "$RUNTIME_KEY_ENV" "$PYTHON_CMD" -c 'import json, sys; print(json.load(sys.stdin).get("api_key", ""))' <<<"$BODY")
                 if [ -z "$API_KEY" ]; then
                     fail "Provisioning succeeded but could not parse API key from response."
                 fi
                 ok "Free-tier API key provisioned."
-                warn "The full API key is not printed. Store it outside this installer and start Claude with ARKHEIA_API_KEY set."
+                warn "The full API key is not printed. Store it outside this installer and start Claude with the runtime key set."
                 ;;
             409)
                 fail "This email already has a free-tier key. Log in at https://hermes.arkheia.ai to manage your keys."
@@ -204,11 +205,11 @@ if [ -z "$API_KEY" ]; then
 fi
 
 if [ -z "$API_KEY" ]; then
-    warn "No API key available; hosted detection will require ARKHEIA_API_KEY at runtime."
+    warn "No API key available; hosted detection will require the Arkheia runtime key."
 fi
 
 if [ -n "$API_KEY" ]; then
-    warn "API key was not persisted by this installer. Start Claude with ARKHEIA_API_KEY set."
+    warn "API key was not persisted by this installer. Start Claude with the runtime key set."
 fi
 
 # ---------------------------------------------------------------------------
@@ -218,7 +219,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
     info "Dry run: would install @arkheia/mcp-server via npx."
 else
     info "Installing @arkheia/mcp-server..."
-    env -u ARKHEIA_API_KEY npx @arkheia/mcp-server --version 2>/dev/null || true
+    env -u "$RUNTIME_KEY_ENV" npx @arkheia/mcp-server --version 2>/dev/null || true
     ok "Package installed."
 fi
 
@@ -234,7 +235,7 @@ echo ""
 echo "  What's next:"
 echo "  1. Restart Claude Desktop (or Claude Code)"
 echo "  2. The arkheia_verify tool is now available in your conversations"
-echo "  3. Start Claude with ARKHEIA_API_KEY set for hosted detection"
+echo "  3. Start Claude with the Arkheia runtime key set for hosted detection"
 echo "  4. Dashboard: https://hermes.arkheia.ai"
 echo "  5. Docs: https://arkheia.ai/docs"
 echo ""

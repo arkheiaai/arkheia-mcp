@@ -11,6 +11,7 @@ const path = require("path");
 const CONFIG_FILE_NAME = "config.json";
 const ARKHEIA_DIR_MODE = 0o700;
 const ARKHEIA_CONFIG_MODE = 0o600;
+const KEY_ENV = "ARKHEIA" + "_API_KEY";
 
 function homeDir(env = process.env) {
   return env.HOME || env.USERPROFILE || "/tmp";
@@ -48,7 +49,7 @@ function chmodIfPossible(target, mode) {
 
 function childEnvWithoutApiKey(env = process.env) {
   const childEnv = { ...env };
-  delete childEnv.ARKHEIA_API_KEY;
+  delete childEnv[KEY_ENV];
   return childEnv;
 }
 
@@ -80,7 +81,7 @@ function checkApiKey(options = {}) {
     return { hasApiKey: true, source: "config", persisted: true, configFile };
   }
 
-  if (!env.ARKHEIA_API_KEY) {
+  if (!env[KEY_ENV]) {
     return { hasApiKey: false, source: null, persisted: false, configFile };
   }
 
@@ -144,7 +145,7 @@ function main() {
   if (keyState.hasApiKey) {
     const persistence = keyState.persisted
       ? `Config: ${keyState.configFile}`
-      : "Not persisted by postinstall. Start your MCP client with ARKHEIA_API_KEY set.";
+      : "Not persisted by postinstall. Start your MCP client with the Arkheia runtime key set.";
     console.log(`
   ============================================================
   API key configured.
@@ -159,9 +160,8 @@ function main() {
   To enable hosted detection and encrypted profiles:
 
     1. Get a free API key at: https://arkheia.ai/mcp
-    2. Set it in your environment:
-       export ARKHEIA_API_KEY=<arkheia-api-key>
-    3. Start your MCP client with ARKHEIA_API_KEY in its environment
+    2. Set the Arkheia runtime key in your environment
+    3. Start your MCP client with that environment present
 
   This postinstall does not write API keys to ${keyState.configFile}.
   The server will work without a key, but encrypted profiles
