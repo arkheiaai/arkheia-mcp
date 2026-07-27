@@ -1026,8 +1026,13 @@ async def test_refusal_body_names_the_deny_code_and_the_way_out():
     assert body["allowed"] == list(pt.GROK.allowed)
     assert "chat/completions" in body["allowed"]
     assert len(body["receipt_id"]) == 36
-    # "enqueued", not "recorded" — the rail is fire-and-forget and cannot ack.
-    assert body["receipt_status"] in ("enqueued", "unavailable")
+    # PERMISSIVE ASSERTION REMOVED (2026-07-27). This read
+    # `in ("enqueued", "unavailable")`, which accepts either outcome and so
+    # cannot distinguish them — a disjunction is a weaker claim than the code
+    # actually supports. `make_app()` carries NO audit writer, so the status is
+    # deterministically "unavailable"; the "enqueued" branch is asserted where
+    # it can occur, against a real writer, in test_passthrough_receipts.py.
+    assert body["receipt_status"] == "unavailable"
     # The refusal must not echo the attacker's path back into the response.
     assert "admin/users" not in json.dumps(body)
 
