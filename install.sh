@@ -51,16 +51,6 @@ truthy() {
     esac
 }
 
-mask_key() {
-    local key="$1"
-    local len=${#key}
-    if [ "$len" -le 12 ]; then
-        printf "***"
-    else
-        printf "%s...%s" "${key:0:8}" "${key: -4}"
-    fi
-}
-
 require_value() {
     local option="$1"
     local value="${2:-}"
@@ -168,7 +158,7 @@ write_arkheia_api_key_config() {
     local hosted_url="$3"
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "Dry run: would save API key $(mask_key "$api_key") to ${config_file} with private file modes."
+        info "Dry run: would save API key to ${config_file} with private file modes."
         return 0
     fi
 
@@ -390,7 +380,7 @@ if [ -z "$API_KEY" ]; then
                 if [ -z "$API_KEY" ]; then
                     fail "Provisioning succeeded but could not parse API key from response."
                 fi
-                ok "Free-tier API key provisioned: $(mask_key "$API_KEY")"
+                ok "Free-tier API key provisioned."
                 warn "The full API key is not printed. Persist it with --persist-api-key or manage keys at https://hermes.arkheia.ai."
                 ;;
             409)
@@ -426,7 +416,7 @@ fi
 # ---------------------------------------------------------------------------
 if [ -n "$API_KEY" ]; then
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "Dry run: would verify API key $(mask_key "$API_KEY")."
+        info "Dry run: would verify API key."
     else
         info "Verifying API key..."
         VERIFY_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
@@ -436,7 +426,7 @@ if [ -n "$API_KEY" ]; then
             -d '{"model": "test", "response": "Hello world test."}' 2>&1) || true
 
         case "$VERIFY_CODE" in
-            200) ok "API key verified: $(mask_key "$API_KEY")" ;;
+            200) ok "API key verified." ;;
             401) fail "API key is invalid. Check your key and try again." ;;
             *)   warn "Could not verify key (HTTP $VERIFY_CODE); continuing anyway." ;;
         esac
@@ -459,7 +449,7 @@ if [ -n "$API_KEY" ]; then
             if [ "$WRITE_RESULT" = "unchanged" ]; then
                 ok "API key config already current at ${ARKHEIA_CONFIG_FILE}"
             else
-                ok "Saved API key $(mask_key "$API_KEY") to ${ARKHEIA_CONFIG_FILE}"
+                ok "Saved API key to ${ARKHEIA_CONFIG_FILE}"
             fi
         else
             warn "Could not save API key config; continuing without persisting the key."
