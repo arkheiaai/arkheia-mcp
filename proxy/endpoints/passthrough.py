@@ -380,12 +380,25 @@ async def _receipt_refusal(
     attempted_path: str,
 ) -> tuple[str, str]:
     """
-    Write a durable, attributable record of a REFUSAL.
+    Write an attributable record of a REFUSAL to the shared audit rail.
 
-    Returns ``(receipt_id, receipt_status)`` where status is ``"recorded"`` or
-    ``"unrecorded"``. Never raises: a receipt failure must not turn a deny into
-    an allow, and must not turn a 400 into a 500. It is, however, never silent —
-    an unrecorded refusal is logged at ERROR and reported to the caller.
+    Returns ``(receipt_id, receipt_status)``.
+
+    ``receipt_status`` is deliberately ``"enqueued"``, not ``"recorded"``.
+    ``AuditWriter`` is a fire-and-forget queue: ``write()`` returns as soon as the
+    record is queued, drops silently when the queue is full, and its background
+    ``_writer_loop`` swallows every exception raised while serialising or
+    appending. So this function can honestly report that a record was HANDED to
+    the rail; it cannot report that the record LANDED. Saying "recorded" would be
+    the kind of claim this codebase exists to refuse.
+
+    That gap is a property of the rail, shared with every other consumer
+    (including the detection records ``_detect_and_audit`` writes) — see
+    ``proxy/tests/test_passthrough_receipts.py::test_disclosed_rail_gap_*``.
+
+    Never raises: a receipt failure must not turn a deny into an allow, and must
+    not turn a 400 into a 500. It is never silent either — an unavailable rail is
+    logged at ERROR and reported to the caller.
     """
     receipt_id = str(uuid.uuid4())
     audit = getattr(request.app.state, "audit_writer", None)
@@ -396,7 +409,7 @@ async def _receipt_refusal(
             "provider=%s deny_code=%s receipt_id=%s",
             provider.name, deny_code, receipt_id,
         )
-        return receipt_id, "unrecorded"
+        return receipt_id, "unavailable"
 
     record = {
         "detection_id": receipt_id,
@@ -434,13 +447,13 @@ async def _receipt_refusal(
             "provider=%s deny_code=%s receipt_id=%s",
             e, provider.name, deny_code, receipt_id,
         )
-        return receipt_id, "unrecorded"
+        return receipt_id, "unavailable"
 
     logger.warning(
         "passthrough refused: provider=%s deny_code=%s receipt_id=%s",
         provider.name, deny_code, receipt_id,
     )
-    return receipt_id, "recorded"
+    return receipt_id, "enqueued"
 
 
 async def _refuse(

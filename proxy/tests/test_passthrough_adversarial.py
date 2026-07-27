@@ -639,7 +639,8 @@ async def test_refusal_body_names_the_deny_code_and_the_way_out():
     assert body["allowed"] == list(pt.GROK.allowed)
     assert "chat/completions" in body["allowed"]
     assert len(body["receipt_id"]) == 36
-    assert body["receipt_status"] in ("recorded", "unrecorded")
+    # "enqueued", not "recorded" — the rail is fire-and-forget and cannot ack.
+    assert body["receipt_status"] in ("enqueued", "unavailable")
     # The refusal must not echo the attacker's path back into the response.
     assert "admin/users" not in json.dumps(body)
 
