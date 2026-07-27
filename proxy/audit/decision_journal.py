@@ -426,7 +426,7 @@ async def emit(writer: Any, record: dict) -> str:
 
     if writer is None:
         logger.error(
-            "F20 decision NOT RECEIPTED (no audit writer at emit time): "
+            "Governance decision NOT RECEIPTED (no audit writer at emit time): "
             "event_type=%s decision_id=%s outcome=%s",
             event_label, id_label, outcome_label,
         )
@@ -436,7 +436,7 @@ async def emit(writer: Any, record: dict) -> str:
         await writer.write(out)
     except Exception as exc:
         logger.error(
-            "F20 decision NOT RECEIPTED (audit write raised %s): "
+            "Governance decision NOT RECEIPTED (audit write raised %s): "
             "event_type=%s decision_id=%s outcome=%s",
             type(exc).__name__, event_label, id_label, outcome_label,
         )

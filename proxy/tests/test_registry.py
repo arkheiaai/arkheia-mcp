@@ -27,7 +27,14 @@ import yaml
 from pydantic import SecretStr
 
 from proxy.registry.client import RegistryClient
+from proxy.registry.receipts import (
+    EVENT_REGISTRY_PROFILE_PULL,
+    OUTCOME_PROFILE_APPLIED,
+    OUTCOME_PROFILE_REJECTED_CHECKSUM_MISSING,
+    OUTCOME_PROFILE_REJECTED_VALIDATION,
+)
 from proxy.registry.validator import ProfileValidator
+from proxy.tests._receipt_probe import ReceiptProbe
 
 
 # ---------------------------------------------------------------------------
@@ -49,7 +56,12 @@ VALID_PROFILE = {
                 "threshold_medium": 100.0,
             }
         }
-    }
+    },
+    "smoke_test": {
+        "prompt": "What is 2+2?",
+        "response": "Four simple words here.",
+        "expected_risk": "LOW",
+    },
 }
 
 VALID_YAML = yaml.dump(VALID_PROFILE).encode("utf-8")
@@ -111,21 +123,34 @@ class TestProfileValidator:
 
     def test_smoke_test_pass(self, validator):
         """Smoke test with expected LOW result passes."""
-        profile_with_smoke = dict(VALID_PROFILE)
-        profile_with_smoke["smoke_test"] = {
-            "prompt": "What is 2+2?",
-            "response": "Four.",
-            "expected_risk": "LOW",  # short text, no logprobs -- will be LOW or UNKNOWN
-        }
-        passed, reason = validator.run_smoke_test(profile_with_smoke)
-        # Either passes or is inconclusive (no features computable for "Four.")
-        assert passed or "inconclusive" in reason
-
-    def test_no_smoke_test_passes(self, validator):
-        """Profile without smoke_test passes by default."""
         passed, reason = validator.run_smoke_test(VALID_PROFILE)
-        assert passed is True
-        assert "no smoke test" in reason
+        assert passed is True, reason
+
+    def test_no_smoke_test_does_not_pass(self, validator):
+        """Profile without smoke_test is not validated by default."""
+        profile = dict(VALID_PROFILE)
+        profile.pop("smoke_test", None)
+        passed, reason = validator.run_smoke_test(profile)
+        assert passed is False
+        assert "required" in reason
+
+    def test_validate_rejects_absent_smoke_test(self, validator):
+        """
+        F19 adversarial: registry validation must not certify a profile that
+        never declared the smoke test the schema says should prove it.
+        """
+        profile = dict(VALID_PROFILE)
+        profile.pop("smoke_test", None)
+        with pytest.raises(ValueError, match="Smoke test failed: .*required"):
+            validator.validate(yaml.dump(profile).encode("utf-8"))
+
+    def test_missing_checksum_is_not_a_verification_pass(self, validator):
+        """
+        F19 adversarial: an absent checksum is not "nothing to compare"; it is a
+        missing precondition for registry-delivered bytes.
+        """
+        with pytest.raises(ValueError, match="checksum is required"):
+            validator.require_checksum("")
 
     def test_smoke_test_incomplete_does_not_pass(self, validator):
         """
@@ -272,6 +297,56 @@ class TestRegistryClient:
         assert profile_path.read_bytes() == b"original content"
 
     @pytest.mark.asyncio
+    async def test_missing_checksum_rejects_without_download_and_is_receipted(
+        self, tmp_path, mock_router
+    ):
+        """
+        F19 adversarial: metadata without a checksum must not download, write,
+        or reload, and the refusal must be readable from the real audit rail by
+        the decision id returned to the caller.
+        """
+        probe = ReceiptProbe(tmp_path / "audit.jsonl", id_field="decision_id")
+        await probe.start()
+        client = RegistryClient(
+            base_url="https://registry.arkheia.ai",
+            api_key=SecretStr("test-api-key"),
+            profile_dir=str(tmp_path / "profiles"),
+            router=mock_router,
+            validator=ProfileValidator(),
+            audit_writer=probe.writer,
+        )
+        registry_response = {
+            "profiles": [{
+                "model_id": "llama-3-70b",
+                "version": "2.0",
+                "download_url": "https://registry.arkheia.ai/profiles/llama-3-70b.yaml",
+            }],
+        }
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            list_resp = MagicMock()
+            list_resp.json.return_value = registry_response
+            list_resp.raise_for_status = MagicMock()
+            mock_client.get.return_value = list_resp
+
+            result = await client.pull()
+
+        await probe.stop()
+        assert mock_client.get.call_count == 1, "missing checksum should stop before download"
+        mock_router.reload.assert_not_called()
+        assert not (tmp_path / "profiles" / "llama-3-70b.yaml").exists()
+        receipt = result["receipts"][0]
+        assert receipt["outcome"] == OUTCOME_PROFILE_REJECTED_CHECKSUM_MISSING
+        row = probe.require(receipt["decision_id"])
+        assert row["event_type"] == EVENT_REGISTRY_PROFILE_PULL
+        assert row["outcome"] == OUTCOME_PROFILE_REJECTED_CHECKSUM_MISSING
+        assert row["model_id"] == "llama-3-70b"
+        assert row["checksum_present"] is False
+        assert row["receipt_status"] == "enqueued"
+
+    @pytest.mark.asyncio
     async def test_successful_pull_triggers_reload(
         self, registry_client, tmp_path, mock_router
     ):
@@ -337,3 +412,107 @@ class TestRegistryClient:
             await registry_client.pull()
 
         assert (tmp_path / "llama-3-70b.yaml").exists()
+
+    @pytest.mark.asyncio
+    async def test_no_smoke_test_download_is_rejected_receipted_and_not_applied(
+        self, tmp_path, mock_router
+    ):
+        """
+        F19 adversarial: a downloaded profile with a valid checksum but no
+        smoke_test must not be applied, and the validation refusal must land on
+        the audit rail.
+        """
+        probe = ReceiptProbe(tmp_path / "audit.jsonl", id_field="decision_id")
+        await probe.start()
+        client = RegistryClient(
+            base_url="https://registry.arkheia.ai",
+            api_key=SecretStr("test-api-key"),
+            profile_dir=str(tmp_path / "profiles"),
+            router=mock_router,
+            validator=ProfileValidator(),
+            audit_writer=probe.writer,
+        )
+        profile_without_smoke = dict(VALID_PROFILE)
+        profile_without_smoke.pop("smoke_test", None)
+        content = yaml.dump(profile_without_smoke).encode("utf-8")
+        checksum = hashlib.sha256(content).hexdigest()
+        registry_response = {
+            "profiles": [{
+                "model_id": "llama-3-70b",
+                "version": "2.0",
+                "checksum": checksum,
+                "download_url": "https://registry.arkheia.ai/profiles/llama-3-70b.yaml",
+            }],
+        }
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            list_resp = MagicMock()
+            list_resp.json.return_value = registry_response
+            list_resp.raise_for_status = MagicMock()
+            download_resp = MagicMock()
+            download_resp.content = content
+            download_resp.raise_for_status = MagicMock()
+            mock_client.get.side_effect = [list_resp, download_resp]
+
+            result = await client.pull()
+
+        await probe.stop()
+        mock_router.reload.assert_not_called()
+        assert not (tmp_path / "profiles" / "llama-3-70b.yaml").exists()
+        assert "llama-3-70b" not in result["updated"]
+        receipt = result["receipts"][0]
+        assert receipt["outcome"] == OUTCOME_PROFILE_REJECTED_VALIDATION
+        row = probe.require(receipt["decision_id"])
+        assert row["event_type"] == EVENT_REGISTRY_PROFILE_PULL
+        assert row["outcome"] == OUTCOME_PROFILE_REJECTED_VALIDATION
+        assert row["checksum_present"] is True
+        assert row["checksum_expected"] == f"sha256:{checksum}"
+        assert row["receipt_status"] == "enqueued"
+
+    @pytest.mark.asyncio
+    async def test_successful_pull_is_receipted_by_decision_id(
+        self, tmp_path, mock_router
+    ):
+        """F19 positive control: a successful apply emits the same receipt shape."""
+        probe = ReceiptProbe(tmp_path / "audit.jsonl", id_field="decision_id")
+        await probe.start()
+        client = RegistryClient(
+            base_url="https://registry.arkheia.ai",
+            api_key=SecretStr("test-api-key"),
+            profile_dir=str(tmp_path / "profiles"),
+            router=mock_router,
+            validator=ProfileValidator(),
+            audit_writer=probe.writer,
+        )
+        registry_response = {
+            "profiles": [{
+                "model_id": "llama-3-70b",
+                "version": "2.0",
+                "checksum": VALID_CHECKSUM,
+                "download_url": "https://registry.arkheia.ai/profiles/llama-3-70b.yaml",
+            }],
+        }
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            list_resp = MagicMock()
+            list_resp.json.return_value = registry_response
+            list_resp.raise_for_status = MagicMock()
+            download_resp = MagicMock()
+            download_resp.content = VALID_YAML
+            download_resp.raise_for_status = MagicMock()
+            mock_client.get.side_effect = [list_resp, download_resp]
+
+            result = await client.pull()
+
+        await probe.stop()
+        receipt = result["receipts"][0]
+        assert receipt["outcome"] == OUTCOME_PROFILE_APPLIED
+        row = probe.require(receipt["decision_id"])
+        assert row["event_type"] == EVENT_REGISTRY_PROFILE_PULL
+        assert row["outcome"] == OUTCOME_PROFILE_APPLIED
+        assert row["model_id"] == "llama-3-70b"
+        assert row["receipt_status"] == "enqueued"
