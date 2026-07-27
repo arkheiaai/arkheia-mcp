@@ -333,6 +333,7 @@ class TestScopeOfReceipting:
         assert len(rows) == 2
         assert {r["action_taken"] for r in rows} == {"warn"}
         for r in responses:
+            assert r.headers["x-arkheia-receipt"] == "enqueued"
             probe.require(r.headers["x-arkheia-detection-id"])
 
 

@@ -476,7 +476,8 @@ def _build_response(
 def _signal_headers(risk_level: str, action: Optional[str] = None,
                     detection_id: Optional[str] = None,
                     gate_action: Optional[str] = None,
-                    policy_action: Optional[str] = None) -> dict:
+                    policy_action: Optional[str] = None,
+                    receipt: Optional[str] = None) -> dict:
     """
     Header-only signalling. The body is never mutated: prepending a banner to a
     JSON completion produces bytes no parser accepts, and
@@ -495,6 +496,10 @@ def _signal_headers(risk_level: str, action: Optional[str] = None,
       X-Arkheia-Policy-Action the customer's configured INTENT
                               (``high_risk_action``). Records what policy
                               wanted, which authorises nothing.
+      X-Arkheia-Receipt       what the audit emission site says happened, using
+                              the same closed vocabulary as the block/refusal
+                              bodies. Emitted only when this path attempted a
+                              receipt.
 
     Surfacing all three is what makes a DOWNGRADED block legible: policy=block,
     gate=advise, action=warn says, without touching the body, that the operator
@@ -507,6 +512,7 @@ def _signal_headers(risk_level: str, action: Optional[str] = None,
         "X-Arkheia-Detection-Id": detection_id,
         "X-Arkheia-Gate-Action": gate_action,
         "X-Arkheia-Policy-Action": policy_action,
+        "X-Arkheia-Receipt": receipt,
     }
 
 
@@ -709,7 +715,8 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
                 json.dumps(payload).encode("utf-8"), 200,
                 [("content-type", "application/json")],
                 _signal_headers("HIGH", "block", result.detection_id,
-                                gate_action=gate_action, policy_action=policy),
+                                gate_action=gate_action, policy_action=policy,
+                                receipt=receipt),
             )
 
         if result.risk_level == "HIGH" and policy in ("block", "warn"):
@@ -717,7 +724,7 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
             # gate did not authorise it. Both deliver the answer; the difference
             # is legible from `policy_action` on the headers and on the record,
             # so a downgraded block is never silent.
-            await _emit(request, _audit_record(
+            receipt = await _emit(request, _audit_record(
                 detection_id=result.detection_id,
                 risk_level="HIGH",
                 action_taken="warn",
@@ -735,7 +742,8 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
             return _build_response(
                 response_body, status_code, relayed,
                 _signal_headers("HIGH", "warn", result.detection_id,
-                                gate_action=gate_action, policy_action=policy),
+                                gate_action=gate_action, policy_action=policy,
+                                receipt=receipt),
             )
 
         return _build_response(
@@ -819,5 +827,6 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
         return _build_response(
             json.dumps(payload).encode("utf-8"), status_code,
             [("content-type", "application/json")],
-            _signal_headers("REFUSED", "refused", detection_id),
+            _signal_headers("REFUSED", "refused", detection_id,
+                            receipt=receipt),
         )
