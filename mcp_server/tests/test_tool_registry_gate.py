@@ -31,12 +31,19 @@ PASSING CRITERIA
   10. The refusal contract is pinned per tool: 5 tools propagate PolicyViolation,
       4 return an error dict. Pinned because it is an inconsistency, not because
       it is right — see the PR body.
+  11. PRIVILEGE ESCALATION: the ToolPolicy check() hands a caller cannot be used
+      to alter what the gate decides next — neither by assigning a field nor by
+      mutating one in place.
+  12. LATE REGISTRATION: the public REGISTRY name is a read-only view, so a
+      policy cannot be added or widened after the startup coverage self-check.
+  13. ALIAS EVASION: no alternative spelling of an allowed tool name resolves.
 """
 
 from __future__ import annotations
 
 import inspect
-from dataclasses import replace
+from dataclasses import FrozenInstanceError, fields, replace
+from enum import Enum
 
 import pytest
 
@@ -44,6 +51,7 @@ from mcp_server import server as srv
 from mcp_server.tool_registry import (
     REGISTRY,
     Permission,
+    _REGISTRY,
     PolicyViolation,
     RegistryCoverageError,
     ToolPolicy,
@@ -89,13 +97,19 @@ def _isolate_memory_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def registry_sandbox():
-    """Mutate REGISTRY inside a test without leaking into other tests."""
-    original = dict(REGISTRY)
+    """Mutate the allowlist inside a test without leaking into other tests.
+
+    Reaches for the PRIVATE backing dict deliberately: the public ``REGISTRY``
+    name is a read-only view (CRITERION 12), so installing a synthetic policy is
+    now an explicit act rather than something any holder of the public name can
+    do. Yields the writable dict; ``REGISTRY`` observes the same entries because
+    the view is live."""
+    original = dict(_REGISTRY)
     try:
-        yield REGISTRY
+        yield _REGISTRY
     finally:
-        REGISTRY.clear()
-        REGISTRY.update(original)
+        _REGISTRY.clear()
+        _REGISTRY.update(original)
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +250,302 @@ class TestAllowDecision:
             k for k, v in REGISTRY.items() if v.requires_human_confirm
         )
         assert confirm_required == []
+
+
+# ---------------------------------------------------------------------------
+# 11 — the policy handed to a caller cannot be used to alter the registry
+# ---------------------------------------------------------------------------
+
+class TestReturnedPolicyCannotWidenTheRegistry:
+    """CRITERION 11 — PRIVILEGE ESCALATION THROUGH THE VALUE THE GATE HANDS BACK.
+
+    ``check()`` returns the REGISTRY's own ``ToolPolicy`` instance (pinned by
+    ``test_registered_tool_is_allowed_and_returns_its_own_policy``: ``policy is
+    REGISTRY[tool_name]``). Sharing the instance is only safe if the instance is
+    immutable. Before this branch ``ToolPolicy`` was a plain, non-frozen
+    ``@dataclass`` whose ``permissions`` field was a ``list``, so every caller of
+    the gate held a writable handle on the gate's own decision data::
+
+        p = check("memory_store")          # egress-denied, READ+WRITE
+        p.network_egress = True            # writes THROUGH to REGISTRY
+        p.permissions.append(Permission.DEPLOY)
+        p.requires_human_confirm = False
+        check("memory_store")              # now egress-permitted + DEPLOY, for
+                                           # every caller, for the life of the
+                                           # process
+
+    Blast radius: any code path that receives a policy — i.e. every gated tool
+    body, since ``check()`` is documented as "the FIRST statement in every MCP
+    tool body" — could silently widen its own permissions AND everyone else's.
+    The widening is process-wide and permanent: nothing re-reads the declared
+    allowlist after import, and ``assert_registry_covers()`` only compares NAMES
+    at startup, so a mutated policy passes the startup self-check unchanged.
+
+    The property these tests establish: a ToolPolicy obtained from the gate
+    CANNOT be used to alter what the gate subsequently decides. Each test drives
+    the escalation end to end and asserts the SECOND ``check()`` still returns
+    the restrictive declared value — a determinate value, not "unchanged".
+    """
+
+    def test_scalar_field_write_through_a_returned_policy_cannot_widen_egress(self):
+        """The reproducer verbatim. memory_store is declared local-only."""
+        handed_out = check("memory_store")
+        assert handed_out.network_egress is False  # baseline: the declared value
+
+        try:
+            handed_out.network_egress = True
+        except FrozenInstanceError:
+            pass  # the write was refused — that is one correct outcome
+
+        # The decision the gate makes NEXT is what actually matters.
+        assert check("memory_store").network_egress is False, (
+            "a caller widened the registry's egress posture through the policy "
+            "object the gate handed it — process-wide and permanent"
+        )
+
+    def test_mutable_field_write_through_a_returned_policy_cannot_grant_deploy(self):
+        """`frozen=True` alone does NOT protect a mutable FIELD: a list inside a
+        frozen dataclass is still mutable in place. `permissions` is the field
+        `check()` itself reads, so widening it widens the gate's own decision."""
+        handed_out = check("memory_retrieve")
+        assert set(handed_out.permissions) == {Permission.READ}
+
+        try:
+            handed_out.permissions.append(Permission.DEPLOY)
+        except AttributeError:
+            pass  # tuple has no .append — the field is immutable
+
+        assert set(check("memory_retrieve").permissions) == {Permission.READ}, (
+            "a caller granted itself DEPLOY — the most dangerous grant in the "
+            "enum — by appending to the permission list it was handed"
+        )
+
+    def test_permissions_cannot_be_emptied_through_a_returned_policy(self):
+        """The denial-of-service direction of the same hole: clearing the list
+        turns a live tool into a permanent default-deny for the whole process,
+        because an empty permission set is a deny branch."""
+        handed_out = check("arkheia_verify")
+        assert set(handed_out.permissions) == {Permission.READ}
+
+        try:
+            handed_out.permissions.clear()
+        except AttributeError:
+            pass
+
+        assert set(check("arkheia_verify").permissions) == {Permission.READ}
+
+    def test_confirm_requirement_cannot_be_cleared_through_a_returned_policy(
+        self, registry_sandbox
+    ):
+        """The human-approval control is the one an attacker most wants gone.
+        Register a confirm-required policy, obtain it via an APPROVED call, then
+        try to clear the flag through the returned object."""
+        registry_sandbox["deploy_to_prod"] = ToolPolicy(
+            name="deploy_to_prod",
+            permissions=[Permission.DEPLOY],
+            requires_human_confirm=True,
+        )
+        handed_out = check("deploy_to_prod", human_confirmed=True)
+        assert handed_out.requires_human_confirm is True
+
+        try:
+            handed_out.requires_human_confirm = False
+        except FrozenInstanceError:
+            pass
+
+        # Without approval it must STILL be denied.
+        with pytest.raises(PolicyViolation) as exc:
+            check("deploy_to_prod")
+        assert "human confirmation" in exc.value.reason
+
+    def test_name_cannot_be_repointed_through_a_returned_policy(self):
+        """Repointing `name` makes check(key) hand back a policy describing a
+        different tool — the exact confusion
+        test_registry_keys_match_their_policy_names exists to forbid."""
+        handed_out = check("memory_retrieve")
+        assert handed_out.name == "memory_retrieve"
+
+        try:
+            handed_out.name = "run_grok"
+        except FrozenInstanceError:
+            pass
+
+        assert check("memory_retrieve").name == "memory_retrieve"
+        mismatched = sorted(f"{k}->{v.name}" for k, v in REGISTRY.items() if k != v.name)
+        assert mismatched == []
+
+    # -- the mechanism, pinned determinately ---------------------------------
+
+    @pytest.mark.parametrize(
+        "field,new_value",
+        [
+            ("name", "run_grok"),
+            ("permissions", [Permission.DEPLOY]),
+            ("description", "x"),
+            ("network_egress", True),
+            ("requires_human_confirm", False),
+        ],
+    )
+    def test_every_policy_field_refuses_assignment(self, field, new_value):
+        """EVERY field, not just the interesting ones: the class is frozen, so
+        the guarantee does not depend on which field a future control uses."""
+        handed_out = check("memory_store")
+        with pytest.raises(FrozenInstanceError):
+            setattr(handed_out, field, new_value)
+
+    def test_every_policy_field_holds_an_immutable_type(self):
+        """`frozen=True` protects the BINDING, not the object bound. Enumerated
+        over the real dataclass fields so a future mutable field (a list of
+        allowed hosts, a dict of rate limits) cannot be added silently."""
+        immutable_types = (str, bool, int, float, tuple, frozenset, type(None), Enum)
+        policy = check("memory_store")
+        offenders = sorted(
+            f"{f.name}:{type(getattr(policy, f.name)).__name__}"
+            for f in fields(policy)
+            if not isinstance(getattr(policy, f.name), immutable_types)
+        )
+        assert offenders == [], (
+            f"ToolPolicy field(s) hold a mutable object: {offenders}. A frozen "
+            f"dataclass still lets a caller mutate such a field IN PLACE."
+        )
+        # Work-done assertion: an empty field list would vacuously pass above.
+        assert len(fields(policy)) == 5
+
+    def test_the_immutability_holds_for_every_shipped_policy(self):
+        """Per tool, not on one sample — a single entry constructed differently
+        would be the one that is still writable."""
+        widened = []
+        for name in sorted(EXPECTED_TOOLS):
+            declared = check(name).network_egress
+            try:
+                check(name).network_egress = not declared
+            except FrozenInstanceError:
+                pass
+            if check(name).network_egress is not declared:
+                widened.append(name)
+        assert widened == [], f"policies mutable through the gate: {widened}"
+
+    def test_replace_produces_an_independent_policy(self):
+        """The sanctioned way to derive a variant. It must NOT write back into
+        the registry entry it was derived from."""
+        original = check("memory_store")
+        derived = replace(original, network_egress=True)
+        assert derived.network_egress is True
+        assert derived is not original
+        assert check("memory_store").network_egress is False
+        assert set(derived.permissions) == {Permission.READ, Permission.WRITE}
+
+
+# ---------------------------------------------------------------------------
+# 12 — the registry container itself is not writable through the public name
+# ---------------------------------------------------------------------------
+
+class TestRegistryContainerIsReadOnly:
+    """LATE REGISTRATION. ``assert_registry_covers()`` is a STARTUP check; it
+    compares names once, at import time, and is never consulted again. So any
+    module that could write to the public ``REGISTRY`` name could add or replace
+    a policy after the self-check had already passed, and nothing would notice.
+
+    That does not make a NEW tool dispatchable — FastMCP's decorator registry is
+    the effective allowlist (INV-2) — but replacing an EXISTING entry with a
+    widened one is a real escalation, and it is exactly the shape the returned-
+    policy hole had. The public name is therefore a read-only view. In-process
+    Python has no hard boundary (``_REGISTRY`` is reachable by anyone who reaches
+    for it deliberately, which is how the test sandbox works), so what this pins
+    is that widening the live allowlist can no longer happen by ACCIDENT or as an
+    implicit capability of merely importing the gate.
+    """
+
+    def test_registry_rejects_late_registration_of_a_new_policy(self):
+        with pytest.raises(TypeError):
+            REGISTRY["late_backdoor"] = ToolPolicy(
+                name="late_backdoor", permissions=[Permission.DEPLOY]
+            )
+        assert "late_backdoor" not in REGISTRY
+        with pytest.raises(PolicyViolation) as exc:
+            check("late_backdoor")
+        assert "not in allowlist" in exc.value.reason
+
+    def test_registry_rejects_replacing_an_existing_policy(self):
+        with pytest.raises(TypeError):
+            REGISTRY["memory_store"] = ToolPolicy(
+                name="memory_store",
+                permissions=[Permission.DEPLOY],
+                network_egress=True,
+            )
+        assert set(check("memory_store").permissions) == {
+            Permission.READ, Permission.WRITE,
+        }
+        assert check("memory_store").network_egress is False
+
+    def test_registry_rejects_deletion(self):
+        with pytest.raises(TypeError):
+            del REGISTRY["arkheia_verify"]
+        assert check("arkheia_verify").name == "arkheia_verify"
+
+    def test_registry_rejects_bulk_mutation(self):
+        for op in ("clear", "update", "pop", "popitem", "setdefault"):
+            assert not hasattr(REGISTRY, op), (
+                f"REGISTRY exposes the mutating method {op!r} — the public name "
+                f"must be a read-only view"
+            )
+        assert sorted(REGISTRY) == sorted(EXPECTED_TOOLS)
+
+
+# ---------------------------------------------------------------------------
+# 13 — alias evasion: no spelling of an allowed name other than the exact one
+# ---------------------------------------------------------------------------
+
+class TestAliasEvasion:
+    """The allowlist is an exact string match on a dict key. These pin that no
+    alternative SPELLING of an allowed name resolves — case, unicode
+    normalisation forms, homoglyphs, separators, whitespace, zero-width
+    characters, prefixes. Each input is asserted to be a genuine near-miss
+    (absent from REGISTRY) and then required to be refused with the default-deny
+    reason, so a future normalisation step cannot quietly make one of them land.
+    """
+
+    EVASIONS = [
+        # case
+        "MEMORY_STORE", "Memory_Store", "memory_Store",
+        # separators
+        "memory-store", "memory.store", "memory store", "memorystore",
+        "memory__store", "memory/store",
+        # whitespace / control
+        " memory_store", "memory_store ", "\tmemory_store", "memory_store\n",
+        "memory_store\r", "memory_store\x00", "memory\u00a0store",  # NBSP
+        # zero-width and bidi
+        "memory​store", "memory_store​", "‮memory_store",
+        # unicode normalisation: NFKC of these folds to "memory_store"
+        "ﬁmemory_store", "memory＿store", "ｍemory_store",
+        "memory_ｓtore", "𝗆emory_store",
+        # homoglyphs (Cyrillic о / е)
+        "memоry_store", "mеmory_store",
+        # prefix / namespace
+        "mcp__memory_store", "mcp_server.memory_store", "arkheia:memory_store",
+        "/memory_store", "memory_store()",
+        # combining marks that normalise away under NFD/NFC round-trips
+        "memory_stóre",
+    ]
+
+    @pytest.mark.parametrize("alias", EVASIONS)
+    def test_alias_spelling_of_an_allowed_tool_is_denied(self, alias):
+        assert alias not in REGISTRY, f"{alias!r} is not a near-miss — it IS a key"
+        with pytest.raises(PolicyViolation) as exc:
+            check(alias)
+        assert exc.value.tool_name == alias
+        assert "not in allowlist" in exc.value.reason
+        assert "default deny" in exc.value.reason
+
+    def test_the_evasion_corpus_is_not_empty_and_targets_a_real_tool(self):
+        """Work-done assertion: an empty corpus would make the sweep vacuous."""
+        assert len(self.EVASIONS) == 32
+        assert "memory_store" in REGISTRY
+
+    def test_the_exact_spelling_still_resolves(self):
+        """Positive control: the evasion sweep must not be passing because
+        check() denies everything."""
+        assert check("memory_store").name == "memory_store"
 
 
 # ---------------------------------------------------------------------------
