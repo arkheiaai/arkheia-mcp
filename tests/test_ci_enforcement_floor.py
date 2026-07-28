@@ -88,6 +88,13 @@ INV-4  ``tests/test_smoke_e2e.py::TestHostedFallback`` carried
        strict xfail is the most deceptive available combination, because it reads
        as a rigorous test.
 
+INV-6  ``security_scan.yml`` is the repo's security gate candidate, but its
+       dependency and secret scanners used ``continue-on-error: true``. If those
+       contexts are made required, a high-CVSS ``pip-audit`` finding or verified
+       TruffleHog secret can still post green. Required security jobs must fail
+       closed; advisory-only jobs must be named explicitly before they are
+       allowed to continue after a scanner failure.
+
 ------------------------------------------------------------------------------
 Each invariant carries a POSITIVE CONTROL
 ------------------------------------------------------------------------------
@@ -142,6 +149,22 @@ CI_ONLY_TOOLS: dict[str, str] = {
     "bandit": "static analyser, security_scan.yml only; not imported by any module",
     "pip-audit": "CVE scanner, security_scan.yml only; not imported by any module",
 }
+
+# Security scan jobs that queue policy treats as gates. They may be branch
+# protection requirements today or candidates to become required; either way,
+# their job definitions must be fail-closed before they can safely gate merges.
+SECURITY_SCAN_GATE_JOBS: dict[str, str] = {
+    ".github/workflows/security_scan.yml:bandit": "Bandit static analysis",
+    ".github/workflows/security_scan.yml:dependency-audit": (
+        "Dependency vulnerability audit"
+    ),
+    ".github/workflows/security_scan.yml:secrets-check": "Check for committed secrets",
+}
+
+# Jobs in SECURITY_SCAN_GATE_JOBS that are deliberately advisory-only. The key is
+# "<workflow path>:<job key>"; the value must explain why a scanner failure should
+# not block. Empty by design: all current security_scan.yml jobs are gates.
+ADVISORY_ONLY_SECURITY_JOBS: dict[str, str] = {}
 
 # Directories whose test files must be collectable by some workflow that can
 # trigger on the default branch.
@@ -499,6 +522,35 @@ def workflow_jobs(text: str) -> list[WorkflowJob]:
         stop = starts[idx + 1][0] if idx + 1 < len(starts) else len(body)
         jobs.append(WorkflowJob(key, "\n".join(body[j:stop])))
     return jobs
+
+
+def _workflow_job_map(texts: dict[str, str]) -> dict[str, WorkflowJob]:
+    """Map '<workflow path>:<job key>' to parsed jobs."""
+    out: dict[str, WorkflowJob] = {}
+    for wf, text in sorted(texts.items()):
+        for job in workflow_jobs(text):
+            out[f"{wf}:{job.key}"] = job
+    return out
+
+
+def _active_continue_on_error_lines(job_text: str) -> list[tuple[int, str]]:
+    """
+    Truthy or opaque `continue-on-error` controls in a job body.
+
+    `continue-on-error: false` is not fail-open. Expressions and unknown literals
+    are treated as active for required security jobs because the floor tier cannot
+    prove they are false under every runtime condition.
+    """
+    active: list[tuple[int, str]] = []
+    for line_no, line in enumerate(job_text.splitlines(), 1):
+        m = re.match(r"^\s*continue-on-error:\s*(.+?)\s*(?:#.*)?$", line)
+        if not m:
+            continue
+        value = m.group(1).strip().strip("'\"")
+        if value.lower() in {"false", "0", "no"}:
+            continue
+        active.append((line_no, value))
+    return active
 
 
 # ---------------------------------------------------------------------------
@@ -1225,6 +1277,73 @@ def test_every_required_actions_context_is_produced_by_a_job() -> None:
     )
     # Positive control: a context no job produces MUST be reported missing.
     assert "no-such-context-xyz" not in produced
+
+
+def test_required_security_scan_jobs_do_not_continue_on_error() -> None:
+    """
+    Required security scanners must fail closed.
+
+    The offline fixture can prove only workflow-tree coherence, not live branch
+    protection. SECURITY_SCAN_GATE_JOBS therefore records the queue policy claim:
+    these jobs are security gates or candidates to become required gates, so a
+    scanner failure must be able to turn the job red before branch protection can
+    safely rely on it.
+    """
+    assert SECURITY_SCAN_GATE_JOBS, (
+        "INV-6 examined ZERO security scan jobs. If the security workflow has no "
+        "required gate candidates, either remove this invariant with a reason or "
+        "name the advisory-only jobs explicitly."
+    )
+    assert not set(ADVISORY_ONLY_SECURITY_JOBS) - set(SECURITY_SCAN_GATE_JOBS), (
+        "INV-6 advisory-only allowlist contains job(s) that are not security gate "
+        "candidates: "
+        f"{sorted(set(ADVISORY_ONLY_SECURITY_JOBS) - set(SECURITY_SCAN_GATE_JOBS))}"
+    )
+
+    jobs = _workflow_job_map(workflow_texts())
+    missing = [job_id for job_id in SECURITY_SCAN_GATE_JOBS if job_id not in jobs]
+    assert not missing, (
+        f"INV-6 security gate candidate job(s) are missing from the workflow tree: "
+        f"{missing}. Update SECURITY_SCAN_GATE_JOBS only when the workflow job is "
+        f"renamed or deliberately removed."
+    )
+
+    failures: list[str] = []
+    inspected = 0
+    for job_id, expected_context in sorted(SECURITY_SCAN_GATE_JOBS.items()):
+        inspected += 1
+        job = jobs[job_id]
+        contexts = job.check_contexts()
+        assert expected_context in contexts, (
+            f"INV-6 {job_id} was expected to post check context "
+            f"{expected_context!r}, but the parsed contexts are {contexts!r}. "
+            "Refresh SECURITY_SCAN_GATE_JOBS if the job name changed."
+        )
+        if job_id in ADVISORY_ONLY_SECURITY_JOBS:
+            continue
+        active = _active_continue_on_error_lines(job.text)
+        for line_no, value in active:
+            failures.append(
+                f"{job_id} line {line_no} has continue-on-error: {value}. "
+                "A required security scanner that continues after failure can post "
+                "green while findings exist. Remove it, or move the job into "
+                "ADVISORY_ONLY_SECURITY_JOBS with a reason."
+            )
+
+    assert inspected == len(SECURITY_SCAN_GATE_JOBS)
+    assert not failures, (
+        f"required security scan job(s) fail open "
+        f"({inspected} job(s) inspected; advisory-only exceptions: "
+        f"{sorted(ADVISORY_ONLY_SECURITY_JOBS)}):\n  - " + "\n  - ".join(failures)
+    )
+
+    # Positive controls: the detector must flag active fail-open controls and
+    # ignore an explicit false value.
+    bad = "job:\n  steps:\n    - run: scanner\n      continue-on-error: true\n"
+    assert _active_continue_on_error_lines(bad) == [(4, "true")]
+    assert _active_continue_on_error_lines(
+        "job:\n  continue-on-error: false\n"
+    ) == []
 
 
 def test_inv3_positive_control() -> None:

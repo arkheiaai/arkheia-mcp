@@ -78,13 +78,12 @@ jobs:
         run: |
           pip install -r requirements.txt --dry-run 2>/dev/null || true
           pip-audit -r requirements.txt --format json -o pip-audit-results.json || true
-          pip-audit -r requirements.txt 2>&1 | tee pip-audit-summary.txt
-          # Fail only on critical/high CVEs
-          if pip-audit -r requirements.txt --fail-on-cvss 8.0 2>&1 | grep -q "Found"; then
-            echo "High-severity CVEs found"
+          pip-audit -r requirements.txt 2>&1 | tee pip-audit-summary.txt || true
+          # Fail on critical/high CVEs, and fail closed if pip-audit cannot complete.
+          if ! pip-audit -r requirements.txt --fail-on-cvss 8.0; then
+            echo "High-severity CVEs found or pip-audit failed"
             exit 1
           fi
-        continue-on-error: true
 
       - name: Upload results
         if: always()
@@ -114,4 +113,3 @@ jobs:
           base: ${{ github.event.repository.default_branch }}
           head: HEAD
           extra_args: --only-verified
-        continue-on-error: true
