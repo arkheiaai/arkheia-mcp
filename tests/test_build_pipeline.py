@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
 import json
 import secrets
 import shutil
@@ -17,6 +18,7 @@ else:
     setup_cython = None
 
 from scripts import build_release
+from scripts import encrypt_profiles
 
 HAS_CYTHON = importlib.util.find_spec("Cython") is not None
 TEMP_ROOT = Path(__file__).resolve().parent.parent / ".tmp_test_build_pipeline"
@@ -54,6 +56,42 @@ def test_build_release_encrypt_step():
         assert (profiles_dir / "schema.yaml").exists()
     finally:
         shutil.rmtree(case_dir, ignore_errors=True)
+
+
+def test_build_release_rejects_command_line_profile_key_without_echo():
+    secret = base64.b64encode(secrets.token_bytes(32)).decode()
+    with pytest.raises(ValueError) as exc:
+        build_release.resolve_profile_key(profile_key_cli=secret)
+
+    message = str(exc.value)
+    assert "command line" in message
+    assert secret not in message
+
+
+def test_build_release_reads_profile_key_file(tmp_path):
+    raw = secrets.token_bytes(32)
+    key_file = tmp_path / "profile-key"
+    key_file.write_text(base64.b64encode(raw).decode(), encoding="utf-8")
+
+    assert build_release.resolve_profile_key(profile_key_file=str(key_file)) == raw
+
+
+def test_encrypt_profiles_rejects_command_line_key_without_echo():
+    secret = base64.b64encode(secrets.token_bytes(32)).decode()
+    with pytest.raises(ValueError) as exc:
+        encrypt_profiles.resolve_master_key(key_cli=secret)
+
+    message = str(exc.value)
+    assert "command line" in message
+    assert secret not in message
+
+
+def test_encrypt_profiles_reads_profile_key_file(tmp_path):
+    raw = secrets.token_bytes(32)
+    key_file = tmp_path / "profile-key"
+    key_file.write_text(base64.b64encode(raw).decode(), encoding="utf-8")
+
+    assert encrypt_profiles.resolve_master_key(key_file=str(key_file)) == raw
 
 
 def test_build_release_manifest_step():

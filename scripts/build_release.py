@@ -31,8 +31,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build the Arkheia release artifacts")
     parser.add_argument(
         "--profile-key",
+        dest="profile_key_cli",
         default=None,
-        help="Base64-encoded 32-byte profile master key. Defaults to ARKHEIA_PROFILE_MASTER_KEY.",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--profile-key-file",
+        default=None,
+        help=(
+            "Path to a file containing the base64-encoded 32-byte profile "
+            "master key. Defaults to ARKHEIA_PROFILE_MASTER_KEY."
+        ),
     )
     parser.add_argument(
         "--skip-compile",
@@ -42,10 +51,30 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def resolve_profile_key(profile_key: str | None) -> bytes:
-    key_b64 = profile_key or os.environ.get("ARKHEIA_PROFILE_MASTER_KEY")
+def _read_profile_key_file(profile_key_file: str) -> str:
+    return Path(profile_key_file).read_text(encoding="utf-8").strip()
+
+
+def resolve_profile_key(
+    profile_key_cli: str | None = None,
+    profile_key_file: str | None = None,
+) -> bytes:
+    if profile_key_cli:
+        raise ValueError(
+            "Refusing profile master key on the command line. Use "
+            "ARKHEIA_PROFILE_MASTER_KEY or --profile-key-file instead."
+        )
+
+    key_b64 = (
+        _read_profile_key_file(profile_key_file)
+        if profile_key_file
+        else os.environ.get("ARKHEIA_PROFILE_MASTER_KEY")
+    )
     if not key_b64:
-        raise ValueError("Profile key missing. Pass --profile-key or set ARKHEIA_PROFILE_MASTER_KEY.")
+        raise ValueError(
+            "Profile key missing. Set ARKHEIA_PROFILE_MASTER_KEY or pass "
+            "--profile-key-file."
+        )
 
     try:
         master_key = base64.b64decode(key_b64)
@@ -151,7 +180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
 
     try:
-        master_key = resolve_profile_key(args.profile_key)
+        master_key = resolve_profile_key(args.profile_key_cli, args.profile_key_file)
         if not args.skip_compile:
             step_cython_compile(REPO_ROOT)
 
