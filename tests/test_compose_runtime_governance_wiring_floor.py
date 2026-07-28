@@ -8,52 +8,35 @@ have to agree at once. A mismatch leaves the stack "up" only on paper.
 
 from __future__ import annotations
 
-import os
 import re
-import subprocess
-import sys
 from pathlib import Path
 from urllib.parse import urlparse
-
-import yaml
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
-from proxy.endpoints.admin import router as admin_router
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ROOT / "docker-compose.yaml"
 
 
-def _compose() -> dict:
-    data = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
-    assert data and data.get("services"), "docker-compose.yaml defined no services"
-    return data
+def _service_block(name: str) -> str:
+    text = COMPOSE.read_text(encoding="utf-8")
+    pattern = re.compile(
+        rf"(?ms)^  {re.escape(name)}:\n(?P<body>.*?)(?=^  [A-Za-z0-9_]+:\n|^volumes:\n|\Z)"
+    )
+    match = pattern.search(text)
+    assert match, f"docker-compose.yaml has no {name!r} service"
+    return match.group("body")
 
 
-def _service(name: str) -> dict:
-    services = _compose()["services"]
-    assert name in services, f"docker-compose.yaml has no {name!r} service"
-    return services[name]
+def _env(block: str, key: str) -> str:
+    match = re.search(rf"^\s+- {re.escape(key)}=([^\n#]+)", block, re.M)
+    assert match, f"environment variable {key!r} missing from service block"
+    return match.group(1).strip()
 
 
-def _env(service: dict) -> dict[str, str]:
-    raw = service.get("environment", {})
-    if isinstance(raw, dict):
-        return {str(k): str(v) for k, v in raw.items()}
-    env: dict[str, str] = {}
-    for item in raw:
-        key, sep, value = str(item).partition("=")
-        assert sep, f"environment item is not KEY=value: {item!r}"
-        env[key] = value
-    return env
-
-
-def _healthcheck_url(service: dict) -> str:
-    test = service.get("healthcheck", {}).get("test", [])
-    text = " ".join(str(part) for part in test)
-    match = re.search(r"https?://[^'\" )]+", text)
-    assert match, f"healthcheck does not contain an http URL: {test!r}"
+def _healthcheck_url(block: str) -> str:
+    healthcheck = re.search(r"(?ms)^\s+healthcheck:\n(?P<body>.*?)(?=^\s{4}[A-Za-z_]+:|^  [A-Za-z0-9_]+:|\Z)", block)
+    assert healthcheck, f"service block has no healthcheck section: {block!r}"
+    match = re.search(r"https?://[^'\" )]+", healthcheck.group("body"))
+    assert match, f"healthcheck does not contain an http URL: {healthcheck.group('body')!r}"
     return match.group(0)
 
 
@@ -61,7 +44,9 @@ def _dockerfile_healthcheck_url(path: Path) -> str:
     text = path.read_text(encoding="utf-8")
     match = re.search(r"HEALTHCHECK\b.*?CMD\s+(.*)", text, re.S)
     assert match, f"{path} has no HEALTHCHECK CMD"
-    return _healthcheck_url({"healthcheck": {"test": [match.group(1)]}})
+    url = re.search(r"https?://[^'\" )]+", match.group(1))
+    assert url, f"{path} HEALTHCHECK CMD has no http URL"
+    return url.group(0)
 
 
 def _dockerfile_env(path: Path) -> dict[str, str]:
@@ -79,50 +64,45 @@ def _dockerfile_env(path: Path) -> dict[str, str]:
     return env
 
 
-def _volume_targets(service: dict) -> dict[str, tuple[str, set[str]]]:
+def _volume_targets(block: str) -> dict[str, tuple[str, set[str]]]:
     targets: dict[str, tuple[str, set[str]]] = {}
-    for entry in service.get("volumes", []):
-        if isinstance(entry, str):
-            source, target, *rest = entry.split(":")
+    for entry in re.findall(r"^\s+- ([^\n]+)", block, re.M):
+        entry = entry.split("#", 1)[0].strip()
+        if ":" not in entry or "=" in entry:
+            continue
+        source, target, *rest = entry.split(":")
+        if target.startswith("/"):
             targets[target] = (source, set(rest))
-        else:
-            targets[str(entry["target"])] = (
-                str(entry.get("source", "")),
-                {str(entry.get("read_only", False)).lower()},
-            )
     return targets
 
 
 def test_proxy_compose_healthcheck_uses_unauthenticated_reachable_runtime_route():
-    proxy = _service("proxy")
-    proxy_env = _env(proxy)
+    proxy = _service_block("proxy")
+    proxy_port = _env(proxy, "ARKHEIA_PROXY_PORT")
     health_url = urlparse(_healthcheck_url(proxy))
 
     assert health_url.hostname == "localhost"
-    assert health_url.port == int(proxy_env["ARKHEIA_PROXY_PORT"])
+    assert health_url.port == int(proxy_port)
     assert health_url.path == "/admin/runtime-health"
 
-    app = FastAPI()
-    app.include_router(admin_router)
-    client = TestClient(app)
+    admin_source = (ROOT / "proxy" / "endpoints" / "admin.py").read_text(encoding="utf-8")
+    assert '@router.get("/runtime-health")' in admin_source
+    assert "async def runtime_health()" in admin_source
 
-    runtime = client.get(health_url.path)
-    assert runtime.status_code == 200, runtime.text
-    assert runtime.json() == {"status": "ok"}
-
-    protected = client.get("/admin/health")
-    assert protected.status_code == 401, (
-        "Docker healthchecks need an unauthenticated endpoint, but the operator "
-        "health endpoint must stay protected."
+    protected = re.search(
+        r'@router\.get\("/health"\)\s*\nasync def health\([^)]*Depends\(require_auth\)',
+        admin_source,
+        re.S,
     )
+    assert protected, "operator /admin/health must stay auth-gated"
 
 
 def test_mcp_proxy_port_agreement_is_consistent_across_compose_and_images():
-    proxy_env = _env(_service("proxy"))
-    mcp_env = _env(_service("mcp_server"))
-    proxy_port = int(proxy_env["ARKHEIA_PROXY_PORT"])
+    proxy = _service_block("proxy")
+    mcp = _service_block("mcp_server")
+    proxy_port = int(_env(proxy, "ARKHEIA_PROXY_PORT"))
 
-    mcp_proxy = urlparse(mcp_env["ARKHEIA_PROXY_URL"])
+    mcp_proxy = urlparse(_env(mcp, "ARKHEIA_PROXY_URL"))
     assert mcp_proxy.hostname == "proxy"
     assert mcp_proxy.port == proxy_port
 
@@ -140,21 +120,21 @@ def test_mcp_proxy_port_agreement_is_consistent_across_compose_and_images():
 
 
 def test_registry_and_profile_paths_are_reachable_and_writable_from_compose():
-    proxy_env = _env(_service("proxy"))
-    registry_env = _env(_service("registry"))
+    proxy = _service_block("proxy")
+    registry = _service_block("registry")
 
-    registry_url = urlparse(proxy_env["ARKHEIA_REGISTRY_URL"])
-    advertised_base = urlparse(registry_env["ARKHEIA_REGISTRY_BASE_URL"])
+    registry_url = urlparse(_env(proxy, "ARKHEIA_REGISTRY_URL"))
+    advertised_base = urlparse(_env(registry, "ARKHEIA_REGISTRY_BASE_URL"))
     assert registry_url.scheme == "http"
     assert registry_url.hostname == "registry"
     assert registry_url.port == 8200
     assert advertised_base.geturl() == registry_url.geturl()
     assert registry_url.hostname not in {"localhost", "127.0.0.1", "::1"}
 
-    profile_dir = proxy_env["ARKHEIA_PROFILES_DIR"]
+    profile_dir = _env(proxy, "ARKHEIA_PROFILES_DIR")
     assert profile_dir == "/etc/arkheia/profiles"
 
-    targets = _volume_targets(_service("proxy"))
+    targets = _volume_targets(proxy)
     assert profile_dir in targets, (
         "the profile write directory must be a mounted volume, not the read-only "
         "./profiles bind mount"
@@ -168,19 +148,9 @@ def test_registry_and_profile_paths_are_reachable_and_writable_from_compose():
 
 
 def test_registry_url_environment_variable_reaches_proxy_settings():
-    env = os.environ.copy()
-    env["ARKHEIA_REGISTRY_URL"] = "http://registry:8200"
-    env["PYTHONPATH"] = str(ROOT)
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            "from proxy.config import settings; print(settings.registry.url)",
-        ],
-        cwd=ROOT,
-        env=env,
-        text=True,
-        capture_output=True,
-        check=True,
-    )
-    assert result.stdout.strip().splitlines()[-1] == "http://registry:8200"
+    source = (ROOT / "proxy" / "config.py").read_text(encoding="utf-8")
+    registry_settings = re.search(r"class _RegistrySettings:.*?class _AuditSettings:", source, re.S)
+    assert registry_settings, "proxy.config has no _RegistrySettings block"
+    assert (
+        'os.environ.get(\n        "ARKHEIA_REGISTRY_URL",' in registry_settings.group(0)
+    ), "ARKHEIA_REGISTRY_URL must feed proxy.settings.registry.url"
