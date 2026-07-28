@@ -14,10 +14,16 @@ from typing import Optional
 
 import httpx
 
+from arkheia_common.hosted_authority import (
+    DEFAULT_HOSTED_API_URL,
+    HostedAuthorityError,
+    authorize_hosted_base_url,
+)
+
 logger = logging.getLogger(__name__)
 
 # Hosted API defaults
-HOSTED_API_URL = "https://arkheia-proxy-production.up.railway.app"
+HOSTED_API_URL = DEFAULT_HOSTED_API_URL
 
 
 class ProxyClient:
@@ -144,12 +150,13 @@ class ProxyClient:
             "response": response,
             "prompt": prompt,
         }
-        headers = {"X-Arkheia-Key": self.api_key}
 
         try:
+            authorized = authorize_hosted_base_url(self.hosted_url)
+            headers = {"X-Arkheia-Key": self.api_key}
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 resp = await client.post(
-                    f"{self.hosted_url}/v1/detect",
+                    f"{authorized.base_url}/v1/detect",
                     json=payload,
                     headers=headers,
                 )
@@ -165,6 +172,9 @@ class ProxyClient:
                     evidence_depth_limited=data.get("evidence_depth_limited", True),
                     source="hosted",
                 )
+        except HostedAuthorityError as e:
+            logger.error("ProxyClient: hosted API authority rejected: %s", e)
+            return _unavailable("hosted_authority_rejected")
         except httpx.TimeoutException:
             logger.warning("ProxyClient: hosted /v1/detect timed out for model=%s", model_id)
             return _unavailable("hosted_timeout")

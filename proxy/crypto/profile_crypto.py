@@ -23,6 +23,10 @@ from typing import Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from arkheia_common.hosted_authority import (
+    HostedAuthorityError,
+    authorize_hosted_base_url,
+)
 from proxy.audit.decision_journal import (
     KEY_LOAD_FETCHED_CACHE,
     KEY_LOAD_FETCHED_HOSTED,
@@ -219,9 +223,10 @@ class DynamicKeyLoader:
             return None
         try:
             import httpx
+            authorized = authorize_hosted_base_url(self.hosted_url)
             async with httpx.AsyncClient(timeout=30) as client:
                 resp = await client.post(
-                    f"{self.hosted_url}/v1/profile-key",
+                    f"{authorized.base_url}/v1/profile-key",
                     headers={"X-Arkheia-Key": self.api_key},
                 )
                 # Structural evidence for the key-load record: a status code, not
@@ -243,6 +248,8 @@ class DynamicKeyLoader:
                     logger.warning("Rate limited fetching profile key (429)")
                 else:
                     logger.warning("Hosted endpoint returned %d", resp.status_code)
+        except HostedAuthorityError as exc:
+            logger.error("Hosted endpoint authority rejected: %s", exc)
         except Exception as exc:
             logger.warning("Failed to reach hosted endpoint: %s", exc)
         return None
