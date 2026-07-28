@@ -15,6 +15,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from pydantic import SecretStr
@@ -117,7 +118,7 @@ class RegistryClient:
         """
         model_id = meta["model_id"]
         checksum = meta.get("checksum", "")
-        download_url = meta["download_url"]
+        download_url = self._same_origin_download_url(meta["download_url"])
         key_value = self.api_key.get_secret_value()
 
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -149,6 +150,38 @@ class RegistryClient:
 
         logger.info("Applied profile update: %s v%s", model_id, meta.get("version", "?"))
         return True
+
+    def _same_origin_download_url(self, download_url: str) -> str:
+        """
+        Bind registry metadata downloads to this client's configured registry.
+
+        Registry credentials are bearer tokens for the configured registry origin.
+        A metadata response must not be able to redirect credentialed downloads to
+        another authority by publishing an absolute foreign ``download_url``.
+        Relative URLs are preferred and resolved against ``base_url``; absolute
+        URLs are accepted only when their scheme/host/port match ``base_url``.
+        """
+        candidate = urljoin(f"{self.base_url}/", download_url)
+        base = urlparse(self.base_url)
+        parsed = urlparse(candidate)
+
+        def authority(parts) -> tuple[str, str, int | None]:
+            scheme = parts.scheme.lower()
+            host = (parts.hostname or "").lower()
+            port = parts.port
+            if port is None and scheme == "http":
+                port = 80
+            elif port is None and scheme == "https":
+                port = 443
+            return scheme, host, port
+
+        if authority(parsed) != authority(base):
+            raise ValueError(
+                "registry download_url authority does not match configured registry base"
+            )
+        if parsed.username or parsed.password:
+            raise ValueError("registry download_url must not include userinfo")
+        return candidate
 
     async def start_scheduled_pull(self, interval_hours: int) -> None:
         """

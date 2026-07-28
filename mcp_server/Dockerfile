@@ -27,7 +27,7 @@ RUN chown -R arkheia:arkheia /app
 USER arkheia
 
 # ARKHEIA_PROXY_URL must point to the running proxy
-ENV ARKHEIA_PROXY_URL=http://localhost:8099
+ENV ARKHEIA_PROXY_URL=http://localhost:8098
 
 # MCP server runs via stdio by default (for Claude Desktop / Claude Code)
 CMD ["python", "-m", "mcp_server.server"]

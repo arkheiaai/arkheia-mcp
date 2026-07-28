@@ -84,7 +84,10 @@ class _DetectionSettings:
 
 
 class _RegistrySettings:
-    url: str = _yaml.get("registry", {}).get("url", "https://registry.arkheia.ai")
+    url: str = os.environ.get(
+        "ARKHEIA_REGISTRY_URL",
+        _yaml.get("registry", {}).get("url", "https://registry.arkheia.ai"),
+    )
     pull_on_startup: bool = _yaml.get("registry", {}).get("pull_on_startup", False)
     pull_interval_hours: int = _yaml.get("registry", {}).get("pull_interval_hours", 24)
     pin_major_version: Optional[int] = _yaml.get("registry", {}).get("pin_major_version")

@@ -22,6 +22,7 @@ services:
       - ARKHEIA_API_KEY=${ARKHEIA_API_KEY:-}     # injected from host, empty = registry disabled
       - ARKHEIA_ENV=${ARKHEIA_ENV:-development}
       - ARKHEIA_REGISTRY_URL=http://registry:8200
+      - ARKHEIA_PROFILES_DIR=/etc/arkheia/profiles
       - ARKHEIA_PROXY_PORT=8098
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
       - ARKHEIA_LICENSE_KEY=${ARKHEIA_LICENSE_KEY:-}   # HMAC key for surface verification
@@ -33,7 +34,7 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import httpx; httpx.get('http://localhost:8098/admin/health').raise_for_status()"]
+             "import httpx; httpx.get('http://localhost:8098/admin/runtime-health').raise_for_status()"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -50,7 +51,7 @@ services:
       # supplying a fallback key.
       - ARKHEIA_REGISTRY_KEYS=${ARKHEIA_REGISTRY_KEYS:-}
       - ARKHEIA_REGISTRY_PROFILE_DIR=/app/profiles
-      - ARKHEIA_REGISTRY_BASE_URL=http://localhost:8200
+      - ARKHEIA_REGISTRY_BASE_URL=http://registry:8200
       - ARKHEIA_REGISTRY_AUDIT_LOG=/var/log/arkheia/registry-audit.jsonl
     volumes:
       - ./profiles:/app/profiles:ro
@@ -71,7 +72,7 @@ services:
       proxy:
         condition: service_healthy
     environment:
-      - ARKHEIA_PROXY_URL=http://proxy:8099
+      - ARKHEIA_PROXY_URL=http://proxy:8098
     # MCP server communicates via stdio by default.
     # For HTTP/SSE transport, uncomment:
     # ports:

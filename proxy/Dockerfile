@@ -15,22 +15,23 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application
 COPY proxy/ /app/proxy/
 COPY profiles/ /app/profiles/
+COPY profiles/ /etc/arkheia/profiles/
 
 # Runtime directories
-RUN mkdir -p /var/log/arkheia /etc/arkheia && \
+RUN mkdir -p /var/log/arkheia /etc/arkheia/profiles && \
     chown -R arkheia:arkheia /var/log/arkheia /etc/arkheia /app
 
 USER arkheia
 
 # Config is injected at runtime -- no secrets in image
 # Mount arkheia-proxy.yaml at /etc/arkheia/arkheia-proxy.yaml or set ARKHEIA_CONFIG
-ENV ARKHEIA_PROFILES_DIR=/app/profiles
+ENV ARKHEIA_PROFILES_DIR=/etc/arkheia/profiles
 ENV ARKHEIA_AUDIT_LOG=/var/log/arkheia/audit.jsonl
 ENV ARKHEIA_PROXY_PORT=8098
 
 EXPOSE 8098
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8098/admin/health').raise_for_status()"
+    CMD python -c "import httpx; httpx.get('http://localhost:8098/admin/runtime-health').raise_for_status()"
 
 CMD ["python", "-m", "proxy.main"]

@@ -691,6 +691,12 @@ async def health(request: Request, _: str = Depends(require_auth)):
     }
 
 
+@router.get("/runtime-health")
+async def runtime_health():
+    """Unauthenticated liveness check for container orchestration only."""
+    return {"status": "ok"}
+
+
 @router.post("/registry/pull")
 async def manual_registry_pull(request: Request, _: str = Depends(require_auth)):
     """Trigger a manual profile registry pull."""
