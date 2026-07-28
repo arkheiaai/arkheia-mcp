@@ -699,8 +699,34 @@ async def manual_registry_pull(request: Request, _: str = Depends(require_auth))
         return {"status": "error", "detail": "registry_client not configured"}
 
     try:
-        await registry_client.pull()
-        return {"status": "ok", "message": "Registry pull completed"}
+        summary = await registry_client.pull()
+        if not isinstance(summary, dict):
+            return {"status": "error", "detail": "registry_client returned invalid pull summary"}
+
+        updated = list(summary.get("updated") or [])
+        skipped = list(summary.get("skipped") or [])
+        errors = list(summary.get("errors") or [])
+
+        if errors:
+            status = "partial" if updated or skipped else "error"
+            message = "Registry pull completed with errors"
+        else:
+            status = "ok"
+            message = "Registry pull completed"
+
+        return {
+            "status": status,
+            "message": message,
+            "updated": updated,
+            "skipped": skipped,
+            "errors": errors,
+            "summary": {
+                **summary,
+                "updated": updated,
+                "skipped": skipped,
+                "errors": errors,
+            },
+        }
     except Exception as e:
         logger.error("Manual registry pull failed: %s", e)
         return {"status": "error", "detail": str(e)}
