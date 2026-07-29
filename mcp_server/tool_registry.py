@@ -474,7 +474,7 @@ async def check_receipted(
     call_site: str = "dispatch",
     argument_keys: Iterable[str] | None = None,
     log_path: str | Path | None = None,
-) -> ToolPolicy:
+) -> GateDecision:
     """Run the policy gate and write a receipt before returning or raising."""
     decision = await decide(
         tool_name,
@@ -486,7 +486,7 @@ async def check_receipted(
     if decision.violation is not None:
         raise decision.violation
     assert decision.policy is not None
-    return decision.policy
+    return decision
 
 
 def assert_registry_covers(advertised: Iterable[str]) -> None:

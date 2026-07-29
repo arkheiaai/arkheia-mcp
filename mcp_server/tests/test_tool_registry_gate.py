@@ -903,6 +903,25 @@ class TestReceiptedGate:
         assert "default deny" in row["deny_reason"]
         assert row["permissions_applied"] is None
 
+    async def test_check_receipted_allowed_path_carries_receipt_status(
+        self, tmp_path, monkeypatch
+    ):
+        log_path = tmp_path / "gate.jsonl"
+        emitted = []
+
+        async def emit_but_do_not_confirm(path, record):
+            emitted.append((path, record["receipt_id"]))
+            return False
+
+        monkeypatch.setattr(receipts, "emit", emit_but_do_not_confirm)
+
+        decision = await check_receipted("memory_retrieve", log_path=log_path)
+
+        assert decision.allowed is True
+        assert decision.policy is REGISTRY["memory_retrieve"]
+        assert decision.receipt_status == receipts.STATUS_UNRECORDED
+        assert emitted == [(log_path, decision.receipt_id)]
+
     async def test_dispatch_chokepoint_receipts_an_unknown_name(self, tmp_path, monkeypatch):
         log_path = tmp_path / "dispatch.jsonl"
         monkeypatch.setenv("ARKHEIA_TOOL_GATE_RECEIPT_LOG", str(log_path))
@@ -917,21 +936,60 @@ class TestReceiptedGate:
         assert row["decision"] == receipts.DECISION_DENIED
         assert row["tool"] == "exfiltrate_secrets"
 
-    async def test_argument_values_do_not_enter_the_policy_receipt(self, tmp_path):
+    async def test_allowed_dispatch_response_carries_the_derived_receipt_status(
+        self, tmp_path, monkeypatch
+    ):
+        log_path = tmp_path / "dispatch.jsonl"
+        monkeypatch.setenv("ARKHEIA_TOOL_GATE_RECEIPT_LOG", str(log_path))
+
+        async def emit_but_do_not_confirm(path, record):
+            return False
+
+        monkeypatch.setattr(receipts, "emit", emit_but_do_not_confirm)
+
+        result = await srv.mcp.call_tool("memory_retrieve", {"query": "no-hit"})
+
+        assert result, "dispatch returned no content, so receipt metadata has nowhere to ride"
+        meta = result[0].meta[srv.TOOL_GATE_RECEIPT_META_KEY]
+        assert meta["receipt_status"] == receipts.STATUS_UNRECORDED
+        assert meta["receipt_id"]
+
+    async def test_allowed_dispatch_response_carries_the_confirmed_receipt_id(
+        self, tmp_path, monkeypatch
+    ):
+        log_path = tmp_path / "dispatch.jsonl"
+        monkeypatch.setenv("ARKHEIA_TOOL_GATE_RECEIPT_LOG", str(log_path))
+
+        result = await srv.mcp.call_tool("memory_retrieve", {"query": "no-hit"})
+
+        assert result, "dispatch returned no content, so receipt metadata has nowhere to ride"
+        meta = result[0].meta[srv.TOOL_GATE_RECEIPT_META_KEY]
+        assert meta["receipt_status"] == receipts.STATUS_RECORDED
+        row = receipts.find_receipt(log_path, meta["receipt_id"])
+        assert row is not None
+        assert row["decision"] == receipts.DECISION_ALLOWED
+        assert row["tool"] == "memory_retrieve"
+
+    async def test_argument_values_do_not_enter_the_policy_receipt(self, tmp_path, monkeypatch):
         log_path = tmp_path / "gate.jsonl"
+        monkeypatch.setenv("ARKHEIA_TOOL_GATE_RECEIPT_LOG", str(log_path))
         secret = "sk-ant-VERYSECRETTOOLARGUMENTVALUE1234567890"
 
-        decision = await decide(
+        result = await srv.mcp.call_tool(
             "memory_store",
-            argument_keys=["name", "observations"],
-            log_path=log_path,
+            {
+                "name": "public-receipt-fixture",
+                "entity_type": "note",
+                "observations": [secret],
+            },
         )
 
-        assert decision.receipt_status == receipts.STATUS_RECORDED
+        assert result, "tool result missing; the secret-bearing dispatch did not run"
         assert secret.encode() not in log_path.read_bytes()
-        row = receipts.find_receipt(log_path, decision.receipt_id)
+        meta = result[0].meta[srv.TOOL_GATE_RECEIPT_META_KEY]
+        row = receipts.find_receipt(log_path, meta["receipt_id"])
         assert row is not None
-        assert row["argument_keys"] == ["name", "observations"]
+        assert row["argument_keys"] == ["entity_type", "name", "observations"]
         assert "argument_values" not in row
 
     async def test_emit_reports_unrecorded_when_readback_cannot_find_receipt(

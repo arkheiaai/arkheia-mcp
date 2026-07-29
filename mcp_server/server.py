@@ -33,6 +33,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from mcp_server.proxy_client import ProxyClient
 from mcp_server.tool_registry import (
+    GateDecision,
     REGISTRY,
     assert_registry_covers,
     check,
@@ -49,17 +50,41 @@ ARKHEIA_PROXY_URL = os.environ.get("ARKHEIA_PROXY_URL", "http://localhost:8098")
 ARKHEIA_HOSTED_URL = os.environ.get("ARKHEIA_HOSTED_URL", "https://arkheia-proxy-production.up.railway.app")
 ARKHEIA_API_KEY = os.environ.get("ARKHEIA_API_KEY")
 
+TOOL_GATE_RECEIPT_META_KEY = "arkheia_tool_gate_receipt"
+
+
+def _attach_tool_gate_receipt(result: Any, decision: GateDecision) -> Any:
+    receipt = {
+        "receipt_id": decision.receipt_id,
+        "receipt_status": decision.receipt_status,
+    }
+    if isinstance(result, dict):
+        return {**result, TOOL_GATE_RECEIPT_META_KEY: receipt}
+
+    for item in result if isinstance(result, (list, tuple)) else ():
+        meta = getattr(item, "meta", None)
+        if meta is None:
+            meta = {}
+        elif isinstance(meta, dict):
+            meta = dict(meta)
+        else:
+            continue
+        meta[TOOL_GATE_RECEIPT_META_KEY] = receipt
+        setattr(item, "meta", meta)
+    return result
+
 
 class GatedFastMCP(FastMCP):
     """FastMCP with the policy gate at the orchestrator dispatch boundary."""
 
     async def call_tool(self, name: str, arguments: dict[str, Any]):
-        await check_receipted(
+        decision = await check_receipted(
             name,
             call_site="dispatch",
             argument_keys=list(arguments) if isinstance(arguments, dict) else None,
         )
-        return await super().call_tool(name, arguments)
+        result = await super().call_tool(name, arguments)
+        return _attach_tool_gate_receipt(result, decision)
 
     async def list_tools_ungated(self):
         return await FastMCP.list_tools(self)

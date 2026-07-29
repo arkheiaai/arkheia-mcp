@@ -578,6 +578,13 @@ def _calls_named(fn: ast.AST, callee: str) -> list[ast.Call]:
     return out
 
 
+def _func(tree: ast.Module, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    return None
+
+
 def test_inv6_dispatch_is_gated_by_the_receipted_check():
     tree = _parse(SERVER_MODULE)
     subclasses = _fastmcp_subclasses(tree)
@@ -616,7 +623,105 @@ def test_inv6_dispatch_is_gated_by_the_receipted_check():
     )
 
 
-def test_inv6b_startup_selfcheck_reads_the_unfiltered_tool_list():
+def test_inv6b_receipted_check_returns_the_allow_decision_not_just_policy():
+    fn = _func(_parse(GATE_MODULE), "check_receipted")
+    assert fn is not None, "check_receipted is missing"
+
+    returns = [n.value for n in ast.walk(fn) if isinstance(n, ast.Return) and n.value]
+    assert returns, "check_receipted has no value return on the allow path"
+    assert any(isinstance(value, ast.Name) and value.id == "decision" for value in returns), (
+        "check_receipted must return the GateDecision it just receipted so the "
+        "allow caller can see receipt_id and receipt_status."
+    )
+
+    policy_returns = [
+        ast.unparse(value)
+        for value in returns
+        if isinstance(value, ast.Attribute) and value.attr == "policy"
+    ]
+    assert not policy_returns, (
+        "check_receipted returned only the ToolPolicy and discarded the receipt "
+        f"status on the allow path: {policy_returns}"
+    )
+
+
+def test_inv6c_dispatch_carries_the_derived_receipt_status_to_the_result():
+    tree = _parse(SERVER_MODULE)
+    subclasses = _fastmcp_subclasses(tree)
+    instance = _module_assignments(tree).get("mcp")
+    assert isinstance(instance, ast.Call), "no module-level mcp = ...(...) construction found"
+    built_with = instance.func.id if isinstance(instance.func, ast.Name) else getattr(instance.func, "attr", None)
+    call_tool = next(
+        n
+        for n in subclasses[built_with].body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "call_tool"
+    )
+
+    receipted_names: set[str] = set()
+    for node in ast.walk(call_tool):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        value = node.value.value if isinstance(node.value, ast.Await) else node.value
+        if (
+            isinstance(target, ast.Name)
+            and isinstance(value, ast.Call)
+            and (
+                (isinstance(value.func, ast.Name) and value.func.id == "check_receipted")
+                or getattr(value.func, "attr", None) == "check_receipted"
+            )
+        ):
+            receipted_names.add(target.id)
+
+    assert receipted_names, (
+        "GatedFastMCP.call_tool calls check_receipted but does not keep the "
+        "GateDecision; the allow-path receipt status would be discarded."
+    )
+
+    carriers = [
+        call
+        for call in _calls_named(call_tool, "_attach_tool_gate_receipt")
+        if any(isinstance(arg, ast.Name) and arg.id in receipted_names for arg in call.args)
+    ]
+    assert carriers, (
+        "GatedFastMCP.call_tool keeps the receipted decision but never passes it "
+        "to the result-carriage helper."
+    )
+
+    helper = _func(tree, "_attach_tool_gate_receipt")
+    assert helper is not None, "_attach_tool_gate_receipt is missing"
+    decision_attrs = {
+        n.attr
+        for n in ast.walk(helper)
+        if (
+            isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == "decision"
+            and isinstance(n.ctx, ast.Load)
+        )
+    }
+    assert {"receipt_id", "receipt_status"} <= decision_attrs, (
+        "result carriage must read receipt_id and receipt_status from the "
+        f"GateDecision; saw decision attributes {sorted(decision_attrs)}"
+    )
+    literal_statuses = []
+    for node in ast.walk(helper):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if (
+                isinstance(key, ast.Constant)
+                and key.value == "receipt_status"
+                and isinstance(value, ast.Constant)
+            ):
+                literal_statuses.append(value.lineno)
+    assert literal_statuses == [], (
+        "receipt_status carriage is hard-coded instead of derived from the "
+        f"GateDecision at line(s) {literal_statuses}."
+    )
+
+
+def test_inv6d_startup_selfcheck_reads_the_unfiltered_tool_list():
     tree = _parse(SERVER_MODULE)
     fn = next(
         (
