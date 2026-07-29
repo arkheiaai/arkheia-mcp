@@ -15,27 +15,27 @@ end to end: written on the production path, read back off disk, and tied to the
 decision by re-hashing the actual bytes of every file it names.
 
 **D2, at runtime** — *"this artifact matches / does not match its manifest."*
-On ``origin/master`` this decision does not happen at all: ``verify_integrity``
-has ZERO production call sites, so nothing is ever verified and nothing is ever
-recorded. PR #15 supplies the call site and publishes the outcome on
-``app.state.integrity`` / ``/admin/health`` — but that is process-local state, not
-a durable record: restart the proxy and the verdict is gone. **D2 is therefore
-NOT receipted, and this module does not claim it is.** It is not ``n/a`` either:
-a startup that refuses to serve because a detection binary was modified is
-exactly the kind of decision an auditor needs a record of, and the audit rail to
-write it on already exists in the same lifespan. It is FAIL / not-yet.
+Current ``master`` now makes this decision at startup: ``verify_all()`` runs from
+the FastAPI lifespan and publishes the outcome on ``app.state.integrity`` /
+``/admin/health``. That is visible process-local state, not a durable record:
+restart the proxy and the verdict is gone. **D2 is therefore NOT receipted, and
+this module does not claim it is.** It is not ``n/a`` either: a startup that
+refuses to serve because a detection binary was modified is exactly the kind of
+decision an auditor needs a record of, and the audit rail to write it on already
+exists in the same lifespan. It is FAIL / not-yet.
 
 Phase 2: the defect this found
 ------------------------------
 ``generate_manifest`` globs ``*.so``/``*.pyd``. Over a directory containing none
 it returned ``{}`` and ``step_generate_manifest`` wrote that out, printed
 "Manifest written: … (0 modules)", and the build continued to exit 0. The empty
-file is not neutral — ``verify_integrity`` treats a manifest that EXISTS as one
-to check, iterates its zero entries, logs *"Integrity check passed: 0 modules
-verified"* and returns success.
+file was not neutral — before current ``master`` closed the runtime half,
+``verify_integrity`` treated a manifest that EXISTS as one to check, iterated its
+zero entries, logged *"Integrity check passed: 0 modules verified"* and returned
+success.
 
-That is a receipt of a check that did not happen: the artifact reports VERIFIED
-having established nothing, and downstream that verdict is trusted. It is DONE.md
+That was a receipt of a check that did not happen: the artifact reported VERIFIED
+having established nothing, and downstream that verdict was trusted. It is DONE.md
 floor invariant 9 in its exact form — a measurement gate that measures nothing
 must not report a pass — and the brief's "an audit row showing a bare verdict for
 something that scored nothing".
@@ -59,11 +59,10 @@ per module and names the ones no record covers — "1 of 2 modules recorded"
 passes every non-zero assertion, which is precisely the case floor invariant
 9(a) exists for.
 
-Left open deliberately, and named rather than hidden: ``verify_integrity``
-ITSELF still reports a pass over a hand-written empty manifest. That fix belongs
-in ``proxy/license/integrity.py``, which PR #15 is actively rewriting; PR #15's
-new ``IntegrityReport`` returns ``VERIFIED`` with ``modules_checked=0`` for this
-input, so the hole survives it. See the PR body.
+Closed on current ``master``, and pinned here rather than hidden:
+``verify_integrity`` itself now raises ``TamperDetected`` over a hand-written
+empty manifest. The build guard below is still load-bearing: release builds must
+not ship a false manifest and then rely on startup to reject the artifact.
 """
 from __future__ import annotations
 
@@ -77,6 +76,7 @@ from pathlib import Path
 import pytest
 
 from proxy.license.integrity import (
+    IntegrityStatus,
     MANIFEST_FILE,
     TamperDetected,
     generate_manifest,
@@ -168,8 +168,12 @@ def test_the_verifier_consumes_exactly_this_record(module_dir):
     build_release.step_generate_manifest(module_dir)
     manifest_path = module_dir / MANIFEST_FILE
 
-    # Positive: the artifact as built verifies.
-    assert verify_integrity(module_dir) is True
+    # Positive: the artifact as built verifies, using the current IntegrityReport
+    # contract rather than the old bool return.
+    report = verify_integrity(module_dir)
+    assert report.status == IntegrityStatus.VERIFIED
+    assert report.verified is True
+    assert report.modules_checked == 2
 
     # Vacuity guard 1 — a FABRICATED entry. If the verifier did not really read
     # the record, adding a module that does not exist would change nothing.
@@ -194,7 +198,9 @@ def test_the_verifier_consumes_exactly_this_record(module_dir):
     # the direction the whole flow exists for.
     manifest[real] = hashlib.sha256((module_dir / real).read_bytes()).hexdigest()
     manifest_path.write_text(json.dumps(manifest))
-    assert verify_integrity(module_dir) is True  # restored: positive control
+    report = verify_integrity(module_dir)
+    assert report.status == IntegrityStatus.VERIFIED  # restored: positive control
+    assert report.modules_checked == 2
     (module_dir / real).write_bytes(b"\x7fELF" + b"tampered" * 8)
     with pytest.raises(TamperDetected, match=real):
         verify_integrity(module_dir)
@@ -204,15 +210,10 @@ def test_the_verifier_consumes_exactly_this_record(module_dir):
 # 2. The false receipt: a manifest that certifies nothing.
 # ---------------------------------------------------------------------------
 
-def test_an_empty_manifest_would_be_a_record_of_a_check_that_did_not_happen(tmp_path):
+def test_an_empty_manifest_is_rejected_as_a_check_that_did_not_happen(tmp_path):
     """
-    Characterise the underlying behaviour that makes the refusal necessary, so
-    the reason for the refusal is evidence in the suite rather than a claim in a
-    commit message.
-
-    This asserts what the LIBRARY does, and is expected to keep passing until
-    ``proxy/license/integrity.py`` is fixed (PR #15 territory — its new
-    ``IntegrityReport`` still returns VERIFIED with ``modules_checked=0`` here).
+    Pin the runtime half now supplied by current ``master``: an empty manifest is
+    evidence, not absence, and must fail closed just like a corrupt manifest.
     """
     empty_dir = tmp_path / "no_binaries"
     empty_dir.mkdir()
@@ -220,12 +221,9 @@ def test_an_empty_manifest_would_be_a_record_of_a_check_that_did_not_happen(tmp_
     manifest = generate_manifest(empty_dir, empty_dir / MANIFEST_FILE)
     assert manifest == {}, "test setup: the directory must contain no artifacts"
 
-    # A manifest that EXISTS and lists nothing verifies as intact.
-    assert verify_integrity(empty_dir) is True, (
-        "behaviour changed — if verify_integrity now refuses an empty manifest, "
-        "this characterisation test has served its purpose and should be "
-        "rewritten as the assertion that it refuses"
-    )
+    # A manifest that EXISTS and lists nothing is a positive integrity failure.
+    with pytest.raises(TamperDetected, match="[Ee]mpty"):
+        verify_integrity(empty_dir)
 
 
 def test_step_3_refuses_to_ship_a_manifest_that_certifies_nothing(tmp_path):
@@ -242,11 +240,12 @@ def test_step_3_refuses_to_ship_a_manifest_that_certifies_nothing(tmp_path):
     for glob in build_release.COMPILED_ARTIFACT_GLOBS:
         assert glob in message, f"refusal does not name the glob {glob!r}: {message}"
 
-    # The false receipt must not survive the refusal — verify_integrity would
-    # read it and report a pass.
+    # The false receipt must not survive the refusal. Runtime now rejects an empty
+    # manifest, but a release build should fail here rather than ship an artifact
+    # that can only die on startup.
     assert not (empty_dir / MANIFEST_FILE).exists(), (
         "an empty manifest was left on disk after the refusal; a later "
-        "verify_integrity() would read it and report VERIFIED over zero modules"
+        "verify_integrity() would treat it as a positive integrity failure"
     )
 
     # Positive control: the same function accepts a directory that HAS artifacts,
