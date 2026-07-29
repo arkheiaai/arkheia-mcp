@@ -155,7 +155,8 @@ def test_profile_router_warns_no_key(master_key, profile_yaml, caplog):
 
 
 def test_profile_router_mixed_plaintext_and_encrypted(master_key, sample_profile, profile_yaml):
-    """ProfileRouter should load both .yaml and .yaml.enc files."""
+    """Encrypted profile directories refuse plaintext siblings by default."""
+    from proxy.audit.decision_journal import PROFILE_AUTH_PLAINTEXT_REJECTED
     from proxy.router.profile_router import ProfileRouter
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -167,6 +168,74 @@ def test_profile_router_mixed_plaintext_and_encrypted(master_key, sample_profile
         encrypted = encrypt_profile(profile_yaml, master_key, "gpt-4o")
         (Path(tmpdir) / "gpt-4o.yaml.enc").write_bytes(encrypted)
 
+        router = ProfileRouter(tmpdir, decryption_key=master_key)
+        assert router.loaded_count == 1
+        assert router.get("gpt-4o") is not None
+        assert router.get("claude-sonnet-4-6") is None
+        entries, dropped = router.decision_journal.drain()
+        assert dropped == 0
+        assert entries[0]["outcome"] == PROFILE_AUTH_PLAINTEXT_REJECTED
+        assert entries[0]["skipped_profile_names"] == ["claude-sonnet-4-6.yaml"]
+
+
+def test_profile_router_refuses_plaintext_sibling_when_encrypted_profile_has_no_key(
+    master_key, sample_profile, profile_yaml,
+):
+    """A no-key encrypted directory cannot be backfilled by attacker plaintext."""
+    from proxy.audit.decision_journal import (
+        PROFILE_AUTH_PLAINTEXT_REJECTED,
+        PROFILE_AUTH_SKIPPED_NO_KEY,
+    )
+    from proxy.router.profile_router import ProfileRouter
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        attacker_profile = {**sample_profile, "model": "attacker-model"}
+        (Path(tmpdir) / "attacker-model.yaml").write_text(yaml.dump(attacker_profile))
+        encrypted = encrypt_profile(profile_yaml, master_key, "gpt-4o")
+        (Path(tmpdir) / "gpt-4o.yaml.enc").write_bytes(encrypted)
+
+        router = ProfileRouter(tmpdir)
+        assert router.loaded_count == 0
+        assert router.get("attacker-model") is None
+        entries, dropped = router.decision_journal.drain()
+        assert dropped == 0
+        assert [entry["outcome"] for entry in entries] == [
+            PROFILE_AUTH_PLAINTEXT_REJECTED,
+            PROFILE_AUTH_SKIPPED_NO_KEY,
+        ]
+        assert entries[0]["skipped_profile_names"] == ["attacker-model.yaml"]
+        assert entries[1]["skipped_profile_names"] == ["gpt-4o.yaml.enc"]
+
+
+def test_profile_router_plaintext_only_directory_still_loads(sample_profile):
+    """Development plaintext directories stay supported when no encrypted profile exists."""
+    from proxy.router.profile_router import ProfileRouter
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        (Path(tmpdir) / "claude-sonnet-4-6.yaml").write_text(
+            yaml.dump({**sample_profile, "model": "claude-sonnet-4-6"})
+        )
+
+        router = ProfileRouter(tmpdir)
+        assert router.loaded_count == 1
+        assert router.get("claude-sonnet-4-6") is not None
+        assert router.decision_journal.drain() == ([], 0)
+
+
+def test_profile_router_plaintext_migration_requires_explicit_opt_in(
+    monkeypatch, master_key, sample_profile, profile_yaml,
+):
+    """Mixed plaintext/encrypted loading is intentional only with a visible opt-in."""
+    from proxy.router.profile_router import ProfileRouter
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        (Path(tmpdir) / "claude-sonnet-4-6.yaml").write_text(
+            yaml.dump({**sample_profile, "model": "claude-sonnet-4-6"})
+        )
+        encrypted = encrypt_profile(profile_yaml, master_key, "gpt-4o")
+        (Path(tmpdir) / "gpt-4o.yaml.enc").write_bytes(encrypted)
+
+        monkeypatch.setenv("ARKHEIA_ALLOW_PLAINTEXT_PROFILES", "true")
         router = ProfileRouter(tmpdir, decryption_key=master_key)
         assert router.loaded_count == 2
         assert router.get("gpt-4o") is not None

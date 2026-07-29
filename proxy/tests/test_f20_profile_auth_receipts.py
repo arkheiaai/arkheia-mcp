@@ -51,6 +51,7 @@ from proxy.audit.decision_journal import (
     PROFILE_AUTH_MALFORMED,
     PROFILE_AUTH_NOT_YAML,
     PROFILE_AUTH_NO_MODEL_ID,
+    PROFILE_AUTH_PLAINTEXT_REJECTED,
     PROFILE_AUTH_SKIPPED_NO_KEY,
     RECEIPT_ENQUEUED,
     RISK_LEVEL,
@@ -451,6 +452,13 @@ async def test_the_profile_auth_taxonomy_admits_its_own_members():
     )
     assert record["outcome"] == PROFILE_AUTH_AUTHENTICATED
     assert record["ciphertext_sha256"] == hashlib.sha256(b"abc").hexdigest()
+
+    rejected = build_profile_auth_record(
+        outcome=PROFILE_AUTH_PLAINTEXT_REJECTED,
+        skipped_profile_names=["plain.yaml"],
+    )
+    assert rejected["outcome"] == PROFILE_AUTH_PLAINTEXT_REJECTED
+    assert rejected["skipped_profile_names"] == ["plain.yaml"]
 
 
 async def test_plaintext_profiles_produce_no_authentication_rows(profiles, probe):

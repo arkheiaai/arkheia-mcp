@@ -1,7 +1,9 @@
 """
 Multi-profile router with atomic reload, license enforcement, and encrypted profile support.
 
-Loads YAML profiles at startup. Supports both plaintext (.yaml) and encrypted (.yaml.enc) files.
+Loads YAML profiles at startup. Supports plaintext-only development directories
+and encrypted (.yaml.enc) release directories. If a directory contains encrypted
+profiles, plaintext siblings are refused unless explicitly opted in.
 Encrypted profiles require a decryption key fetched dynamically from the hosted endpoint.
 Reload is copy-and-swap -- zero dropped requests during update.
 
@@ -33,6 +35,7 @@ from proxy.audit.decision_journal import (
     PROFILE_AUTH_MALFORMED,
     PROFILE_AUTH_NOT_YAML,
     PROFILE_AUTH_NO_MODEL_ID,
+    PROFILE_AUTH_PLAINTEXT_REJECTED,
     PROFILE_AUTH_SKIPPED_NO_KEY,
     DecisionJournal,
     build_profile_auth_record,
@@ -46,6 +49,11 @@ _LICENSE_KEY: str = os.getenv("ARKHEIA_LICENSE_KEY", "")
 _REQUIRE_LICENSE: bool = os.getenv("ARKHEIA_REQUIRE_LICENSE", "false").lower() in (
     "true", "1", "yes"
 )
+_ALLOW_PLAINTEXT_PROFILES_ENV = "ARKHEIA_ALLOW_PLAINTEXT_PROFILES"
+
+
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _canonical_profile(profile: dict) -> str:
@@ -116,7 +124,8 @@ class ProfileRouter:
     """
     Thread-safe (asyncio-safe) profile dispatch table.
 
-    Supports both plaintext (.yaml) and encrypted (.yaml.enc) profiles.
+    Supports plaintext-only (.yaml) development directories and encrypted
+    (.yaml.enc) release directories.
     Encrypted profiles require a decryption key (set via set_decryption_key).
 
     Lookup priority:
@@ -196,7 +205,13 @@ class ProfileRouter:
         self._schedule_flush()
 
     def load_all(self) -> None:
-        """Load all YAML profiles from profile_dir. Supports .yaml and .yaml.enc."""
+        """Load all profiles from profile_dir.
+
+        Plaintext YAML is allowed when the directory is plaintext-only. Once a
+        directory carries any encrypted profiles, plaintext siblings are refused
+        by default: otherwise an attacker who can write ``*.yaml`` beside
+        ``*.yaml.enc`` bypasses the very key custody this release path protects.
+        """
         profiles: dict[str, dict] = {}
         path = Path(self.profile_dir).resolve()
         if not path.exists():
@@ -205,12 +220,21 @@ class ProfileRouter:
             self._loaded_count = 0
             return
 
+        enc_files = sorted(path.glob("*.yaml.enc"))
+        plaintext_files = sorted(path.glob("*.yaml"))
+        plaintext_allowed = _truthy_env(_ALLOW_PLAINTEXT_PROFILES_ENV)
+        refusing_plaintext = bool(enc_files) and not plaintext_allowed
+        refused_plaintext_names: list[str] = []
+
         # Load plaintext .yaml profiles
-        for f in path.glob("*.yaml"):
+        for f in plaintext_files:
             if not f.resolve().parent == path:  # aikido-ignore
                 logger.warning("Skipping file outside profile dir: %s", f)
                 continue
             if f.name == "schema.yaml":
+                continue
+            if refusing_plaintext:
+                refused_plaintext_names.append(f.name)
                 continue
             data = self._load_plaintext(f)
             if data:
@@ -218,8 +242,20 @@ class ProfileRouter:
                 if model_id:
                     profiles[model_id] = data
 
+        if refused_plaintext_names:
+            logger.warning(
+                "Refusing %d plaintext profile(s) in encrypted profile directory %s. "
+                "Set %s=true only for an intentional migration window.",
+                len(refused_plaintext_names),
+                self.profile_dir,
+                _ALLOW_PLAINTEXT_PROFILES_ENV,
+            )
+            self.decision_journal.record(build_profile_auth_record(
+                outcome=PROFILE_AUTH_PLAINTEXT_REJECTED,
+                skipped_profile_names=refused_plaintext_names,
+            ))
+
         # Load encrypted .yaml.enc profiles (if decryption key available)
-        enc_files = list(path.glob("*.yaml.enc"))
         if enc_files and not self._decryption_key:
             logger.warning(
                 "Found %d encrypted profiles but no decryption key — skipping. "
