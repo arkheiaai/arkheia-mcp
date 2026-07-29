@@ -258,7 +258,7 @@ async def _forward(
         if k.lower() in _FORWARDED_HEADERS
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=60.0, trust_env=False) as client:
         upstream_response = await client.request(
             method=request.method,
             url=upstream_url,

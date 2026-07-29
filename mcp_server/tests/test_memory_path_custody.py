@@ -38,19 +38,31 @@ def test_default_memory_db_path_is_posix_absolute_and_not_cwd_c_drive(
     )
 
 
-def test_explicit_windows_absolute_memory_db_path_is_rejected_before_mkdir(
+def test_explicit_windows_drive_memory_db_path_is_rejected_before_mkdir(
     tmp_path,
     monkeypatch,
 ):
     cwd = tmp_path / "cwd"
     cwd.mkdir()
     monkeypatch.chdir(cwd)
-    monkeypatch.setenv("MEMORY_DB_PATH", "C:/arkheia-mcp/data/memory.db")
 
-    with pytest.raises(ValueError, match="Windows absolute path"):
-        memory._get_conn()
+    for bad_path in ("C:/arkheia-mcp/data/memory.db", "C:memory.db"):
+        monkeypatch.setenv("MEMORY_DB_PATH", bad_path)
+        with pytest.raises(ValueError, match="Windows drive path"):
+            memory._get_conn()
 
     assert not (cwd / "C:").exists()
+
+
+def test_posix_double_slash_memory_db_path_is_not_misclassified_as_windows_unc(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "server" / "share"
+    path_text = "//" + str(root.relative_to(root.anchor)) + "/memory.db"
+    monkeypatch.setenv("MEMORY_DB_PATH", path_text)
+
+    assert memory._db_path() == path_text
 
 
 def test_negative_self_test_posix_pathlib_would_create_relative_c_drive():

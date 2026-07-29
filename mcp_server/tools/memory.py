@@ -27,7 +27,6 @@ import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
-from pathlib import PureWindowsPath
 
 from proxy.audit.redactor import redact
 
@@ -46,10 +45,9 @@ def _default_db_path() -> Path:
 
 
 def _reject_windows_drive_path_on_posix(path: str) -> None:
-    win = PureWindowsPath(path)
-    if os.name != "nt" and win.drive and win.is_absolute():
+    if os.name != "nt" and len(path) >= 2 and path[1] == ":" and path[0].isalpha():
         raise ValueError(
-            "MEMORY_DB_PATH uses a Windows absolute path on this POSIX host: "
+            "MEMORY_DB_PATH uses a Windows drive path on this POSIX host: "
             f"{path!r}"
         )
 

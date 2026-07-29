@@ -781,7 +781,7 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
         )
         forward_headers = _forward_headers(request.headers)
 
-        async with httpx.AsyncClient(follow_redirects=False) as client:
+        async with httpx.AsyncClient(follow_redirects=False, trust_env=False) as client:
             upstream_response = await client.request(
                 method=request.method,
                 url=target_url,

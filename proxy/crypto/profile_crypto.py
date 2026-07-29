@@ -219,7 +219,7 @@ class DynamicKeyLoader:
             return None
         try:
             import httpx
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
                 resp = await client.post(
                     f"{self.hosted_url}/v1/profile-key",
                     headers={"X-Arkheia-Key": self.api_key},
