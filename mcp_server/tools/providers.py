@@ -70,7 +70,7 @@ async def call_grok(
         return _err_response(model, prompt, "XAI_API_KEY not set")
 
     try:
-        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT, trust_env=False) as client:
             resp = await client.post(
                 "https://api.x.ai/v1/chat/completions",
                 headers={
@@ -128,7 +128,7 @@ async def call_gemini(
         f"/models/{model}:generateContent"
     )
     try:
-        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT, trust_env=False) as client:
             resp = await client.post(
                 url,
                 params={"key": api_key},
@@ -187,7 +187,7 @@ async def call_together(
         return _err_response(model, prompt, "TOGETHER_API_KEY not set")
 
     try:
-        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT, trust_env=False) as client:
             resp = await client.post(
                 "https://api.together.xyz/v1/chat/completions",
                 headers={
@@ -239,7 +239,7 @@ async def call_ollama(
     base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
     try:
-        async with httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT, trust_env=False) as client:
             resp = await client.post(
                 f"{base_url}/api/generate",
                 json={

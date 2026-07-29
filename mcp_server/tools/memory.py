@@ -9,7 +9,7 @@ Schema:
   observations — obs_id, entity_id, content, created_at
   relations    — rel_id, from_entity, relation_type, to_entity, created_at
 
-DB path: MEMORY_DB_PATH env var, default C:/arkheia-mcp/data/memory.db
+DB path: MEMORY_DB_PATH env var, default platform user data directory.
 
 Every caller-supplied string field (entity name/type, observation content,
 relation endpoints/type) is passed through proxy.audit.redactor.redact()
@@ -27,6 +27,7 @@ import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
+from pathlib import PureWindowsPath
 
 from proxy.audit.redactor import redact
 
@@ -35,8 +36,30 @@ from proxy.audit.redactor import redact
 # DB setup
 # ---------------------------------------------------------------------------
 
+def _default_db_path() -> Path:
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        if base:
+            return Path(base) / "arkheia-mcp" / "data" / "memory.db"
+        return Path.home() / "AppData" / "Local" / "arkheia-mcp" / "data" / "memory.db"
+    return Path.home() / ".arkheia-mcp" / "data" / "memory.db"
+
+
+def _reject_windows_drive_path_on_posix(path: str) -> None:
+    win = PureWindowsPath(path)
+    if os.name != "nt" and win.drive and win.is_absolute():
+        raise ValueError(
+            "MEMORY_DB_PATH uses a Windows absolute path on this POSIX host: "
+            f"{path!r}"
+        )
+
+
 def _db_path() -> str:
-    return os.environ.get("MEMORY_DB_PATH", "C:/arkheia-mcp/data/memory.db")
+    configured = os.environ.get("MEMORY_DB_PATH")
+    if configured:
+        _reject_windows_drive_path_on_posix(configured)
+        return configured
+    return str(_default_db_path())
 
 
 def _get_conn() -> sqlite3.Connection:
