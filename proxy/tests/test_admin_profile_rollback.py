@@ -8,6 +8,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from proxy import auth
 from proxy.audit.decision_journal import (
     DECIDED_AT_AT_EMIT,
     EVENT_PROFILE_ROLLBACK,
@@ -18,9 +19,12 @@ from proxy.audit.decision_journal import (
     PROFILE_ROLLBACK_RELOAD_FAILED,
     RECEIPT_ENQUEUED,
 )
-from proxy.auth import require_auth
 from proxy.endpoints.admin import router as admin_router
 from proxy.tests._receipt_probe import ReceiptProbe, assert_decision_identity
+
+JWT_SECRET = "admin-rollback-test-secret-32-characters-minimum"
+ADMIN_EMAIL = "admin@example.com"
+ATTACKER_EMAIL = "attacker@evil.example"
 
 
 def _profile(model_id: str = "gpt-4o", version: str = "1.0") -> bytes:
@@ -40,13 +44,21 @@ async def _drain(probe: ReceiptProbe) -> None:
     await asyncio.wait_for(probe.writer._queue.join(), timeout=5.0)
 
 
+@pytest.fixture(autouse=True)
+def real_admin_auth(monkeypatch):
+    monkeypatch.setenv("JWT_SECRET", JWT_SECRET)
+    monkeypatch.setattr(auth, "_jwt_secret", None)
+    monkeypatch.setattr(auth, "EMAIL_WHITELIST", {ADMIN_EMAIL})
+    yield
+    monkeypatch.setattr(auth, "_jwt_secret", None)
+
+
 def _build_app(tmp_path, audit_writer):
     profile_dir = tmp_path / "profiles"
     profile_dir.mkdir()
 
     app = FastAPI()
     app.include_router(admin_router)
-    app.dependency_overrides[require_auth] = lambda: "admin@example.com"
 
     profile_router = SimpleNamespace(reload=AsyncMock())
     app.state.settings = SimpleNamespace(
@@ -57,10 +69,15 @@ def _build_app(tmp_path, audit_writer):
     return app, profile_dir, profile_router
 
 
-async def _post(app: FastAPI, path: str):
+def _auth_headers(email: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {auth.create_jwt(email)}"}
+
+
+async def _post(app: FastAPI, path: str, email: str | None = ADMIN_EMAIL):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        return await client.post(path)
+        headers = _auth_headers(email) if email is not None else None
+        return await client.post(path, headers=headers)
 
 
 def _row_for_response(probe: ReceiptProbe, body: dict) -> dict:
@@ -72,10 +89,33 @@ def _row_for_response(probe: ReceiptProbe, body: dict) -> dict:
 async def test_admin_profile_rollback_requires_admin_auth(tmp_path):
     app = FastAPI()
     app.include_router(admin_router)
-    resp = await _post(app, "/admin/profiles/gpt-4o/rollback")
+    resp = await _post(app, "/admin/profiles/gpt-4o/rollback", email=None)
 
     assert resp.status_code == 401
     assert resp.json()["detail"] == "Authentication required"
+
+
+@pytest.mark.asyncio
+async def test_admin_profile_rollback_rejects_unwhitelisted_signed_jwt_without_mutating(
+    tmp_path,
+):
+    app, profile_dir, profile_router = _build_app(tmp_path, audit_writer=None)
+    live = _profile("gpt-4o", "2.0")
+    backup = _profile("gpt-4o", "1.0")
+    live_path = profile_dir / "gpt-4o.yaml"
+    live_path.write_bytes(live)
+    (profile_dir / "gpt-4o.yaml.bak").write_bytes(backup)
+
+    resp = await _post(
+        app,
+        "/admin/profiles/gpt-4o/rollback",
+        email=ATTACKER_EMAIL,
+    )
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Admin access required"
+    assert live_path.read_bytes() == live
+    profile_router.reload.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -108,7 +148,7 @@ async def test_successful_admin_profile_rollback_validates_reloads_and_receipts(
     assert row["source"] == "admin_profile_rollback"
     assert row["outcome"] == PROFILE_ROLLBACK_APPLIED
     assert row["model_id"] == "together-glm-5.2"
-    assert row["admin_email"] == "admin@example.com"
+    assert row["admin_email"] == ADMIN_EMAIL
     assert row["live_model_id"] == "zai-org/GLM-5.2"
     assert row["backup_model_id"] == "zai-org/GLM-5.2"
     assert row["live_version"] == "2.0"
