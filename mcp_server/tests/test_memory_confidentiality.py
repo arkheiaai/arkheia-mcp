@@ -13,6 +13,7 @@ current master without reopening the shared redactor decision:
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -21,7 +22,9 @@ import pytest
 from mcp_server.tools import memory as memory_mod
 from mcp_server.tools.memory import (
     _db_path,
+    _enforce_mode,
     _get_conn,
+    _init_schema,
     _like_escape,
     retrieve_entities,
     store_entity,
@@ -64,6 +67,21 @@ class TestDbPath:
 
         with pytest.raises(ValueError):
             _db_path()
+
+    def test_nul_memory_db_path_is_refused_before_path_resolution(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            memory_mod.os,
+            "environ",
+            {"MEMORY_DB_PATH": f"{tmp_path}/bad\x00memory.db"},
+        )
+
+        with pytest.raises(ValueError) as exc:
+            _db_path()
+
+        assert "MEMORY_DB_PATH" in str(exc.value)
+        assert "NUL" in str(exc.value)
 
     @pytest.mark.asyncio
     async def test_two_working_directories_share_the_default_graph(
@@ -119,6 +137,44 @@ class TestOwnerOnlyFilesystemBoundary:
 
         assert (db.parent.stat().st_mode & 0o777) == 0o700
 
+    def test_enforce_mode_strips_unsafe_bits_without_widening(self, tmp_path):
+        directory = tmp_path / "graph"
+        directory.mkdir()
+        expected = {
+            0o755: 0o700,
+            0o500: 0o500,
+            0o400: 0o400,
+            0o000: 0o000,
+        }
+
+        try:
+            for starting_mode, final_mode in expected.items():
+                os.chmod(directory, starting_mode)
+                _enforce_mode(directory, 0o700)
+
+                assert (directory.stat().st_mode & 0o777) == final_mode
+        finally:
+            os.chmod(directory, 0o700)
+
+    def test_enforce_mode_preserves_restrictive_db_file_modes(self, tmp_path):
+        db_file = tmp_path / "memory.db"
+        db_file.write_text("", encoding="utf-8")
+        expected = {
+            0o644: 0o600,
+            0o400: 0o400,
+            0o200: 0o200,
+            0o000: 0o000,
+        }
+
+        try:
+            for starting_mode, final_mode in expected.items():
+                os.chmod(db_file, starting_mode)
+                _enforce_mode(db_file, 0o600)
+
+                assert (db_file.stat().st_mode & 0o777) == final_mode
+        finally:
+            os.chmod(db_file, 0o600)
+
     @pytest.mark.asyncio
     async def test_unenforceable_mode_warns_but_memory_still_works(
         self, db, monkeypatch, caplog
@@ -135,6 +191,146 @@ class TestOwnerOnlyFilesystemBoundary:
         warnings = [record.getMessage() for record in caplog.records]
         assert warnings
         assert all("filesystem permissions" in msg for msg in warnings)
+
+
+class TestNulSafety:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "kwargs,offending",
+        [
+            (
+                {
+                    "name": "Acme\x00Corp",
+                    "entity_type": "company",
+                    "observations": ["fact"],
+                },
+                "name",
+            ),
+            (
+                {
+                    "name": "Acme Corp",
+                    "entity_type": "company\x00hidden",
+                    "observations": ["fact"],
+                },
+                "entity_type",
+            ),
+            (
+                {
+                    "name": "Acme Corp",
+                    "entity_type": "company",
+                    "observations": ["fact\x00hidden"],
+                },
+                "observations",
+            ),
+        ],
+    )
+    async def test_store_rejects_nul_text_before_opening_db(
+        self, db, kwargs, offending
+    ):
+        with pytest.raises(ValueError) as exc:
+            await store_entity(**kwargs)
+
+        assert offending in str(exc.value)
+        assert "NUL" in str(exc.value)
+        assert not db.exists()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "query,entity_type,offending",
+        [
+            ("Acme\x00Corp", None, "query"),
+            ("Acme", "company\x00hidden", "entity_type"),
+        ],
+    )
+    async def test_retrieve_rejects_nul_filters_before_opening_db(
+        self, db, query, entity_type, offending
+    ):
+        with pytest.raises(ValueError) as exc:
+            await retrieve_entities(query, entity_type=entity_type)
+
+        assert offending in str(exc.value)
+        assert "NUL" in str(exc.value)
+        assert not db.exists()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "from_entity,relation_type,to_entity,offending",
+        [
+            ("Jane\x00Smith", "works_at", "Acme Corp", "from_entity"),
+            ("Jane Smith", "works\x00at", "Acme Corp", "relation_type"),
+            ("Jane Smith", "works_at", "Acme\x00Corp", "to_entity"),
+        ],
+    )
+    async def test_relation_rejects_nul_text_before_opening_db(
+        self, db, from_entity, relation_type, to_entity, offending
+    ):
+        with pytest.raises(ValueError) as exc:
+            await store_relation(from_entity, relation_type, to_entity)
+
+        assert offending in str(exc.value)
+        assert "NUL" in str(exc.value)
+        assert not db.exists()
+
+    @pytest.mark.asyncio
+    async def test_legacy_nul_entity_name_is_not_dumped(self, db):
+        conn = _get_conn()
+        try:
+            _init_schema(conn)
+            conn.execute(
+                "INSERT INTO entities (entity_id, name, entity_type, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("entity-1", "A\x00tail", "company", "2026-01-01T00:00:00"),
+            )
+            probe = conn.execute(
+                "SELECT name, length(name) AS sql_len FROM entities"
+            ).fetchone()
+            assert probe["sql_len"] == 1
+            assert len(probe["name"]) == 6
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = await retrieve_entities("A")
+
+        assert result == {"entities": [], "total": 0}
+
+    @pytest.mark.asyncio
+    async def test_legacy_nul_observations_and_relations_are_not_dumped(self, db):
+        conn = _get_conn()
+        try:
+            _init_schema(conn)
+            conn.execute(
+                "INSERT INTO entities (entity_id, name, entity_type, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("entity-1", "Acme Corp", "company", "2026-01-01T00:00:00"),
+            )
+            conn.execute(
+                "INSERT INTO observations (obs_id, entity_id, content, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("obs-1", "entity-1", "fact\x00hidden", "2026-01-01T00:00:01"),
+            )
+            conn.execute(
+                "INSERT INTO relations "
+                "(rel_id, from_entity, relation_type, to_entity, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    "rel-1",
+                    "Acme Corp",
+                    "owns\x00hidden",
+                    "Beta Ltd",
+                    "2026-01-01T00:00:02",
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        result = await retrieve_entities("Acme")
+
+        assert result["total"] == 1
+        assert result["entities"][0]["observations"] == []
+        assert result["entities"][0]["relations"] == []
+        assert "\\u0000" not in json.dumps(result)
 
 
 class TestSearchIsLiteral:

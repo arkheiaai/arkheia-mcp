@@ -9,6 +9,7 @@ behaviour, not the presence of one literal.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -23,9 +24,13 @@ if str(ROOT) not in sys.path:
 from mcp_server.tools.memory import (  # noqa: E402
     DEFAULT_DB_PATH,
     _db_path,
+    _enforce_mode,
+    _get_conn,
+    _init_schema,
     retrieve_entities,
     store_entity,
 )
+from mcp_server.tools import memory as memory_mod  # noqa: E402
 
 
 def _resolve_with(env_value: str | None, home: Path) -> str:
@@ -70,10 +75,83 @@ def test_relative_memory_db_path_is_refused():
                 _resolve_with(candidate, Path(home))
 
 
+def test_nul_memory_db_path_is_refused_before_path_resolution(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        memory_mod.os,
+        "environ",
+        {"MEMORY_DB_PATH": f"{tmp_path}/bad\x00memory.db"},
+    )
+
+    with pytest.raises(ValueError) as exc:
+        _db_path()
+
+    assert "MEMORY_DB_PATH" in str(exc.value)
+    assert "NUL" in str(exc.value)
+
+
 def test_absolute_memory_db_path_is_accepted():
     with tempfile.TemporaryDirectory() as home:
         absolute = str(Path(home) / "explicit" / "memory.db")
         assert _resolve_with(absolute, Path(home)) == absolute
+
+
+def test_nul_entity_name_is_rejected_without_creating_graph(tmp_path, monkeypatch):
+    db = tmp_path / "graph" / "memory.db"
+    monkeypatch.setenv("MEMORY_DB_PATH", str(db))
+
+    with pytest.raises(ValueError) as exc:
+        asyncio.run(store_entity("A\x00tail", "company", ["fact"]))
+
+    assert "name" in str(exc.value)
+    assert "NUL" in str(exc.value)
+    assert not db.exists()
+
+
+def test_legacy_nul_name_row_is_not_returned_from_graph_dump(tmp_path, monkeypatch):
+    db = tmp_path / "graph" / "memory.db"
+    monkeypatch.setenv("MEMORY_DB_PATH", str(db))
+
+    conn = _get_conn()
+    try:
+        _init_schema(conn)
+        conn.execute(
+            "INSERT INTO entities (entity_id, name, entity_type, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("entity-1", "A\x00tail", "company", "2026-01-01T00:00:00"),
+        )
+        probe = conn.execute(
+            "SELECT name, length(name) AS sql_len FROM entities"
+        ).fetchone()
+        assert probe["sql_len"] == 1
+        assert len(probe["name"]) == 6
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = asyncio.run(retrieve_entities("A"))
+
+    assert result == {"entities": [], "total": 0}
+    assert "\\u0000" not in json.dumps(result)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode bits")
+def test_mode_enforcement_strips_group_world_bits_without_widening(tmp_path):
+    directory = tmp_path / "graph"
+    directory.mkdir()
+
+    try:
+        for starting_mode, final_mode in {
+            0o755: 0o700,
+            0o500: 0o500,
+            0o400: 0o400,
+            0o000: 0o000,
+        }.items():
+            os.chmod(directory, starting_mode)
+            _enforce_mode(directory, 0o700)
+
+            assert (directory.stat().st_mode & 0o777) == final_mode
+    finally:
+        os.chmod(directory, 0o700)
 
 
 def test_store_from_one_cwd_is_visible_from_another():

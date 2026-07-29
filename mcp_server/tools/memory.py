@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import stat
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +41,7 @@ DEFAULT_DB_PATH = "~/.arkheia/mcp/memory.db"
 MAX_RETRIEVE_LIMIT = 50
 _DIR_MODE = 0o700
 _FILE_MODE = 0o600
+_NUL = "\x00"
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +50,8 @@ _FILE_MODE = 0o600
 
 def _db_path() -> str:
     raw = os.environ.get("MEMORY_DB_PATH") or DEFAULT_DB_PATH
+    if _NUL in raw:
+        raise ValueError("MEMORY_DB_PATH must not contain NUL bytes")
     path = Path(raw).expanduser()
     if not path.is_absolute():
         raise ValueError(
@@ -60,7 +64,9 @@ def _db_path() -> str:
 
 def _enforce_mode(target: Path, mode: int) -> None:
     try:
-        os.chmod(target, mode)
+        current_mode = stat.S_IMODE(target.stat().st_mode)
+        safe_mode = current_mode & mode
+        os.chmod(target, safe_mode)
     except OSError as exc:
         logger.warning(
             "memory: could not set filesystem permissions %o on %s (%s). "
@@ -114,6 +120,26 @@ def _like_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _reject_nul(field: str, value: str) -> str:
+    if isinstance(value, str) and _NUL in value:
+        raise ValueError(f"{field} must not contain NUL bytes")
+    return value
+
+
+def _redact_memory_text(field: str, value: str) -> str:
+    _reject_nul(field, value)
+    redacted = redact(value)
+    return _reject_nul(field, redacted)
+
+
+def _safe_sqlite_text(value: object) -> bool:
+    return not isinstance(value, str) or _NUL not in value
+
+
+def _row_has_only_safe_text(row: sqlite3.Row, fields: tuple[str, ...]) -> bool:
+    return all(_safe_sqlite_text(row[field]) for field in fields)
+
+
 def _validate_limit(limit: int) -> int:
     if isinstance(limit, bool) or not isinstance(limit, int):
         raise ValueError(
@@ -155,8 +181,12 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
     # the repo (proxy/audit/redactor.py), reused rather than re-implemented.
     # Redacting here (not just `observations`) also keeps the entity's lookup
     # key consistent between the SELECT below and the INSERT that follows it.
-    name = redact(name)
-    entity_type = redact(entity_type)
+    name = _redact_memory_text("memory_store: name", name)
+    entity_type = _redact_memory_text("memory_store: entity_type", entity_type)
+    observations = [
+        _redact_memory_text("memory_store: observations[]", raw_content)
+        for raw_content in observations
+    ]
 
     conn = _get_conn()
     try:
@@ -189,8 +219,7 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
         }
 
         added = 0
-        for raw_content in observations:
-            content = redact(raw_content)
+        for content in observations:
             if content not in existing:
                 conn.execute(
                     "INSERT INTO observations (obs_id, entity_id, content, created_at) VALUES (?, ?, ?, ?)",
@@ -233,6 +262,10 @@ async def retrieve_entities(
         total:     Count of matches before limit
     """
     limit = _validate_limit(limit)
+    query = _redact_memory_text("memory_retrieve: query", query)
+    if entity_type is not None:
+        entity_type = _redact_memory_text("memory_retrieve: entity_type", entity_type)
+
     conn = _get_conn()
     try:
         _init_schema(conn)
@@ -249,6 +282,11 @@ async def retrieve_entities(
                 (pattern,),
             ).fetchall()
 
+        rows = [
+            row
+            for row in rows
+            if _row_has_only_safe_text(row, ("entity_id", "name", "entity_type", "created_at"))
+        ]
         total = len(rows)
         rows = rows[:limit]
 
@@ -260,11 +298,21 @@ async def retrieve_entities(
                 "SELECT content, created_at FROM observations WHERE entity_id = ? ORDER BY created_at",
                 (eid,),
             ).fetchall()
+            obs_rows = [
+                row
+                for row in obs_rows
+                if _row_has_only_safe_text(row, ("content", "created_at"))
+            ]
 
             rel_rows = conn.execute(
                 "SELECT relation_type, to_entity FROM relations WHERE from_entity = ? ORDER BY created_at",
                 (row["name"],),
             ).fetchall()
+            rel_rows = [
+                row
+                for row in rel_rows
+                if _row_has_only_safe_text(row, ("relation_type", "to_entity"))
+            ]
 
             entities.append({
                 "entity_id": eid,
@@ -297,9 +345,9 @@ async def store_relation(from_entity: str, relation_type: str, to_entity: str) -
         to_entity:     Target entity name
     """
     # Scrub before the INSERT, same as store_entity above.
-    from_entity = redact(from_entity)
-    relation_type = redact(relation_type)
-    to_entity = redact(to_entity)
+    from_entity = _redact_memory_text("memory_relate: from_entity", from_entity)
+    relation_type = _redact_memory_text("memory_relate: relation_type", relation_type)
+    to_entity = _redact_memory_text("memory_relate: to_entity", to_entity)
 
     conn = _get_conn()
     try:
