@@ -41,6 +41,7 @@ PASSING CRITERIA
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from dataclasses import FrozenInstanceError, fields, replace
 from enum import Enum
@@ -853,6 +854,34 @@ class TestReceiptedGate:
         assert row["prev_hash"] == "0" * 64
         assert row["this_hash"]
 
+    async def test_concurrent_dispatch_decisions_consume_unique_sequence_numbers(
+        self, tmp_path
+    ):
+        log_path = tmp_path / "gate.jsonl"
+
+        decisions = await asyncio.gather(
+            *[
+                decide(
+                    "memory_retrieve",
+                    call_site=f"unit-{idx}",
+                    argument_keys=["query"],
+                    log_path=log_path,
+                )
+                for idx in range(20)
+            ]
+        )
+
+        assert all(d.receipt_status == receipts.STATUS_RECORDED for d in decisions)
+        rows = receipts.read_rows(log_path)
+        assert len(rows) == 20
+        assert [row["seq"] for row in rows] == list(range(1, 21))
+        assert len({row["receipt_id"] for row in rows}) == 20
+        assert len({row["this_hash"] for row in rows}) == 20
+        prev_hash = "0" * 64
+        for row in rows:
+            assert row["prev_hash"] == prev_hash
+            prev_hash = row["this_hash"]
+
     async def test_denied_dispatch_decision_is_written_before_refusal_reaches_caller(
         self, tmp_path
     ):
@@ -904,6 +933,32 @@ class TestReceiptedGate:
         assert row is not None
         assert row["argument_keys"] == ["name", "observations"]
         assert "argument_values" not in row
+
+    async def test_emit_reports_unrecorded_when_readback_cannot_find_receipt(
+        self, tmp_path, monkeypatch
+    ):
+        log_path = tmp_path / "gate.jsonl"
+        receipt_id = receipts.new_receipt_id()
+        record = receipts.build_record(
+            receipt_id=receipt_id,
+            tool="memory_retrieve",
+            decision=receipts.DECISION_ALLOWED,
+            event_type="mcp.tool_gate",
+            control="tool_registry_gate",
+            call_site="unit",
+        )
+        real_find_receipt = receipts.find_receipt
+        readback_calls = []
+
+        def missing_readback(path, candidate):
+            readback_calls.append((path, candidate))
+            return None
+
+        monkeypatch.setattr(receipts, "find_receipt", missing_readback)
+
+        assert await receipts.emit(log_path, record) is False
+        assert readback_calls == [(log_path, receipt_id)]
+        assert real_find_receipt(log_path, receipt_id) is not None
 
     async def test_receipt_failure_does_not_change_the_gate_decision(self, tmp_path):
         denied = await decide("exfiltrate_secrets", log_path="relative.jsonl")
