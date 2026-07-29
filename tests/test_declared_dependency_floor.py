@@ -107,6 +107,7 @@ import ast
 import re
 import shlex
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -303,18 +304,11 @@ def module_to_file(module: str) -> Path | None:
     return None
 
 
-def reachable_first_party_roots(entry_module: str) -> set[str]:
-    """First-party root packages transitively reachable from an entry module.
-
-    This is what turns a copy set into a CHECKED set. It is the derived answer to
-    "which of this repo's packages does this scope actually run?" — and it is why
-    the git-clone scope, which has the entire repo on `sys.path`, is not held to
-    `proxy`'s dependencies: nothing `mcp_server.server` imports reaches `proxy`.
-    """
+def reachable_first_party_files(entry_module: str) -> set[Path]:
+    """First-party files transitively reachable from an entry module."""
     seed = module_to_file(entry_module)
-    roots: set[str] = set()
     if seed is None:
-        return roots
+        return set()
 
     seen: set[Path] = set()
     queue = [seed]
@@ -323,12 +317,23 @@ def reachable_first_party_roots(entry_module: str) -> set[str]:
         if current in seen:
             continue
         seen.add(current)
-        roots.add(current.parts[0])
         for module in imported_modules(current):
             nxt = module_to_file(module)
             if nxt is not None and nxt not in seen:
                 queue.append(nxt)
-    return roots
+    return seen
+
+
+def reachable_first_party_roots(entry_module: str) -> set[str]:
+    """First-party root packages transitively reachable from an entry module.
+
+    This is what turns a copy set into a CHECKED set. It is the derived answer to
+    "which of this repo's packages does this scope actually run?" The git-clone
+    fallback still narrows this to the exact reachable files, because a checkout
+    on `sys.path` is not evidence that every first-party package is part of the
+    launched distribution's dependency boundary.
+    """
+    return {path.parts[0] for path in reachable_first_party_files(entry_module)}
 
 
 # ---------------------------------------------------------------------------
@@ -576,9 +581,9 @@ def resolve_launcher_requirements(python_dir: Path, candidates: tuple[str, str])
     return resolved
 
 
-def buildjs_bundle_dirs(text: str) -> list[tuple[str, str]]:
-    """(repo source dir, bundle destination dir) the npm build script copies."""
-    pairs: list[tuple[str, str]] = []
+def _legacy_buildjs_bundle_dirs(text: str) -> list[tuple[str, str]]:
+    """Legacy (repo source dir, bundle destination dir) the npm build script copies."""
+    pairs: list[tuple[str, list[str]]] = []
     for name, args in re.findall(
         r"(SRC|DEST)\s*=\s*path\.resolve\(\s*__dirname\s*,([^)]*)\)", text
     ):
@@ -586,11 +591,7 @@ def buildjs_bundle_dirs(text: str) -> list[tuple[str, str]]:
         pairs.append((name, segments))
     lookup = dict(pairs)
     if set(lookup) != {"SRC", "DEST"}:
-        raise AssertionError(
-            f"{_NPM_BUILD_SCRIPT}: could not derive SRC/DEST from "
-            f"`path.resolve(__dirname, …)`; derived {pairs!r}. The bundle's copy "
-            f"set is unknown, so teach this floor rather than skipping it."
-        )
+        return []
 
     def _rel(segments: list[str]) -> str:
         # __dirname is npm-wrapper/scripts; ".." walks up.
@@ -603,6 +604,50 @@ def buildjs_bundle_dirs(text: str) -> list[tuple[str, str]]:
         return "/".join(parts)
 
     return [(_rel(lookup["SRC"]), _rel(lookup["DEST"]))]
+
+
+def buildjs_bundle_sources(text: str, entry_module: str) -> list[str]:
+    """Repo sources the npm build script ships into npm-wrapper/python."""
+    legacy = _legacy_buildjs_bundle_dirs(text)
+    if legacy:
+        return [legacy[0][0]]
+
+    match = re.search(r"ENTRY_MODULE\s*=\s*[\"']([\w.]+)[\"']", text)
+    if not match:
+        raise AssertionError(
+            f"{_NPM_BUILD_SCRIPT}: could not derive the bundle source set. "
+            f"Neither legacy SRC/DEST constants nor a derived-copy ENTRY_MODULE "
+            f"literal were found. Teach this floor the new build form rather than "
+            f"letting the npm distribution go unchecked."
+        )
+    build_entry = match.group(1)
+    if build_entry != entry_module:
+        raise AssertionError(
+            f"{_NPM_BUILD_SCRIPT}: ENTRY_MODULE is {build_entry!r}, but "
+            f"{_NPM_LAUNCHER} spawns {entry_module!r}. The dependency scope for "
+            f"the published bundle is ambiguous; keep the build and launcher on "
+            f"one entry point or teach this floor the new relation."
+        )
+    if "requiredSources()" not in text or "copySource(ENTRY_PACKAGE)" not in text:
+        raise AssertionError(
+            f"{_NPM_BUILD_SCRIPT}: ENTRY_MODULE exists, but the derived-copy form "
+            f"this floor understands is not present. The bundle's shipped source "
+            f"set is unknown, so the declared dependencies cannot be checked."
+        )
+
+    entry_package = entry_module.split(".", 1)[0]
+    required = reachable_first_party_files(entry_module)
+    if not required:
+        raise AssertionError(
+            f"{_NPM_BUILD_SCRIPT}: import closure for {entry_module!r} is empty; "
+            f"the build's derived copy set cannot be trusted."
+        )
+
+    sources = {entry_package}
+    for rel in required:
+        if rel.parts and rel.parts[0] != entry_package:
+            sources.add(rel.as_posix())
+    return sorted(sources)
 
 
 # ---------------------------------------------------------------------------
@@ -638,10 +683,23 @@ class Scope:
         roots = reachable_first_party_roots(self.entry_module)
         shipped = {d.rstrip("/") for d in self.shipped_dirs}
         files: list[Path] = []
-        for root in sorted(roots):
-            if not any(root == s or root.startswith(s + "/") or s == "." for s in shipped):
+        for source in sorted(shipped):
+            rel = Path(source or ".")
+            if rel == Path("."):
+                files.extend(
+                    rel_path for rel_path in reachable_first_party_files(self.entry_module)
+                    if not is_test_path(rel_path)
+                )
                 continue
-            files.extend(runtime_files_under(Path(root)))
+
+            if not rel.parts or rel.parts[0] not in roots:
+                continue
+
+            path = _ROOT / rel
+            if path.is_dir():
+                files.extend(runtime_files_under(rel))
+            elif path.is_file() and rel.suffix == ".py" and not is_test_path(rel):
+                files.append(rel)
         return sorted(set(files))
 
     def gaps(self, declared: set[str] | None = None) -> dict[str, list[str]]:
@@ -760,13 +818,13 @@ def discover_scopes() -> list[Scope]:
     candidates = launcher_requirements_candidates(launcher_text)
 
     # (1) the published bundle: `npx @arkheia/mcp-server` runs from npm-wrapper/python.
-    bundle_src, bundle_dest = buildjs_bundle_dirs(build_text)[0]
+    bundle_sources = buildjs_bundle_sources(build_text, entry)
     bundle = Scope(
         f"{_NPM_BUILD_SCRIPT.as_posix()} (published bundle)",
         entry,
         [resolve_launcher_requirements(_NPM_BUNDLE_DIR, candidates)],
-        [bundle_src],
-        note=f"bundle copies {bundle_src} -> {bundle_dest}",
+        bundle_sources,
+        note=f"bundle copies {bundle_sources}",
     )
     bundle.inline_dists = set()  # type: ignore[attr-defined]
     bundle.copied_requirements = []  # type: ignore[attr-defined]
@@ -790,7 +848,21 @@ def discover_scopes() -> list[Scope]:
     return scopes
 
 
-SCOPES = discover_scopes()
+_DISCOVERY_ERROR: Exception | None = None
+
+
+@lru_cache(maxsize=1)
+def _scopes() -> list[Scope]:
+    return discover_scopes()
+
+
+try:
+    SCOPES = _scopes()
+except Exception as exc:  # pragma: no cover - exercised as a floor failure
+    # Keep pytest collection alive. A parser failure should fail this floor, not
+    # prevent every other floor module from collecting.
+    _DISCOVERY_ERROR = exc
+    SCOPES = []
 
 
 def _declared_with_inline(scope: Scope) -> set[str]:
@@ -803,6 +875,15 @@ def _declared_with_inline(scope: Scope) -> set[str]:
 # ---------------------------------------------------------------------------
 # WORK-DONE GUARDS — every invariant below passes by finding nothing
 # ---------------------------------------------------------------------------
+
+def test_scope_discovery_completed_without_collection_error():
+    assert _DISCOVERY_ERROR is None, (
+        f"scope discovery failed before any dependency assertion could run: "
+        f"{type(_DISCOVERY_ERROR).__name__}: {_DISCOVERY_ERROR}. Parser failures "
+        f"must be ordinary floor failures, never pytest collection errors that "
+        f"interrupt the whole floor tier."
+    )
+
 
 def test_the_discovery_reached_every_distribution_on_disk():
     """
