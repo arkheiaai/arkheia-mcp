@@ -127,6 +127,7 @@ class DynamicKeyLoader:
         #: reading this is asserting an outcome it did not observe.
         self.last_receipt_status: Optional[str] = None
         self.last_http_status: Optional[int] = None
+        self.last_error_type: Optional[str] = None
 
     def attach_audit_writer(self, writer: object) -> None:
         """Attach the rail after construction (used by callers that build the
@@ -151,6 +152,8 @@ class DynamicKeyLoader:
         and it was previously a single WARNING line in a log nobody chains.
         """
         # 1. Try hosted endpoint
+        self.last_http_status = None
+        self.last_error_type = None
         key = await self._fetch_from_hosted()
         if key:
             self._cached_key = key
@@ -206,6 +209,7 @@ class DynamicKeyLoader:
             key=key,
             hosted_url=self.hosted_url,
             http_status=self.last_http_status,
+            error_type=self.last_error_type,
         )
         self.last_decision_id = self.decision_journal.record(record)
         results = await self.flush_decisions()
@@ -249,8 +253,10 @@ class DynamicKeyLoader:
                 else:
                     logger.warning("Hosted endpoint returned %d", resp.status_code)
         except HostedAuthorityError as exc:
+            self.last_error_type = type(exc).__name__
             logger.error("Hosted endpoint authority rejected: %s", exc)
         except Exception as exc:
+            self.last_error_type = type(exc).__name__
             logger.warning("Failed to reach hosted endpoint: %s", exc)
         return None
 

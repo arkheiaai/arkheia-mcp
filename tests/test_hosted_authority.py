@@ -18,6 +18,7 @@ from arkheia_common.hosted_authority import (
     authorize_hosted_base_url,
 )
 from mcp_server.proxy_client import ProxyClient
+from proxy.audit.decision_journal import KEY_LOAD_UNAVAILABLE, KEY_SOURCE_NONE
 from proxy.crypto.profile_crypto import DynamicKeyLoader
 
 
@@ -81,6 +82,7 @@ def test_default_policy_allows_only_default_https_arkheia_origin(monkeypatch):
     decision = authorize_hosted_base_url(DEFAULT_HOSTED_API_URL)
     assert decision.base_url == DEFAULT_HOSTED_API_URL
     assert decision.origin == DEFAULT_HOSTED_API_URL
+    assert decision.self_hosted is False
 
     with pytest.raises(HostedAuthorityError):
         authorize_hosted_base_url("http://arkheia-proxy-production.up.railway.app")
@@ -90,14 +92,29 @@ def test_default_policy_allows_only_default_https_arkheia_origin(monkeypatch):
         authorize_hosted_base_url("https://evil.test")
 
 
+def test_default_policy_preserves_local_self_hosted_authorities(monkeypatch):
+    monkeypatch.delenv(ALLOW_UNSAFE_HOSTED_URL_ENV, raising=False)
+
+    for url in (
+        "http://127.0.0.1:8098",
+        "http://localhost:8098",
+        "http://10.2.3.4:8098/base",
+        "https://arkheia-proxy.local",
+    ):
+        decision = authorize_hosted_base_url(url)
+        assert decision.base_url == url.rstrip("/")
+        assert decision.allow_unsafe is False
+        assert decision.self_hosted is True
+
+
 def test_unsafe_opt_in_is_required_for_custom_hosted_authorities(monkeypatch):
     monkeypatch.delenv(ALLOW_UNSAFE_HOSTED_URL_ENV, raising=False)
     with pytest.raises(HostedAuthorityError):
-        authorize_hosted_base_url("http://127.0.0.1:8098")
+        authorize_hosted_base_url("https://custom.example.test")
 
     monkeypatch.setenv(ALLOW_UNSAFE_HOSTED_URL_ENV, "1")
-    decision = authorize_hosted_base_url("http://127.0.0.1:8098")
-    assert decision.base_url == "http://127.0.0.1:8098"
+    decision = authorize_hosted_base_url("https://custom.example.test")
+    assert decision.base_url == "https://custom.example.test"
     assert decision.allow_unsafe is True
 
 
@@ -190,29 +207,67 @@ async def test_detect_verify_posts_to_the_authorized_base_url_not_the_configured
 
 
 @pytest.mark.asyncio
-async def test_profile_key_fetch_does_not_send_api_key_to_foreign_hosted_url(
-    capture_server, monkeypatch
-):
+async def test_profile_key_fetch_does_not_send_api_key_to_foreign_hosted_url(monkeypatch):
     monkeypatch.delenv(ALLOW_UNSAFE_HOSTED_URL_ENV, raising=False)
-    loader = DynamicKeyLoader(capture_server.url, "ak_live_should_not_leave")
+    loader = DynamicKeyLoader("https://evil.test", "ak_live_should_not_leave")
 
-    assert await loader._fetch_from_hosted() is None
-    assert capture_server.requests == []
+    post = AsyncMock()
+    with patch("httpx.AsyncClient.post", post):
+        assert await loader._fetch_from_hosted() is None
+    post.assert_not_called()
+    assert loader.last_error_type == "HostedAuthorityError"
 
 
 @pytest.mark.asyncio
-async def test_profile_key_fetch_sends_api_key_to_custom_host_only_after_opt_in(
+async def test_profile_key_authority_rejection_is_recorded_in_key_load_decision(monkeypatch):
+    monkeypatch.delenv(ALLOW_UNSAFE_HOSTED_URL_ENV, raising=False)
+    loader = DynamicKeyLoader("https://evil.test", "ak_live_should_not_leave")
+
+    with patch("httpx.AsyncClient.post", AsyncMock()) as post:
+        assert await loader.fetch_key() is None
+
+    post.assert_not_called()
+    rows, dropped = loader.decision_journal.drain()
+    assert dropped == 0
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == KEY_LOAD_UNAVAILABLE
+    assert rows[0]["key_source"] == KEY_SOURCE_NONE
+    assert rows[0]["hosted_origin"] == "https://evil.test"
+    assert rows[0]["error_type"] == "HostedAuthorityError"
+
+
+@pytest.mark.asyncio
+async def test_profile_key_fetch_allows_local_self_hosted_url_without_unsafe_opt_in(
     capture_server, monkeypatch
 ):
-    monkeypatch.setenv(ALLOW_UNSAFE_HOSTED_URL_ENV, "1")
-    loader = DynamicKeyLoader(capture_server.url, "ak_live_explicitly_opted_in")
+    monkeypatch.delenv(ALLOW_UNSAFE_HOSTED_URL_ENV, raising=False)
+    loader = DynamicKeyLoader(capture_server.url, "ak_live_self_hosted")
 
     assert await loader._fetch_from_hosted() == capture_server.profile_key
     assert len(capture_server.requests) == 1
     assert capture_server.requests[0]["path"] == "/v1/profile-key"
-    assert capture_server.requests[0]["headers"]["X-Arkheia-Key"] == (
-        "ak_live_explicitly_opted_in"
+    assert capture_server.requests[0]["headers"]["X-Arkheia-Key"] == "ak_live_self_hosted"
+
+
+@pytest.mark.asyncio
+async def test_profile_key_fetch_sends_api_key_to_custom_host_only_after_opt_in(monkeypatch):
+    monkeypatch.setenv(ALLOW_UNSAFE_HOSTED_URL_ENV, "1")
+    key = secrets.token_bytes(32)
+    response = httpx.Response(
+        200,
+        json={"profile_key": base64.b64encode(key).decode("ascii")},
+        request=httpx.Request("POST", "https://evil.test/v1/profile-key"),
     )
+    post = AsyncMock(return_value=response)
+    loader = DynamicKeyLoader("https://evil.test", "ak_live_explicitly_opted_in")
+
+    with patch("httpx.AsyncClient.post", post):
+        assert await loader._fetch_from_hosted() == key
+    post.assert_awaited_once()
+    assert post.await_args.args[0] == "https://evil.test/v1/profile-key"
+    assert post.await_args.kwargs["headers"] == {
+        "X-Arkheia-Key": "ak_live_explicitly_opted_in",
+    }
 
 
 @pytest.mark.asyncio

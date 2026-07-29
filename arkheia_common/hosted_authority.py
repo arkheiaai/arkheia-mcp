@@ -8,6 +8,7 @@ configured hosted URL is allowed to receive that header.
 from __future__ import annotations
 
 import os
+import ipaddress
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
@@ -26,6 +27,7 @@ class HostedAuthorityDecision:
     base_url: str
     origin: str
     allow_unsafe: bool = False
+    self_hosted: bool = False
 
 
 class HostedAuthorityError(ValueError):
@@ -46,8 +48,9 @@ def authorize_hosted_base_url(
     Validate and normalize a hosted API base URL before key-bearing egress.
 
     Default policy is deliberately narrow: HTTPS to the production Arkheia
-    authority. Custom or non-HTTPS authorities are supported only when the
-    caller, or the environment, explicitly opts into unsafe hosted URLs.
+    authority, plus local/private self-hosted authorities. Public custom
+    authorities are supported only when the caller, or the environment,
+    explicitly opts into unsafe hosted URLs.
     """
     raw = (hosted_url or DEFAULT_HOSTED_API_URL).strip()
     if not raw:
@@ -76,20 +79,32 @@ def authorize_hosted_base_url(
     origin = urlunsplit((scheme, normalized_netloc, "", "", ""))
 
     opted_in = allow_unsafe_hosted_url_from_env() if allow_unsafe is None else allow_unsafe
-    if not opted_in and origin != DEFAULT_HOSTED_API_URL:
+    self_hosted = _is_self_hosted_host(host)
+    if not opted_in and origin != DEFAULT_HOSTED_API_URL and not self_hosted:
         raise HostedAuthorityError(
             "hosted URL is not the approved Arkheia production authority; "
             f"set {ALLOW_UNSAFE_HOSTED_URL_ENV}=1 only for trusted custom endpoints"
         )
-    if not opted_in and scheme != "https":
+    if not opted_in and scheme != "https" and not self_hosted:
         raise HostedAuthorityError("hosted URL must use HTTPS")
 
     return HostedAuthorityDecision(
         base_url=normalized_base,
         origin=origin,
         allow_unsafe=bool(opted_in),
+        self_hosted=self_hosted,
     )
 
 
 def _default_port(scheme: str) -> int:
     return 80 if scheme == "http" else 443
+
+
+def _is_self_hosted_host(host: str) -> bool:
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return addr.is_loopback or addr.is_private or addr.is_link_local
