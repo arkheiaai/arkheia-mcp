@@ -12,6 +12,8 @@ License verification:
   - ARKHEIA_REQUIRE_LICENSE — if true, profiles without a license block are rejected
   - ARKHEIA_ALLOW_UNSIGNED_LICENSE — explicit local/dev escape hatch for unverified
     license blocks; expiry is still checked.
+  - ARKHEIA_ALLOW_PLAINTEXT_PROFILES — explicit local/dev escape hatch for loading
+    .yaml profiles from a directory that also contains encrypted profiles.
   - Expired / tampered profiles are silently skipped; other profiles are unaffected.
 """
 
@@ -37,6 +39,7 @@ from proxy.audit.decision_journal import (
     PROFILE_AUTH_MALFORMED,
     PROFILE_AUTH_NOT_YAML,
     PROFILE_AUTH_NO_MODEL_ID,
+    PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
     PROFILE_AUTH_SKIPPED_NO_KEY,
     DecisionJournal,
     build_profile_auth_record,
@@ -193,6 +196,7 @@ class ProfileRouter:
         license_key: Optional[str] = None,
         require_license: Optional[bool] = None,
         allow_unsigned_license: Optional[bool] = None,
+        allow_plaintext_profiles: Optional[bool] = None,
     ):
         self._profiles: dict[str, dict] = {}
         self._lock = asyncio.Lock()
@@ -215,6 +219,10 @@ class ProfileRouter:
         self._allow_unsigned_license = (
             _env_bool("ARKHEIA_ALLOW_UNSIGNED_LICENSE")
             if allow_unsigned_license is None else allow_unsigned_license
+        )
+        self._allow_plaintext_profiles = (
+            _env_bool("ARKHEIA_ALLOW_PLAINTEXT_PROFILES")
+            if allow_plaintext_profiles is None else allow_plaintext_profiles
         )
         #: Fire-and-forget flush tasks, held so the GC cannot collect a pending
         #: one mid-flight (asyncio only holds a weak reference to a bare task).
@@ -277,12 +285,33 @@ class ProfileRouter:
             self._loaded_count = 0
             return
 
+        enc_files = [
+            f for f in path.glob("*.yaml.enc")
+            if f.resolve().parent == path  # aikido-ignore
+        ]
+        plaintext_blocked = bool(enc_files) and not self._allow_plaintext_profiles
+
         # Load plaintext .yaml profiles
         for f in path.glob("*.yaml"):
             if not f.resolve().parent == path:  # aikido-ignore
                 logger.warning("Skipping file outside profile dir: %s", f)
                 continue
             if f.name == "schema.yaml":
+                continue
+            if plaintext_blocked:
+                logger.error(
+                    "Skipping plaintext profile %s because encrypted profiles are "
+                    "present in %s; set ARKHEIA_ALLOW_PLAINTEXT_PROFILES=true only "
+                    "for explicit local/dev mixed estates",
+                    f.name,
+                    path,
+                )
+                self._journal_auth(
+                    PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
+                    f.stem,
+                    b"",
+                    None,
+                )
                 continue
             data = self._load_plaintext(f)
             if data:
@@ -291,7 +320,6 @@ class ProfileRouter:
                     profiles[model_id] = data
 
         # Load encrypted .yaml.enc profiles (if decryption key available)
-        enc_files = list(path.glob("*.yaml.enc"))
         if enc_files and not self._decryption_key:
             logger.warning(
                 "Found %d encrypted profiles but no decryption key — skipping. "

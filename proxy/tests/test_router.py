@@ -24,6 +24,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+from proxy.audit.decision_journal import (
+    PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
+    PROFILE_AUTH_SKIPPED_NO_KEY,
+)
 from proxy.router.profile_router import ProfileRouter
 
 
@@ -201,6 +205,46 @@ class TestProfileRouterLicenseTrust:
 
         assert router.loaded_count == 0
         assert router.get("licensed-model") is None
+
+    def test_plaintext_profile_cannot_fallback_when_encrypted_profiles_are_refused(
+        self, tmp_path
+    ):
+        (tmp_path / "victim.yaml.enc").write_bytes(b"encrypted-profile-needs-a-key")
+        (tmp_path / "attacker.yaml").write_text(yaml.dump({
+            "model": "victim-model",
+            "version": "1.0",
+            "detection": {"features": {}},
+        }))
+
+        router = ProfileRouter(str(tmp_path), decryption_key=None)
+
+        assert router.loaded_count == 0
+        assert router.get("victim-model") is None
+        rows, dropped = router.decision_journal.drain()
+        assert dropped == 0
+        assert {row["outcome"] for row in rows} == {
+            PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
+            PROFILE_AUTH_SKIPPED_NO_KEY,
+        }
+
+    def test_plaintext_profile_in_encrypted_dir_requires_explicit_escape_hatch(
+        self, tmp_path
+    ):
+        (tmp_path / "victim.yaml.enc").write_bytes(b"encrypted-profile-needs-a-key")
+        (tmp_path / "local-dev.yaml").write_text(yaml.dump({
+            "model": "local-dev-model",
+            "version": "1.0",
+            "detection": {"features": {}},
+        }))
+
+        router = ProfileRouter(
+            str(tmp_path),
+            decryption_key=None,
+            allow_plaintext_profiles=True,
+        )
+
+        assert router.loaded_count == 1
+        assert router.get("local-dev-model") is not None
 
 
 class TestProfileRouterLookup:

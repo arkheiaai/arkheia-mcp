@@ -51,6 +51,7 @@ from proxy.audit.decision_journal import (
     PROFILE_AUTH_MALFORMED,
     PROFILE_AUTH_NOT_YAML,
     PROFILE_AUTH_NO_MODEL_ID,
+    PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
     PROFILE_AUTH_SKIPPED_NO_KEY,
     RECEIPT_ENQUEUED,
     RISK_LEVEL,
@@ -498,3 +499,28 @@ async def test_plaintext_profiles_produce_no_authentication_rows(profiles, probe
     assert router.loaded_count == 1
     assert _rows(probe) == []
     assert json.dumps(probe.rows()) == "[]"
+
+
+async def test_plaintext_profile_in_encrypted_dir_is_refused_and_receipted(
+    profiles, probe
+):
+    key = _key()
+    _seal(profiles, "victim", key)
+    secret_marker = "SENTINEL-PLAINTEXT-FALLBACK-249b"
+    (profiles / "attacker.yaml").write_text(yaml.dump({
+        "model": "victim",
+        "version": "1.0",
+        "notes": secret_marker,
+    }))
+
+    router = await _build(profiles, probe, key=None)
+
+    assert router.loaded_count == 0
+    assert router.get("victim") is None
+    plaintext_rows = _rows(probe, PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR)
+    assert len(plaintext_rows) == 1
+    assert plaintext_rows[0]["profile_name"] == "attacker"
+    assert plaintext_rows[0]["ciphertext_sha256"] is None
+    assert plaintext_rows[0]["key_id"] is None
+    assert _rows(probe, PROFILE_AUTH_SKIPPED_NO_KEY)
+    assert secret_marker.encode() not in probe.raw_bytes()
