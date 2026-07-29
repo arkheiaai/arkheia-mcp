@@ -116,14 +116,24 @@ def default_port(scheme):
     return 80 if scheme == "http" else 443
 
 
-def self_hosted(host):
-    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+def loopback(host):
+    if host == "localhost" or host.endswith(".localhost"):
         return True
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
         return False
-    return addr.is_loopback or addr.is_private or addr.is_link_local
+    return addr.is_loopback
+
+
+def self_hosted(host):
+    if loopback(host):
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return addr.is_private or addr.is_link_local
 
 
 raw = (sys.argv[1] or DEFAULT).strip() or DEFAULT
@@ -150,14 +160,15 @@ path = parsed.path.rstrip("/")
 base_url = urlunsplit((scheme, netloc, path, "", ""))
 origin = urlunsplit((scheme, netloc, "", "", ""))
 is_self_hosted = self_hosted(host)
+is_loopback = loopback(host)
 
 if not allow_unsafe and origin != DEFAULT and not is_self_hosted:
     fail(
         "hosted URL is not the approved Arkheia production authority; "
         "set ARKHEIA_ALLOW_UNSAFE_HOSTED_URL=1 only for trusted custom endpoints"
     )
-if not allow_unsafe and scheme != "https" and not is_self_hosted:
-    fail("hosted URL must use HTTPS")
+if not allow_unsafe and scheme != "https" and not is_loopback:
+    fail("hosted URL must use HTTPS unless it is loopback-local")
 
 print(base_url)
 PY

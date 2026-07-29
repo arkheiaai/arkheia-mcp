@@ -104,13 +104,17 @@ def test_default_policy_preserves_local_self_hosted_authorities(monkeypatch):
     for url in (
         "http://127.0.0.1:8098",
         "http://localhost:8098",
-        "http://10.2.3.4:8098/base",
-        "https://arkheia-proxy.local",
+        "https://10.2.3.4:8098/base",
     ):
         decision = authorize_hosted_base_url(url)
         assert decision.base_url == url.rstrip("/")
         assert decision.allow_unsafe is False
         assert decision.self_hosted is True
+
+    with pytest.raises(HostedAuthorityError, match="must use HTTPS"):
+        authorize_hosted_base_url("http://10.2.3.4:8098/base")
+    with pytest.raises(HostedAuthorityError, match="approved Arkheia production authority"):
+        authorize_hosted_base_url("https://arkheia-proxy.local")
 
 
 def test_unsafe_opt_in_is_required_for_custom_hosted_authorities(monkeypatch):
@@ -161,6 +165,18 @@ def test_installer_allows_default_private_and_explicitly_opted_in_custom_urls():
     private = _run_install_hosted_url_validation("http://127.0.0.1:8098/base/")
     assert private.returncode == 0, private.stderr
     assert _last_stdout_line(private) == "http://127.0.0.1:8098/base"
+
+    private_https = _run_install_hosted_url_validation("https://10.2.3.4:8098/base/")
+    assert private_https.returncode == 0, private_https.stderr
+    assert _last_stdout_line(private_https) == "https://10.2.3.4:8098/base"
+
+    private_http = _run_install_hosted_url_validation("http://10.2.3.4:8098/base/")
+    assert private_http.returncode != 0
+    assert "hosted URL must use HTTPS unless it is loopback-local" in private_http.stderr
+
+    local_suffix = _run_install_hosted_url_validation("https://arkheia-proxy.local")
+    assert local_suffix.returncode != 0
+    assert "approved Arkheia production authority" in local_suffix.stderr
 
     custom = _run_install_hosted_url_validation(
         "https://custom.example.test/root",

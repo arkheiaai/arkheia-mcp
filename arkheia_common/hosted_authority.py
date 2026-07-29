@@ -80,13 +80,14 @@ def authorize_hosted_base_url(
 
     opted_in = allow_unsafe_hosted_url_from_env() if allow_unsafe is None else allow_unsafe
     self_hosted = _is_self_hosted_host(host)
+    loopback = _is_loopback_host(host)
     if not opted_in and origin != DEFAULT_HOSTED_API_URL and not self_hosted:
         raise HostedAuthorityError(
             "hosted URL is not the approved Arkheia production authority; "
             f"set {ALLOW_UNSAFE_HOSTED_URL_ENV}=1 only for trusted custom endpoints"
         )
-    if not opted_in and scheme != "https" and not self_hosted:
-        raise HostedAuthorityError("hosted URL must use HTTPS")
+    if not opted_in and scheme != "https" and not loopback:
+        raise HostedAuthorityError("hosted URL must use HTTPS unless it is loopback-local")
 
     return HostedAuthorityDecision(
         base_url=normalized_base,
@@ -101,10 +102,20 @@ def _default_port(scheme: str) -> int:
 
 
 def _is_self_hosted_host(host: str) -> bool:
-    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+    if _is_loopback_host(host):
         return True
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
         return False
-    return addr.is_loopback or addr.is_private or addr.is_link_local
+    return addr.is_private or addr.is_link_local
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return addr.is_loopback
