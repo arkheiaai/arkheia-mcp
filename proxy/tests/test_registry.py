@@ -21,6 +21,7 @@ PASSING CRITERIA (ProfileValidator):
 import hashlib
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from urllib.parse import urlparse
 
 import pytest
 import yaml
@@ -54,6 +55,16 @@ VALID_PROFILE = {
 
 VALID_YAML = yaml.dump(VALID_PROFILE).encode("utf-8")
 VALID_CHECKSUM = hashlib.sha256(VALID_YAML).hexdigest()
+
+
+def _authority(url: str) -> tuple[str, str, int | None]:
+    parsed = urlparse(url)
+    port = parsed.port
+    if port is None and parsed.scheme == "http":
+        port = 80
+    elif port is None and parsed.scheme == "https":
+        port = 443
+    return parsed.scheme.lower(), (parsed.hostname or "").lower(), port
 
 
 @pytest.fixture
@@ -337,3 +348,157 @@ class TestRegistryClient:
             await registry_client.pull()
 
         assert (tmp_path / "llama-3-70b.yaml").exists()
+
+    @pytest.mark.asyncio
+    async def test_pull_rejects_foreign_download_url_before_authorized_download(
+        self, registry_client, mock_router
+    ):
+        """
+        Registry metadata must not choose a second authority for bearer downloads.
+
+        The list call is authorized for the configured registry. If a profile
+        advertises a foreign download_url, the client must reject it before the
+        second authorized GET is made.
+        """
+        registry_response = {
+            "profiles": [{
+                "model_id": "llama-3-70b",
+                "version": "2.0",
+                "checksum": VALID_CHECKSUM,
+                "download_url": "https://evil.example/profiles/llama-3-70b.yaml",
+            }],
+            "pull_timestamp": "2026-02-28T00:00:00Z",
+        }
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+
+            list_resp = MagicMock()
+            list_resp.json.return_value = registry_response
+            list_resp.raise_for_status = MagicMock()
+
+            download_resp = MagicMock()
+            download_resp.content = VALID_YAML
+            download_resp.raise_for_status = MagicMock()
+
+            mock_client.get.side_effect = [list_resp, download_resp]
+
+            result = await registry_client.pull()
+
+        assert result["updated"] == []
+        assert result["skipped"] == []
+        assert len(result["errors"]) == 1
+        assert "authority does not match" in result["errors"][0]
+        mock_router.reload.assert_not_called()
+        assert mock_client.get.call_count == 1
+        assert mock_client.get.call_args.args[0] == "https://registry.arkheia.ai/profiles"
+
+    @pytest.mark.parametrize(
+        ("base_url", "download_url"),
+        [
+            ("https://registry.arkheia.ai", "/profiles/gpt.yaml"),
+            ("https://registry.arkheia.ai", "profiles/gpt.yaml"),
+            ("https://registry.arkheia.ai", "https://REGISTRY.ARKHEIA.AI/profiles/gpt.yaml"),
+            ("https://registry.arkheia.ai", "https://registry.arkheia.ai:443/profiles/gpt.yaml"),
+            ("http://registry.arkheia.ai", "http://registry.arkheia.ai:80/profiles/gpt.yaml"),
+            ("http://127.0.0.1:8200", "http://127.0.0.1:8200/profiles/gpt.yaml"),
+            ("http://[::1]:8200", "http://[::1]:8200/profiles/gpt.yaml"),
+        ],
+    )
+    def test_same_origin_download_url_accepts_only_exact_authority_equivalence(
+        self, base_url, download_url, tmp_path, mock_router
+    ):
+        client = RegistryClient(
+            base_url=base_url,
+            api_key=SecretStr("test-api-key"),
+            profile_dir=str(tmp_path),
+            router=mock_router,
+        )
+
+        resolved = client._same_origin_download_url(download_url)
+
+        assert _authority(resolved) == _authority(base_url)
+
+    @pytest.mark.parametrize(
+        ("base_url", "download_url", "message"),
+        [
+            (
+                "https://registry.arkheia.ai",
+                "http://registry.arkheia.ai/profiles/gpt.yaml",
+                "authority does not match",
+            ),
+            (
+                "https://registry.arkheia.ai",
+                "https://registry.arkheia.ai:444/profiles/gpt.yaml",
+                "authority does not match",
+            ),
+            (
+                "https://registry.arkheia.ai",
+                "//evil.example/profiles/gpt.yaml",
+                "authority does not match",
+            ),
+            (
+                "https://registry.arkheia.ai",
+                "https://registry.arkheia.ai.evil.example/profiles/gpt.yaml",
+                "authority does not match",
+            ),
+            (
+                "https://registry.arkheia.ai",
+                "https://registry.arkheia.ai@evil.example/profiles/gpt.yaml",
+                "authority does not match",
+            ),
+            (
+                "https://registry.arkheia.ai",
+                "https://user@registry.arkheia.ai/profiles/gpt.yaml",
+                "must not include userinfo",
+            ),
+            (
+                "https://registry.arkheia.ai",
+                "https://user:pw@registry.arkheia.ai/profiles/gpt.yaml",
+                "must not include userinfo",
+            ),
+            (
+                "http://127.0.0.1:8200",
+                "http://127.0.0.2:8200/profiles/gpt.yaml",
+                "authority does not match",
+            ),
+            (
+                "http://127.0.0.1:8200",
+                "http://127.0.0.1.nip.io:8200/profiles/gpt.yaml",
+                "authority does not match",
+            ),
+            (
+                "http://127.0.0.1.nip.io:8200",
+                "http://127.0.0.1:8200/profiles/gpt.yaml",
+                "authority does not match",
+            ),
+            (
+                "http://[::1]:8200",
+                "http://[::2]:8200/profiles/gpt.yaml",
+                "authority does not match",
+            ),
+            (
+                "http://localhost:8200",
+                "http://127.0.0.1:8200/profiles/gpt.yaml",
+                "authority does not match",
+            ),
+            (
+                "http://registry.arkheia.ai",
+                "http://registry.arkheia.ai:81/profiles/gpt.yaml",
+                "authority does not match",
+            ),
+        ],
+    )
+    def test_same_origin_download_url_rejects_confusing_or_foreign_authorities(
+        self, base_url, download_url, message, tmp_path, mock_router
+    ):
+        client = RegistryClient(
+            base_url=base_url,
+            api_key=SecretStr("test-api-key"),
+            profile_dir=str(tmp_path),
+            router=mock_router,
+        )
+
+        with pytest.raises(ValueError, match=message):
+            client._same_origin_download_url(download_url)
