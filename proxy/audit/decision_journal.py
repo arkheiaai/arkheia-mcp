@@ -156,13 +156,26 @@ PROFILE_AUTH_EMPTY = "decrypted_empty"
 PROFILE_AUTH_LICENSE_REJECTED = "license_rejected"
 PROFILE_AUTH_NO_MODEL_ID = "no_model_id"
 PROFILE_AUTH_SKIPPED_NO_KEY = "skipped_no_key"
-PROFILE_AUTH_PLAINTEXT_REJECTED = "plaintext_rejected_encrypted_dir"
+PROFILE_AUTH_PLAINTEXT_REJECTED = "plaintext_rejected_by_policy"
+PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN = "plaintext_allowed_explicit_opt_in"
 
 PROFILE_AUTH_OUTCOMES = frozenset({
     PROFILE_AUTH_AUTHENTICATED, PROFILE_AUTH_FAILED, PROFILE_AUTH_MALFORMED,
     PROFILE_AUTH_NOT_YAML, PROFILE_AUTH_EMPTY, PROFILE_AUTH_LICENSE_REJECTED,
     PROFILE_AUTH_NO_MODEL_ID, PROFILE_AUTH_SKIPPED_NO_KEY,
-    PROFILE_AUTH_PLAINTEXT_REJECTED,
+    PROFILE_AUTH_PLAINTEXT_REJECTED, PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
+})
+
+#: Why plaintext YAML required an explicit opt-in. ``development_plaintext`` is
+#: the one posture where plaintext does not require an opt-in.
+PLAINTEXT_POLICY_DEVELOPMENT = "development_plaintext"
+PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY = "encrypted_profile_policy"
+PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY = "trusted_decryption_key"
+PLAINTEXT_POLICY_ENCRYPTED_INVENTORY = "encrypted_profile_inventory"
+
+PLAINTEXT_POLICY_STATES = frozenset({
+    PLAINTEXT_POLICY_DEVELOPMENT, PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY,
+    PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY, PLAINTEXT_POLICY_ENCRYPTED_INVENTORY,
 })
 
 #: risk_level carried by these rows. Deliberately NOT one of LOW/MEDIUM/HIGH/
@@ -496,6 +509,9 @@ def build_profile_auth_record(
     key: Optional[bytes] = None,
     error_type: Optional[str] = None,
     skipped_profile_names: Optional[list] = None,
+    plaintext_profile_names: Optional[list] = None,
+    plaintext_opt_in_env: Optional[str] = None,
+    plaintext_policy_state: Optional[str] = None,
 ) -> dict:
     """
     D2 — the record for "did this profile authenticate?".
@@ -508,6 +524,10 @@ def build_profile_auth_record(
     """
     if outcome not in PROFILE_AUTH_OUTCOMES:
         raise ValueError(f"profile-auth outcome {outcome!r} is outside the closed taxonomy")
+    if plaintext_policy_state is not None and plaintext_policy_state not in PLAINTEXT_POLICY_STATES:
+        raise ValueError(
+            f"plaintext policy state {plaintext_policy_state!r} is outside the closed taxonomy"
+        )
     return {
         "event_type": EVENT_PROFILE_AUTH,
         "risk_level": RISK_LEVEL,
@@ -520,6 +540,10 @@ def build_profile_auth_record(
         "error_type": error_type,
         "skipped_profile_names": sorted(skipped_profile_names) if skipped_profile_names else None,
         "skipped_count": len(skipped_profile_names) if skipped_profile_names else 0,
+        "plaintext_profile_names": sorted(plaintext_profile_names) if plaintext_profile_names else None,
+        "plaintext_count": len(plaintext_profile_names) if plaintext_profile_names else 0,
+        "plaintext_opt_in_env": plaintext_opt_in_env,
+        "plaintext_policy_state": plaintext_policy_state,
     }
 
 

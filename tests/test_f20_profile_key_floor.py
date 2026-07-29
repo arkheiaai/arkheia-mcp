@@ -44,6 +44,12 @@ DONE.md v1.19: a check whose pass condition is "found nothing" cannot
 distinguish clean from blind. Each analyser here is run against a synthetic
 violation in the same file, and each asserts a non-zero examined population.
 
+**INV-11/12 — plaintext custody is policy-driven and receipted.**
+The plaintext guard must not key only on ``glob("*.yaml.enc")``. Deleting or
+renaming encrypted files is exactly the bypass, so ``ProfileRouter`` must refuse
+plaintext from policy/trust state, and an explicit plaintext opt-in must leave a
+profile-authentication receipt naming the opt-in.
+
 WHAT THIS FILE DELIBERATELY DOES NOT CLAIM
 ------------------------------------------
 ``security_scan.yml`` and ``smoke-test.yml`` in this repo trigger on ``main`` /
@@ -64,6 +70,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 MAIN = ROOT / "proxy" / "main.py"
 JOURNAL = ROOT / "proxy" / "audit" / "decision_journal.py"
+ROUTER = ROOT / "proxy" / "router" / "profile_router.py"
 
 #: Production roots scanned for call sites. Test directories are excluded — a
 #: test may legitimately construct an off-taxonomy value to prove it is refused.
@@ -628,6 +635,263 @@ def test_inv4_negative_self_test_detects_an_emitter_with_no_call_sites():
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
              and n.func.id in BUILDERS]
     assert found == []
+
+
+# ---------------------------------------------------------------------------
+# INV-11 / INV-12 — plaintext custody is policy-driven and receipted
+# ---------------------------------------------------------------------------
+
+def _class_method(tree: ast.Module, class_name: str, method_name: str):
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+            continue
+        for child in node.body:
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                    and child.name == method_name:
+                return child
+    return None
+
+
+def _assigned_value(fn: ast.AST, target_name: str) -> ast.AST | None:
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name) and target.id == target_name:
+                return node.value
+    return None
+
+
+def _loaded_names(node: ast.AST) -> set[str]:
+    return {
+        child.id for child in ast.walk(node)
+        if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load)
+    }
+
+
+def _loaded_attrs(node: ast.AST) -> set[str]:
+    return {
+        child.attr for child in ast.walk(node)
+        if isinstance(child, ast.Attribute) and isinstance(child.ctx, ast.Load)
+    }
+
+
+def _calls_attr(node: ast.AST, attr: str) -> bool:
+    return any(
+        isinstance(child, ast.Call)
+        and isinstance(child.func, ast.Attribute)
+        and child.func.attr == attr
+        for child in ast.walk(node)
+    )
+
+
+def _plaintext_policy_guard_violations(tree: ast.Module) -> list[str]:
+    violations: list[str] = []
+    init = _class_method(tree, "ProfileRouter", "__init__")
+    policy_state = _class_method(tree, "ProfileRouter", "_plaintext_policy_state")
+    load_all = _class_method(tree, "ProfileRouter", "load_all")
+
+    if init is None:
+        return ["ProfileRouter.__init__ missing"]
+    if policy_state is None:
+        violations.append("ProfileRouter._plaintext_policy_state missing")
+    if load_all is None:
+        violations.append("ProfileRouter.load_all missing")
+        return violations
+
+    init_params = {arg.arg for arg in init.args.args}
+    if "encrypted_profile_policy" not in init_params:
+        violations.append("ProfileRouter.__init__ has no encrypted_profile_policy parameter")
+
+    if policy_state is not None:
+        attrs = _loaded_attrs(policy_state)
+        if "_encrypted_profile_policy" not in attrs:
+            violations.append("plaintext policy state ignores explicit encrypted-profile policy")
+        if "_decryption_key" not in attrs:
+            violations.append("plaintext policy state ignores trusted decryption-key state")
+
+    requires_value = _assigned_value(load_all, "plaintext_requires_opt_in")
+    if requires_value is None:
+        violations.append("load_all does not assign plaintext_requires_opt_in")
+    elif not _calls_attr(requires_value, "_plaintext_requires_opt_in"):
+        violations.append(
+            "plaintext_requires_opt_in is not derived from the plaintext policy helper"
+        )
+
+    refusing_value = _assigned_value(load_all, "refusing_plaintext")
+    if refusing_value is None:
+        violations.append("load_all does not assign refusing_plaintext")
+    else:
+        names = _loaded_names(refusing_value)
+        if "enc_files" in names:
+            violations.append(
+                "refusing_plaintext reads enc_files directly; unlink/rename of "
+                "*.yaml.enc must not be the authority"
+            )
+        if "plaintext_requires_opt_in" not in names:
+            violations.append("refusing_plaintext is not gated by plaintext_requires_opt_in")
+
+    return violations
+
+
+def _main_router_policy_wiring_violations(tree: ast.Module) -> list[str]:
+    violations: list[str] = []
+    lifespan = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) \
+                and node.name == "lifespan":
+            lifespan = node
+            break
+    if lifespan is None:
+        return ["lifespan missing from proxy/main.py"]
+
+    calls = [
+        node for node in ast.walk(lifespan)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "ProfileRouter"
+    ]
+    if not calls:
+        return ["lifespan does not construct ProfileRouter"]
+    if not any(
+        any(kw.arg == "encrypted_profile_policy" for kw in call.keywords)
+        for call in calls
+    ):
+        violations.append(
+            "lifespan constructs ProfileRouter without encrypted_profile_policy; "
+            "cold-start unlink/rename plants would fall back to directory inventory"
+        )
+    return violations
+
+
+def _builder_calls_with_outcome(tree: ast.Module, outcome_name: str) -> list[ast.Call]:
+    calls: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id == "build_profile_auth_record"):
+            continue
+        for kw in node.keywords:
+            if kw.arg == "outcome" and isinstance(kw.value, ast.Name) \
+                    and kw.value.id == outcome_name:
+                calls.append(node)
+    return calls
+
+
+def _keyword_names(call: ast.Call) -> set[str]:
+    return {kw.arg for kw in call.keywords if kw.arg}
+
+
+def _plaintext_receipt_violations(router_tree: ast.Module,
+                                  journal_tree: ast.Module) -> list[str]:
+    constants = _constant_names(journal_tree)
+    violations: list[str] = []
+
+    if constants.get("PROFILE_AUTH_PLAINTEXT_REJECTED") != "plaintext_rejected_by_policy":
+        violations.append("plaintext refusal outcome still names encrypted-dir inventory")
+    if "PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN" not in constants:
+        violations.append("plaintext opt-in outcome constant missing")
+
+    rejected = _builder_calls_with_outcome(router_tree, "PROFILE_AUTH_PLAINTEXT_REJECTED")
+    if not rejected:
+        violations.append("router does not build a plaintext-refusal receipt")
+    elif not any("plaintext_policy_state" in _keyword_names(call) for call in rejected):
+        violations.append("plaintext-refusal receipt does not name the policy state")
+
+    opt_in = _builder_calls_with_outcome(
+        router_tree, "PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN"
+    )
+    if not opt_in:
+        violations.append("router does not build a plaintext opt-in receipt")
+    else:
+        required = {
+            "plaintext_profile_names",
+            "plaintext_opt_in_env",
+            "plaintext_policy_state",
+        }
+        if not any(required <= _keyword_names(call) for call in opt_in):
+            violations.append(
+                "plaintext opt-in receipt does not carry profile names, env name "
+                "and policy state"
+            )
+
+    return violations
+
+
+def test_inv11_plaintext_refusal_is_not_keyed_to_the_enc_file_glob():
+    violations = (
+        _plaintext_policy_guard_violations(_parse(ROUTER))
+        + _main_router_policy_wiring_violations(_parse(MAIN))
+    )
+    assert not violations, "plaintext policy guard violations:\n  " + "\n  ".join(violations)
+
+
+def test_inv11_negative_self_test_detects_the_old_enc_glob_guard():
+    broken = ast.parse(
+        "class ProfileRouter:\n"
+        "    def __init__(self, profile_dir, decryption_key=None):\n"
+        "        self._decryption_key = decryption_key\n"
+        "    def load_all(self):\n"
+        "        enc_files = sorted(path.glob('*.yaml.enc'))\n"
+        "        plaintext_allowed = False\n"
+        "        refusing_plaintext = bool(enc_files) and not plaintext_allowed\n"
+    )
+    violations = _plaintext_policy_guard_violations(broken)
+    assert any("encrypted_profile_policy" in v for v in violations)
+    assert any("enc_files directly" in v for v in violations)
+
+
+def test_inv11_negative_self_test_detects_startup_not_passing_policy():
+    broken = ast.parse(
+        "async def lifespan(app):\n"
+        "    profile_router = ProfileRouter('profiles', audit_writer=audit_writer)\n"
+    )
+    violations = _main_router_policy_wiring_violations(broken)
+    assert any("without encrypted_profile_policy" in v for v in violations)
+
+
+def test_inv12_plaintext_refusal_and_opt_in_are_both_receipted():
+    violations = _plaintext_receipt_violations(_parse(ROUTER), _parse(JOURNAL))
+    assert not violations, "plaintext receipt violations:\n  " + "\n  ".join(violations)
+
+
+def test_inv12_negative_self_test_detects_opt_in_without_receipt():
+    journal = ast.parse(
+        "PROFILE_AUTH_PLAINTEXT_REJECTED = 'plaintext_rejected_by_policy'\n"
+    )
+    router = ast.parse(
+        "def load_all(self):\n"
+        "    self.decision_journal.record(build_profile_auth_record(\n"
+        "        outcome=PROFILE_AUTH_PLAINTEXT_REJECTED,\n"
+        "        skipped_profile_names=['plain.yaml'],\n"
+        "        plaintext_policy_state=state,\n"
+        "    ))\n"
+    )
+    violations = _plaintext_receipt_violations(router, journal)
+    assert any("opt-in outcome constant missing" in v for v in violations)
+    assert any("plaintext opt-in receipt" in v for v in violations)
+
+
+def test_inv12_negative_self_test_detects_refusal_receipt_still_named_for_enc_dir():
+    journal = ast.parse(
+        "PROFILE_AUTH_PLAINTEXT_REJECTED = 'plaintext_rejected_encrypted_dir'\n"
+        "PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN = 'plaintext_allowed_explicit_opt_in'\n"
+    )
+    router = ast.parse(
+        "def load_all(self):\n"
+        "    self.decision_journal.record(build_profile_auth_record(\n"
+        "        outcome=PROFILE_AUTH_PLAINTEXT_REJECTED,\n"
+        "        skipped_profile_names=['plain.yaml'],\n"
+        "        plaintext_policy_state=state,\n"
+        "    ))\n"
+        "    self.decision_journal.record(build_profile_auth_record(\n"
+        "        outcome=PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,\n"
+        "        plaintext_profile_names=['plain.yaml'],\n"
+        "        plaintext_opt_in_env='ARKHEIA_ALLOW_PLAINTEXT_PROFILES',\n"
+        "        plaintext_policy_state=state,\n"
+        "    ))\n"
+    )
+    violations = _plaintext_receipt_violations(router, journal)
+    assert any("encrypted-dir inventory" in v for v in violations)
 
 
 # ---------------------------------------------------------------------------

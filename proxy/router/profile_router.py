@@ -4,6 +4,8 @@ Multi-profile router with atomic reload, license enforcement, and encrypted prof
 Loads YAML profiles at startup. Supports plaintext-only development directories
 and encrypted (.yaml.enc) release directories. If a directory contains encrypted
 profiles, plaintext siblings are refused unless explicitly opted in.
+If the router is placed in encrypted-profile policy, plaintext is refused even
+when no encrypted sibling remains on disk.
 Encrypted profiles require a decryption key fetched dynamically from the hosted endpoint.
 Reload is copy-and-swap -- zero dropped requests during update.
 
@@ -35,8 +37,13 @@ from proxy.audit.decision_journal import (
     PROFILE_AUTH_MALFORMED,
     PROFILE_AUTH_NOT_YAML,
     PROFILE_AUTH_NO_MODEL_ID,
+    PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
     PROFILE_AUTH_PLAINTEXT_REJECTED,
     PROFILE_AUTH_SKIPPED_NO_KEY,
+    PLAINTEXT_POLICY_DEVELOPMENT,
+    PLAINTEXT_POLICY_ENCRYPTED_INVENTORY,
+    PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY,
+    PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY,
     DecisionJournal,
     build_profile_auth_record,
     flush_journal,
@@ -141,6 +148,7 @@ class ProfileRouter:
         decryption_key: Optional[bytes] = None,
         audit_writer: Optional[object] = None,
         journal: Optional[DecisionJournal] = None,
+        encrypted_profile_policy: Optional[bool] = None,
     ):
         self._profiles: dict[str, dict] = {}
         self._lock = asyncio.Lock()
@@ -152,6 +160,9 @@ class ProfileRouter:
         # whether each encrypted profile authenticated, and before this change no
         # writer existed when it decided.
         self._audit_writer = audit_writer
+        # ``True`` means this installation is in encrypted-profile custody even
+        # if the encrypted files have been removed or renamed before this load.
+        self._encrypted_profile_policy = bool(encrypted_profile_policy)
         self.decision_journal = journal or DecisionJournal()
         #: Fire-and-forget flush tasks, held so the GC cannot collect a pending
         #: one mid-flight (asyncio only holds a weak reference to a bare task).
@@ -204,13 +215,35 @@ class ProfileRouter:
         self.load_all()
         self._schedule_flush()
 
+    def _plaintext_policy_state(self, enc_files: list[Path]) -> str:
+        """
+        Explain why plaintext needs an explicit opt-in for this load.
+
+        The encrypted inventory is the weakest signal and deliberately last. A
+        directory listing is attacker-mutable; a configured policy or trusted key
+        remains true even if every ``*.yaml.enc`` has just been unlinked or
+        renamed.
+        """
+        if self._encrypted_profile_policy:
+            return PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY
+        if self._decryption_key is not None:
+            return PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY
+        if enc_files:
+            return PLAINTEXT_POLICY_ENCRYPTED_INVENTORY
+        return PLAINTEXT_POLICY_DEVELOPMENT
+
+    @staticmethod
+    def _plaintext_requires_opt_in(policy_state: str) -> bool:
+        return policy_state != PLAINTEXT_POLICY_DEVELOPMENT
+
     def load_all(self) -> None:
         """Load all profiles from profile_dir.
 
-        Plaintext YAML is allowed when the directory is plaintext-only. Once a
-        directory carries any encrypted profiles, plaintext siblings are refused
-        by default: otherwise an attacker who can write ``*.yaml`` beside
-        ``*.yaml.enc`` bypasses the very key custody this release path protects.
+        Plaintext YAML is allowed in development plaintext posture. Once policy
+        or trust state says encrypted-profile custody is active, plaintext is
+        refused by default even if the encrypted files have been removed from the
+        directory. ``ARKHEIA_ALLOW_PLAINTEXT_PROFILES`` is an auditable migration
+        override, not a silent bypass.
         """
         profiles: dict[str, dict] = {}
         path = Path(self.profile_dir).resolve()
@@ -223,7 +256,10 @@ class ProfileRouter:
         enc_files = sorted(path.glob("*.yaml.enc"))
         plaintext_files = sorted(path.glob("*.yaml"))
         plaintext_allowed = _truthy_env(_ALLOW_PLAINTEXT_PROFILES_ENV)
-        refusing_plaintext = bool(enc_files) and not plaintext_allowed
+        plaintext_policy_state = self._plaintext_policy_state(enc_files)
+        plaintext_requires_opt_in = self._plaintext_requires_opt_in(plaintext_policy_state)
+        refusing_plaintext = plaintext_requires_opt_in and not plaintext_allowed
+        plaintext_candidate_names: list[str] = []
         refused_plaintext_names: list[str] = []
 
         # Load plaintext .yaml profiles
@@ -233,6 +269,7 @@ class ProfileRouter:
                 continue
             if f.name == "schema.yaml":
                 continue
+            plaintext_candidate_names.append(f.name)
             if refusing_plaintext:
                 refused_plaintext_names.append(f.name)
                 continue
@@ -253,6 +290,21 @@ class ProfileRouter:
             self.decision_journal.record(build_profile_auth_record(
                 outcome=PROFILE_AUTH_PLAINTEXT_REJECTED,
                 skipped_profile_names=refused_plaintext_names,
+                plaintext_policy_state=plaintext_policy_state,
+            ))
+        elif plaintext_allowed and plaintext_requires_opt_in and plaintext_candidate_names:
+            logger.warning(
+                "Plaintext profile loading explicitly enabled by %s in %s "
+                "(policy_state=%s).",
+                _ALLOW_PLAINTEXT_PROFILES_ENV,
+                self.profile_dir,
+                plaintext_policy_state,
+            )
+            self.decision_journal.record(build_profile_auth_record(
+                outcome=PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
+                plaintext_profile_names=plaintext_candidate_names,
+                plaintext_opt_in_env=_ALLOW_PLAINTEXT_PROFILES_ENV,
+                plaintext_policy_state=plaintext_policy_state,
             ))
 
         # Load encrypted .yaml.enc profiles (if decryption key available)

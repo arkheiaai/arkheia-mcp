@@ -46,7 +46,9 @@ from proxy.audit.decision_journal import (
     KEY_LOAD_NO_ENCRYPTED_PROFILES,
     PROFILE_AUTH_AUTHENTICATED,
     PROFILE_AUTH_FAILED,
+    PROFILE_AUTH_PLAINTEXT_REJECTED,
     PROFILE_AUTH_SKIPPED_NO_KEY,
+    PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY,
 )
 from proxy.crypto.profile_crypto import encrypt_profile
 from proxy.tests._receipt_probe import ReceiptProbe, assert_decision_identity
@@ -118,6 +120,35 @@ def test_a_real_boot_with_no_encrypted_profiles_still_records_its_key_posture(
     assert rows[0]["receipt_status"] == "enqueued"
     # No authentication verdicts, because nothing was authenticated.
     assert [r for r in probe.rows() if r["event_type"] == EVENT_PROFILE_AUTH] == []
+
+
+def test_a_real_boot_with_encrypted_profile_policy_refuses_plaintext_without_enc_files(
+    booted, tmp_path, monkeypatch
+):
+    """
+    Cold-start deletion/rename case: if policy says this install is in encrypted
+    custody, a plaintext plant must not load just because ``*.yaml.enc`` is now
+    absent from the directory scan.
+    """
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    (profiles / "attacker.yaml").write_text(
+        yaml.dump({"model": "attacker-model", "version": "1"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ARKHEIA_REQUIRE_ENCRYPTED_PROFILES", "true")
+
+    probe = booted(profiles)
+
+    key_rows = [r for r in probe.rows() if r["event_type"] == EVENT_KEY_LOAD]
+    assert len(key_rows) == 1
+    assert key_rows[0]["outcome"] == KEY_LOAD_NO_ENCRYPTED_PROFILES
+
+    auth_rows = [r for r in probe.rows() if r["event_type"] == EVENT_PROFILE_AUTH]
+    assert len(auth_rows) == 1
+    assert auth_rows[0]["outcome"] == PROFILE_AUTH_PLAINTEXT_REJECTED
+    assert auth_rows[0]["skipped_profile_names"] == ["attacker.yaml"]
+    assert auth_rows[0]["plaintext_policy_state"] == PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY
 
 
 def test_a_real_boot_records_the_profile_authentication_verdicts(

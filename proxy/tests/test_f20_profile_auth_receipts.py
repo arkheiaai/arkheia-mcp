@@ -51,8 +51,11 @@ from proxy.audit.decision_journal import (
     PROFILE_AUTH_MALFORMED,
     PROFILE_AUTH_NOT_YAML,
     PROFILE_AUTH_NO_MODEL_ID,
+    PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
     PROFILE_AUTH_PLAINTEXT_REJECTED,
     PROFILE_AUTH_SKIPPED_NO_KEY,
+    PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY,
+    PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY,
     RECEIPT_ENQUEUED,
     RISK_LEVEL,
     build_profile_auth_record,
@@ -103,8 +106,19 @@ def _rows(probe, outcome: str | None = None) -> list[dict]:
     return rows
 
 
-async def _build(profiles, probe, key=None) -> ProfileRouter:
-    router = ProfileRouter(str(profiles), decryption_key=key, audit_writer=probe.writer)
+async def _build(
+    profiles,
+    probe,
+    key=None,
+    *,
+    encrypted_profile_policy: bool | None = None,
+) -> ProfileRouter:
+    router = ProfileRouter(
+        str(profiles),
+        decryption_key=key,
+        audit_writer=probe.writer,
+        encrypted_profile_policy=encrypted_profile_policy,
+    )
     await router.flush_decision_journal()
     await probe.writer._queue.join()
     return router
@@ -277,6 +291,82 @@ async def test_no_key_records_which_surfaces_went_dark_and_does_not_fake_per_pro
     assert row["skipped_count"] == 3
     assert row["skipped_profile_names"] == ["alpha.yaml.enc", "beta.yaml.enc",
                                             "gamma.yaml.enc"]
+
+
+# ---------------------------------------------------------------------------
+# Plaintext policy bypasses — file inventory is not the authority
+# ---------------------------------------------------------------------------
+
+async def test_plaintext_is_refused_when_enc_was_unlinked_but_key_is_trusted(
+    profiles, probe
+):
+    key = _key()
+    _seal(profiles, "legit-model", key)
+    (profiles / "legit-model.yaml.enc").unlink()
+    (profiles / "attacker.yaml").write_text(
+        yaml.dump({"model": "attacker-model", "version": "1.0"}),
+        encoding="utf-8",
+    )
+
+    router = await _build(profiles, probe, key)
+
+    assert router.loaded_count == 0
+    assert router.get("attacker-model") is None
+    rows = _rows(probe)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["outcome"] == PROFILE_AUTH_PLAINTEXT_REJECTED
+    assert row["skipped_profile_names"] == ["attacker.yaml"]
+    assert row["plaintext_policy_state"] == PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY
+    assert row["receipt_status"] == RECEIPT_ENQUEUED
+
+
+async def test_plaintext_is_refused_when_enc_was_renamed_but_policy_is_set(
+    profiles, probe
+):
+    key = _key()
+    blob = _seal(profiles, "legit-model", key)
+    (profiles / "legit-model.yaml.enc").rename(profiles / "legit-model.yaml.enc.bak")
+    assert (profiles / "legit-model.yaml.enc.bak").read_bytes() == blob
+    (profiles / "attacker.yaml").write_text(
+        yaml.dump({"model": "attacker-model", "version": "1.0"}),
+        encoding="utf-8",
+    )
+
+    router = await _build(profiles, probe, key=None, encrypted_profile_policy=True)
+
+    assert router.loaded_count == 0
+    assert router.get("attacker-model") is None
+    rows = _rows(probe)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["outcome"] == PROFILE_AUTH_PLAINTEXT_REJECTED
+    assert row["skipped_profile_names"] == ["attacker.yaml"]
+    assert row["plaintext_policy_state"] == PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY
+    assert row["receipt_status"] == RECEIPT_ENQUEUED
+
+
+async def test_explicit_plaintext_opt_in_is_receipted(profiles, probe, monkeypatch):
+    key = _key()
+    (profiles / "migration.yaml").write_text(
+        yaml.dump({"model": "migration-model", "version": "1.0"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ARKHEIA_ALLOW_PLAINTEXT_PROFILES", "true")
+
+    router = await _build(profiles, probe, key, encrypted_profile_policy=True)
+
+    assert router.loaded_count == 1
+    assert router.get("migration-model") is not None
+    rows = _rows(probe)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["outcome"] == PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN
+    assert row["plaintext_profile_names"] == ["migration.yaml"]
+    assert row["plaintext_count"] == 1
+    assert row["plaintext_opt_in_env"] == "ARKHEIA_ALLOW_PLAINTEXT_PROFILES"
+    assert row["plaintext_policy_state"] == PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY
+    assert row["receipt_status"] == RECEIPT_ENQUEUED
 
 
 # ---------------------------------------------------------------------------
