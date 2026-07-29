@@ -4,7 +4,13 @@ __pycache__/
 .env
 *.log
 audit.jsonl
+registry_audit.jsonl   # registry auth-decision receipts (default path)
 *.bak.yaml
 .pytest_cache/
 install_service.bat
 start-enterprise-proxy.bat
+
+# F10 sweep: local 3.12 (CI interpreter) venv, and the runtime-materialised
+# origin/master baseline suite the mutation counterfactual uses.
+.venv312/
+proxy/tests/test_zz_preexisting_baseline_tmp.py

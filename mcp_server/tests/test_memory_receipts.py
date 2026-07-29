@@ -240,34 +240,31 @@ class TestTheRecordIsTamperEvident:
 
 class TestTheReceiptCarriesNoAuthoredText:
     """
-    The ruling on this flow (module docstring, and `TestObservationsAreStoredVerbatim`) is
-    that observation text is NOT scrubbed: it is authored rather than captured, and a
-    silent lossy rewrite would destroy a fact the agent meant to keep.
-
-    `AuditWriter` redacts everything it writes. So a receipt carrying observation text
-    would subject that text to exactly the silent rewrite the ruling rejects, and would
-    additionally make the receipt log a second, differently-retained copy of the graph.
-    The design answer is that receipts carry identifiers, counts and fingerprints only —
-    and that is asserted here against the RAW BYTES, not against a parsed view.
+    Memory writes now use the same shared redactor as the audit rail. The receipt still
+    must not carry authored text as a second copy of the graph: it records identifiers,
+    counts and fingerprints only, asserted here against the RAW BYTES.
     """
 
     @pytest.mark.asyncio
-    async def test_the_observation_text_reaches_the_db_and_not_the_receipt(self, graph, probe):
+    async def test_observation_text_is_redacted_in_db_and_not_copied_to_receipt(self, graph, probe):
         secret_shaped = "staging DSN is postgres://svc:hunter2@db.internal:5432/app"
 
         result = await store_entity("staging env", "environment", [secret_shaped])
 
-        # Positive control: the text really is in the store, byte-identical and unscrubbed.
         rows = sqlite3.connect(graph).execute("SELECT content FROM observations").fetchall()
-        assert [r[0] for r in rows] == [secret_shaped]
+        stored = [r[0] for r in rows]
+        assert len(stored) == 1
+        assert "staging DSN" in stored[0]
+        assert "hunter2" not in stored[0]
+        assert "[REDACTED:" in stored[0]
 
-        # And it is nowhere in the evidence file — asserted on raw bytes.
+        # The unredacted authored text is nowhere in the evidence file — asserted on raw bytes.
         assert secret_shaped.encode() not in probe.raw_bytes()
         assert b"hunter2" not in probe.raw_bytes()
 
-        # What IS there is the fingerprint, which ties the record to that exact text.
+        # What IS there is the fingerprint, which ties the record to the value actually stored.
         assert probe.require(result["receipt_id"])["observation_fingerprints"] == [
-            fp(secret_shaped)
+            fp(stored[0])
         ]
 
     @pytest.mark.asyncio
@@ -371,6 +368,22 @@ class TestRefusalsAreEvidenced:
         assert row["reason"] == "limit_below_one"
         assert row["limit_requested"] == "-1"
         # A refused read disclosed nothing, so the record must not claim otherwise.
+        assert "entity_ids" not in row
+
+    @pytest.mark.asyncio
+    async def test_a_nul_query_refusal_is_receipted_and_discloses_nothing(self, probe):
+        await store_entity("Acme Corp", "company", ["one fact"])
+        await store_entity("Beta Ltd", "company", ["two facts"])
+
+        with pytest.raises(ValueError) as exc:
+            await retrieve_entities("\x00")
+
+        receipt_id = str(exc.value).split("[receipt ")[1].split(":")[0]
+        row = probe.require(receipt_id)
+        assert row["tool"] == "memory_retrieve"
+        assert row["decision"] == receipts.DECISION_REFUSED
+        assert row["reason"] == "query_contains_nul"
+        assert row["query_fingerprint"] == fp("\x00")
         assert "entity_ids" not in row
 
 

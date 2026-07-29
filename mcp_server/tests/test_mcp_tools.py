@@ -57,7 +57,18 @@ class TestProxyClientVerify:
 
     @pytest.mark.asyncio
     async def test_verify_returns_proxy_response(self):
-        """CRITERION 2: verify() returns proxy response dict."""
+        """
+        CRITERION 2: verify() surfaces the proxy's verdict values.
+
+        This asserted ``result == expected`` — exact verbatim passthrough of the
+        local proxy's body. That equality was itself the PR #17 finding-1 defect
+        on the local success path: it required the client to return whatever the
+        proxy sent, which is how that path came to omit `detection_method`,
+        `evidence_depth_limited` and `source` while the hosted path carried them.
+        The proxy body is an INPUT, not the caller-facing contract, so the
+        assertion is now "every value the proxy reported survives, inside the
+        full verdict shape" rather than "the dict is byte-identical".
+        """
         expected = {
             "risk_level": "HIGH",
             "confidence": 0.92,
@@ -75,7 +86,24 @@ class TestProxyClientVerify:
             client = ProxyClient("http://localhost:8099")
             result = await client.verify("q", "a", "gpt-4o")
 
-        assert result == expected
+        # Every value the proxy reported reaches the caller unchanged...
+        for key, value in expected.items():
+            assert result[key] == value, (
+                f"verify() altered {key!r}: proxy said {value!r}, caller got "
+                f"{result.get(key)!r}"
+            )
+        # ...inside the full verdict shape, so no caller has to guess whether a
+        # transparency field is absent or false.
+        from mcp_server.proxy_client import DETECTION_FIELDS
+        assert set(result) == set(DETECTION_FIELDS), (
+            f"local success path returned {sorted(result)}, contract is "
+            f"{sorted(DETECTION_FIELDS)}"
+        )
+        assert result["source"] == "local"
+        assert result["error"] is None
+        # The proxy did not report its evidence depth, so the client must not
+        # invent one: absent => limited.
+        assert result["evidence_depth_limited"] is True
 
     @pytest.mark.asyncio
     async def test_verify_returns_unknown_on_connect_error(self):

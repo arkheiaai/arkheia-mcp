@@ -245,6 +245,98 @@ def compute_feature(feature_name: str, signals: dict) -> Optional[float]:
 # ---------------------------------------------------------------------------
 # Mode gate: suppress generative scoring for tool/short responses
 # ---------------------------------------------------------------------------
+#
+# A SUPPRESSION IS A DECISION NOT TO REPORT SOMETHING. Everything in this section
+# exists because that decision is the only one in the detector that can silently
+# destroy a finding, and the two directions are not symmetric: over-suppression is
+# invisible (a HIGH becomes a clean-reading LOW, no error, no log a customer sees),
+# under-suppression is loud (cry-wolf, and the operator switches detection off).
+#
+# Three properties are therefore stated here rather than left to callers:
+#
+#   1. THE SUPPRESSION VOCABULARY IS CLOSED. `detection_method` and `gate_reason`
+#      are switched on by consumers and land in the hash-chained audit record, so
+#      they come from fixed sets, never free text.
+#   2. A CORRUPT SIGNAL CANNOT PURCHASE SILENCE. A value that is not a usable count
+#      (NaN, ±inf, negative, bool, unparseable) does not establish the gate's premise,
+#      so it must mean "carry on detecting" — never "suppress". Pre-2026-07-27 the
+#      gates read raw values: `float("nan") >= 1` is False so NaN suppressed; `False`
+#      coerced to 0.0 and suppressed; and the STRING "false" is truthy, so it fired
+#      the function-call arm on a full-length generative response.
+#   3. A GATE NEVER RAISES. `signals.get("token_count", inf) < max_tokens` raises
+#      TypeError for a None or string token_count. The raise escapes into
+#      DetectionEngine.verify's blanket handler and is reported to the caller as
+#      `error="no_computable_features"` — a determinate, benign-sounding cause
+#      standing in for a crash. Not-observed must never be relabelled as observed.
+
+#: Closed set of `detection_method` values meaning NOTHING WAS SCORED. A consumer that
+#: cannot tell these from `profile_<strategy>` cannot tell an unscored response from a
+#: scored clean one.
+SUPPRESSED_DETECTION_METHODS = ("empty_output_suppressed", "tool_surface_suppressed")
+
+#: Closed set of `gate_reason` values. `token_count_below_` is a PREFIX: the profile's
+#: own threshold is appended so the record says which threshold was applied.
+SUPPRESSION_REASON_EMPTY_OUTPUT = "output_tokens_below_1"
+SUPPRESSION_REASON_FUNCTION_CALL = "function_call_part"
+SUPPRESSION_REASON_SHORT_PREFIX = "token_count_below_"
+SUPPRESSION_REASONS = (
+    SUPPRESSION_REASON_EMPTY_OUTPUT,
+    SUPPRESSION_REASON_FUNCTION_CALL,
+    SUPPRESSION_REASON_SHORT_PREFIX,
+)
+
+#: The coded fallback when a profile's `token_count_max` is absent or unusable. This is
+#: the value the gate has always used; it is named, not changed.
+_DEFAULT_TOKEN_COUNT_MAX = 80
+
+
+def is_suppression_reason(reason: Any) -> bool:
+    """True iff `reason` is a member of the closed suppression vocabulary.
+
+    The one place a consumer should ask "was this verdict suppressed?" — so the
+    prefix-with-threshold form is handled here and not re-implemented per caller.
+    """
+    if not isinstance(reason, str) or not reason:
+        return False
+    if reason in (SUPPRESSION_REASON_EMPTY_OUTPUT, SUPPRESSION_REASON_FUNCTION_CALL):
+        return True
+    if not reason.startswith(SUPPRESSION_REASON_SHORT_PREFIX):
+        return False
+    suffix = reason[len(SUPPRESSION_REASON_SHORT_PREFIX):]
+    return bool(suffix) and _usable_count(suffix) is not None
+
+
+def _usable_count(value: Any) -> Optional[float]:
+    """Return `value` as a float iff it is usable as a TOKEN COUNT, else None.
+
+    Usable means: finite, non-negative, and not a bool. Everything else — None, NaN,
+    ±inf, a negative number, `True`/`False`, an unparseable string, a list — is a
+    signal we cannot read, and an unreadable signal must never establish a gate's
+    premise. Shared by both gates and by `is_suppression_reason` so there is exactly
+    one definition of "usable count" (DONE.md v1.13 cl.4: no second source of truth).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(v) or math.isinf(v) or v < 0:
+        return None
+    return v
+
+
+def _is_flag_set(value: Any) -> bool:
+    """True iff `value` is an affirmative BOOLEAN signal.
+
+    Deliberately NOT truthiness. `is_function_call` is a boolean; reading it for
+    truthiness let the string "false" — or any non-empty string, list or dict — buy a
+    suppression on a full-length generative response.
+    """
+    if value is True:
+        return True
+    return isinstance(value, int) and not isinstance(value, bool) and value == 1
+
 
 def check_empty_output_gate(profile: dict, signals: dict) -> Optional[Dict[str, Any]]:
     """
@@ -258,15 +350,13 @@ def check_empty_output_gate(profile: dict, signals: dict) -> Optional[Dict[str, 
     output_tokens is server-side API usage metadata (a count), NOT the response text —
     gating on it preserves the "we do not inspect inputs/outputs" guarantee.
 
-    Fires ONLY when output_tokens is explicitly present and < 1. If the provider gave no
-    usage metadata (None), we cannot confirm zero, so we carry on detecting.
+    Fires ONLY when output_tokens is a USABLE COUNT (see `_usable_count`) and < 1. If
+    the provider gave no usage metadata, or gave something that cannot be a count, we
+    cannot confirm zero, so we carry on detecting. Suppression is the dangerous
+    direction; an unreadable count buys nothing.
     """
-    ot = signals.get("output_tokens")
+    ot = _usable_count(signals.get("output_tokens"))
     if ot is None:
-        return None
-    try:
-        ot = float(ot)
-    except (TypeError, ValueError):
         return None
     if ot >= 1:
         return None
@@ -276,6 +366,11 @@ def check_empty_output_gate(profile: dict, signals: dict) -> Optional[Dict[str, 
     return {
         "risk": "LOW",
         "confidence": 0.0,
+        # A suppression can NEVER carry block authority. Stated here rather than left to
+        # a downstream `.get(..., "advise")` default: the gates return before
+        # resolve_gate_action is ever consulted, and a containment property that depends
+        # on every caller remembering a default is one caller away from being dropped.
+        "gate_action": "advise",
         "evidence_depth_limited": True,
         "model_detected": profile.get("model", "unknown"),
         "detection_method": "empty_output_suppressed",
@@ -284,7 +379,7 @@ def check_empty_output_gate(profile: dict, signals: dict) -> Optional[Dict[str, 
             "features_used": 0,
             "features_total": len(features_config),
             "computed_features": {},
-            "gate_reason": "output_tokens_below_1",
+            "gate_reason": SUPPRESSION_REASON_EMPTY_OUTPUT,
         },
     }
 
@@ -303,12 +398,22 @@ def check_mode_gate(profile: dict, signals: dict) -> Optional[Dict[str, Any]]:
     triggers = tool_cfg.get("triggers", {})
 
     gate_reason = None
-    if signals.get("is_function_call", False):
-        gate_reason = "function_call_part"
+    if _is_flag_set(signals.get("is_function_call")):
+        gate_reason = SUPPRESSION_REASON_FUNCTION_CALL
     else:
-        max_tokens = triggers.get("token_count_max", 80)
-        if signals.get("token_count", float("inf")) < max_tokens:
-            gate_reason = f"token_count_below_{max_tokens}"
+        # The threshold is the PROFILE's, unchanged. Only its usability is checked: a
+        # malformed token_count_max used to raise TypeError from inside the gate and
+        # take the whole classification with it.
+        raw_max = triggers.get("token_count_max", _DEFAULT_TOKEN_COUNT_MAX)
+        max_tokens = _usable_count(raw_max)
+        if max_tokens is None:
+            raw_max = _DEFAULT_TOKEN_COUNT_MAX
+            max_tokens = float(_DEFAULT_TOKEN_COUNT_MAX)
+        token_count = _usable_count(signals.get("token_count"))
+        # An absent or unreadable token_count means we cannot confirm the response is
+        # short. Carry on detecting rather than suppressing on a signal we cannot read.
+        if token_count is not None and token_count < max_tokens:
+            gate_reason = f"{SUPPRESSION_REASON_SHORT_PREFIX}{raw_max}"
 
     if gate_reason is None:
         return None
@@ -322,6 +427,8 @@ def check_mode_gate(profile: dict, signals: dict) -> Optional[Dict[str, Any]]:
     return {
         "risk": "LOW",
         "confidence": 0.0,
+        # See check_empty_output_gate: a suppression can never carry block authority.
+        "gate_action": "advise",
         "evidence_depth_limited": True,
         "model_detected": profile.get("model", "unknown"),
         "detection_method": "tool_surface_suppressed",

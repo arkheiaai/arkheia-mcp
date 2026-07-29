@@ -27,19 +27,14 @@ location a security property, not a convenience: under the npm install PYTHON_DI
 global node_modules tree (e.g. /opt/homebrew/lib/node_modules), so the relative default put a
 private knowledge graph in a shared, world-readable directory.
 
-ACCESS CONTROL, not scrubbing — the deliberate choice for observation content.
-Observation text is written to sqlite verbatim; there is no secret-redaction pass equivalent to
-proxy/audit/redactor.py, and that asymmetry with the audit log is intentional:
-  * An audit record is CAPTURED traffic that exists to be read by a principal who did not write it,
-    so its reader cannot be restricted and redaction is the only available control.
-  * A memory observation is AUTHORED — a statement an agent deliberately chose to persist — and it
-    is retrieved by the same principal that wrote it, from the same local stdio server. Redaction
-    here is lossy, irreversible and SILENT: it would mutilate a fact the agent meant to keep while
-    returning no indication that it had done so, which is the silent-degradation failure the
-    loud-failure invariant exists to forbid.
-So the control is the OS boundary — and it is now ASSERTED rather than assumed: the directory is
-created 0700 and the database file is chmod'ed 0600. Previously both inherited the umask (measured:
-dir 0755, file 0644 — world-readable).
+ACCESS CONTROL AND REDACTION.
+The store has two confidentiality controls, both required:
+  * the OS boundary — directory 0700 and database file 0600, because the npm install path may live
+    under a shared node_modules tree; and
+  * the shared audit redactor — every caller-supplied field that is persisted is passed through
+    proxy.audit.redactor.redact() before it reaches sqlite. This is the same implementation pinned
+    by tests/test_audit_redactor_floor.py, not a second memory-only scrubber.
+Previously the directory and file inherited the umask (measured: dir 0755, file 0644 — world-readable).
 
 PRECONDITION on that choice: this holds only while the store is single-tenant and local. There is
 NO tenant or principal column on any table and `retrieve_entities` returns any name-matching row,
@@ -61,11 +56,8 @@ Two properties of the receipt are consequences of the decisions above, not incid
     because the confidentiality boundary of this store is the filesystem. A receipt about a private
     graph written to a package-relative or shared path — which is what the other services on this
     rail default to — would re-open the very hole the DB path fix closed.
-  * It records IDENTIFIERS, COUNTS AND FINGERPRINTS, never the authored text. Observation content
-    is deliberately unscrubbed HERE (see ACCESS CONTROL above); the audit rail redacts everything it
-    writes, so copying observations into a receipt would subject them to precisely the silent lossy
-    rewrite that ruling rejects — and would make the receipt log a second, differently-retained copy
-    of the graph. Attribution is carried by entity_id/rel_id, the actual primary keys.
+  * It records IDENTIFIERS, COUNTS AND FINGERPRINTS, never the authored text. The graph is the only
+    content store; the receipt is evidence about the graph, not a second copy of it.
 """
 
 from __future__ import annotations
@@ -78,6 +70,7 @@ from datetime import datetime
 from pathlib import Path
 
 from mcp_server import receipts
+from proxy.audit.redactor import redact
 
 logger = logging.getLogger(__name__)
 
@@ -233,10 +226,10 @@ def _enforce_mode(target: Path, mode: int) -> None:
         os.chmod(target, mode)
     except OSError as exc:
         logger.warning(
-            "memory: could not set mode %o on %s (%s). The knowledge graph stores "
-            "observation text unredacted and relies on filesystem permissions as its "
-            "only confidentiality control; on this filesystem that control is NOT in "
-            "effect and the graph may be readable by other local users.",
+            "memory: could not set mode %o on %s (%s). The knowledge graph relies on "
+            "owner-only filesystem permissions as one confidentiality control; on this "
+            "filesystem that control is NOT in effect and the graph may be readable by "
+            "other local users.",
             mode, target, exc,
         )
 
@@ -308,6 +301,25 @@ def _validate_limit(limit: int) -> int:
             limit_requested=repr(limit),
         )
     return min(limit, MAX_RETRIEVE_LIMIT)
+
+
+def _validate_retrieve_query(query: str) -> str:
+    """
+    Refuse search strings SQLite LIKE cannot safely interpret literally.
+
+    Python binds the full string, but SQLite's LIKE implementation treats NUL as a string
+    terminator for pattern matching. Without this guard, "%\x00%" behaves as "%", so a
+    query for a NUL byte discloses the whole graph while looking like a literal search.
+    """
+    if "\x00" in query:
+        raise _refusal(
+            "memory_retrieve: query contains a NUL byte. SQLite LIKE treats NUL as a "
+            "terminator, so accepting it would turn a literal search into a whole-graph "
+            "wildcard.",
+            reason="query_contains_nul",
+            query_fingerprint=receipts.fingerprint(query),
+        )
+    return query
 
 
 def _init_schema(conn: sqlite3.Connection) -> None:
@@ -481,6 +493,14 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
         receipt_id:          Id of the decision receipt for this call
         receipt:             "recorded" | "unrecorded" — whether that receipt reached disk
     """
+    # Every caller-supplied field is scrubbed through the shared redactor
+    # BEFORE it reaches sqlite -- this is the only redaction implementation in
+    # the repo (proxy/audit/redactor.py), reused rather than re-implemented.
+    # Redacting here (not just `observations`) also keeps the entity's lookup
+    # key consistent between the SELECT below and the INSERT that follows it.
+    name = redact(name)
+    entity_type = redact(entity_type)
+
     conn = _get_conn()
     try:
         _init_schema(conn)
@@ -515,7 +535,8 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
 
         added = 0
         added_fingerprints: list[str] = []
-        for content in observations:
+        for raw_content in observations:
+            content = redact(raw_content)
             if content not in existing:
                 conn.execute(
                     "INSERT INTO observations (obs_id, entity_id, content, created_at) VALUES (?, ?, ?, ?)",
@@ -585,6 +606,7 @@ async def retrieve_entities(
     limit_requested = repr(limit)
     try:
         limit = _validate_limit(limit)
+        query = _validate_retrieve_query(query)
     except ValueError as exc:
         # A refused read is a decision this tool made and must be evidenced, not just
         # raised. Without it, "the agent never searched" and "the agent searched and was
@@ -706,10 +728,20 @@ async def store_relation(
         receipt_id — id of the decision receipt for this call
         receipt     — "recorded" | "unrecorded", whether that receipt reached disk
     """
+    # Scrub before the INSERT, same as store_entity above.
+    from_entity = redact(from_entity)
+    relation_type = redact(relation_type)
+    to_entity = redact(to_entity)
+    if from_entity_type is not None:
+        from_entity_type = redact(from_entity_type)
+    if to_entity_type is not None:
+        to_entity_type = redact(to_entity_type)
+
     conn = _get_conn()
     refusal: ValueError | None = None
     try:
         _init_schema(conn)
+        conn.execute("BEGIN IMMEDIATE")
 
         try:
             from_id = _resolve_endpoint(conn, "from_entity", from_entity, from_entity_type)
@@ -719,6 +751,7 @@ async def store_relation(
             # evidenced with the connection already closed, so nothing about the receipt
             # path can hold a transaction open on the graph.
             refusal = exc
+            conn.rollback()
         else:
             rel_id = str(uuid.uuid4())
             now = datetime.utcnow().isoformat()
@@ -736,6 +769,10 @@ async def store_relation(
                 "from_entity_id": from_id,
                 "to_entity_id": to_id,
             }
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
     finally:
         conn.close()
 

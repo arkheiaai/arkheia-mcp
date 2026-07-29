@@ -31,12 +31,12 @@ THREE DELIBERATE DIVERGENCES FROM `registry_server/receipts.py`
 1. **The log path is supplied by the caller, not defaulted here.** The registry defaults
    to a package-relative path — the repo root. For this flow that is the exact defect
    this branch just fixed: under the npm install the package tree is inside a shared,
-   world-readable `node_modules`, and the memory store's confidentiality boundary IS the
-   filesystem (observation text is deliberately not scrubbed — see the memory module
-   docstring). A receipt about a private graph must be at least as protected as the
-   graph, so `mcp_server.tools.memory` resolves the path next to the DB, inside the same
-   0700 directory, and chmods the file 0600. Path policy lives with the store that owns
-   it; this module stays a rail.
+   world-readable `node_modules`, and the memory store's local confidentiality boundary
+   includes the filesystem. Caller-supplied fields are also redacted before sqlite writes.
+   A receipt about a private graph must be at least as protected as the graph, so
+   `mcp_server.tools.memory` resolves the path next to the DB, inside the same 0700
+   directory, and chmods the file 0600. Path policy lives with the store that owns it;
+   this module stays a rail.
 
 2. **The write is drained before `emit` returns.** The registry is a long-lived HTTP
    server whose lifespan flushes the queue on shutdown, so fire-and-forget is safe there.
@@ -74,12 +74,11 @@ piece of free text (entity name, observation content, search query).
 
 Two reasons, both load-bearing:
 
-* The prior ruling on this flow is that observation text is NOT scrubbed, because it is
-  authored rather than captured and a silent lossy rewrite would destroy a fact the agent
-  meant to keep (pinned by `TestObservationsAreStoredVerbatim`). `AuditWriter` runs every
-  record through `proxy.audit.redactor.redact` before it touches disk — so putting
-  observation text in a receipt would subject it to exactly the silent rewrite that ruling
-  forbids. Fingerprints are immune to the redactor by construction.
+* The graph write path already applies `proxy.audit.redactor.redact` to caller-supplied
+  fields before sqlite writes. The receipt must not re-copy the pre-redaction text into
+  an audit log with a different lifecycle. Fingerprints are immune to the redactor by
+  construction and tie the receipt to the stored value without making the receipt a second
+  content store.
 * A receipt log that contained the observations would be a second copy of the knowledge
   graph, with a different retention (`AuditWriter.purge_old_records`) and a different
   lifecycle from the DB it describes. The receipt's job is to evidence the change, not to

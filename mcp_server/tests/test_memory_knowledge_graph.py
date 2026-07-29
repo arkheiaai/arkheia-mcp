@@ -15,11 +15,11 @@ WHY THESE TESTS EXIST — each is anchored to a defect that was live on origin/m
          could see the other's; the files landed at <cwd>/C:/arkheia-mcp/data/memory.db. Nothing
          raised. A retrieve that misses is indistinguishable from "not stored yet".
 
-  INV-2  The store's confidentiality boundary is ASSERTED, not assumed. Observation text is
-         written verbatim (deliberately — see the module docstring's ACCESS CONTROL note), so the
-         only control is the OS one. Measured on master: directory 0755, file 0644 — world
-         readable — and under the npm install that directory sits inside the global node_modules
-         tree.
+  INV-2  The store's local confidentiality boundary is ASSERTED, not assumed. The shared redactor
+         also scrubs persisted caller-supplied fields before sqlite writes; these file-mode tests
+         pin the separate OS boundary. Measured on the original defect: directory 0755, file 0644 —
+         world readable — and under the npm install that directory sits inside the global
+         node_modules tree.
 
   INV-3  A search string is matched LITERALLY. `f"%{query}%"` went straight into LIKE, so
          query="%" returned the entire graph and "auth_middleware" also matched "authXmiddleware".
@@ -43,6 +43,7 @@ does match — otherwise "nothing came back" would pass against a store that ret
 
 from __future__ import annotations
 
+import inspect
 import os
 import sqlite3
 import subprocess
@@ -242,10 +243,10 @@ class TestStoreIsOwnerPrivate:
         """
         A permission control that cannot be applied must SAY SO.
 
-        The store deliberately does not scrub observation text and names the filesystem as
-        its only confidentiality control, so a chmod that fails silently would leave the
-        operator believing in a boundary that was never set — the "guard wired but switched
-        off" defect. Memory must still work (some filesystems cannot express 0600), so the
+        The store uses the shared redactor and also names the filesystem as a local
+        confidentiality control, so a chmod that fails silently would leave the operator
+        believing in a boundary that was never set — the "guard wired but switched off"
+        defect. Memory must still work (some filesystems cannot express 0600), so the
         contract is: proceed, and warn loudly.
 
         Pinned on the WARNING level and on the message actually naming the consequence, not
@@ -335,6 +336,28 @@ class TestSearchIsLiteral:
         result = await retrieve_entities("auth_middleware", entity_type="bug")
 
         assert [e["name"] for e in result["entities"]] == ["auth_middleware bug"]
+
+    @pytest.mark.asyncio
+    async def test_nul_query_is_refused_not_reinterpreted_as_whole_graph(self, db):
+        """
+        SQLite LIKE treats NUL as a terminator inside the pattern implementation. Bound
+        TEXT containing "\\x00" must therefore fail closed rather than turning
+        "%\\x00%" into the whole-graph wildcard "%".
+
+        Positive control: the graph is populated and an ordinary literal query still
+        returns exactly one row.
+        """
+        await store_entity("Acme Corp", "company", ["x"])
+        await store_entity("Beta Ltd", "company", ["y"])
+
+        with pytest.raises(ValueError) as exc:
+            await retrieve_entities("\x00")
+
+        assert "NUL" in str(exc.value)
+        assert "receipt" in str(exc.value)
+
+        control = await retrieve_entities("Acme")
+        assert [e["name"] for e in control["entities"]] == ["Acme Corp"]
 
 
 # ---------------------------------------------------------------------------
@@ -605,38 +628,30 @@ class TestCrossProcessGraphIdentity:
 # The scrub-vs-access-control decision, pinned as a test
 # ---------------------------------------------------------------------------
 
-class TestObservationsAreStoredVerbatim:
+class TestMemoryWritesUseSharedRedactor:
     """
-    Defect 2 of this flow was "observation text reaches sqlite with no scrub". The
-    ruling (argued in the PR body and in the module docstring) is that the remedy is
-    ACCESS CONTROL, not redaction: observations are authored, not captured, and are read
-    back by the principal that wrote them, so a silent lossy rewrite would destroy a fact
-    the agent deliberately kept while telling it nothing.
-
-    That ruling is pinned HERE so it is a decision with a test behind it rather than a
-    comment. If a future change adds redaction on the write path, this test fails and
-    forces the ledger entry and the threat model to be revisited rather than drifting.
+    This branch still asserts the local filesystem boundary, but it must not regress the
+    shared redactor fix that already landed on master. Persisted caller-supplied fields
+    go through proxy.audit.redactor.redact() before sqlite writes.
     """
 
     @pytest.mark.asyncio
-    async def test_content_round_trips_byte_identical(self, db):
+    async def test_secret_shaped_observation_is_redacted_before_sqlite(self, db):
         observation = "staging DSN is postgres://svc:hunter2@db.internal:5432/app"
 
         await store_entity("staging env", "environment", [observation])
         result = await retrieve_entities("staging env")
 
-        assert [o["content"] for o in result["entities"][0]["observations"]] == [observation]
+        stored = [o["content"] for o in result["entities"][0]["observations"]]
+        assert len(stored) == 1
+        assert "hunter2" not in stored[0]
+        assert "[REDACTED:" in stored[0]
 
     @pytest.mark.asyncio
-    async def test_no_redactor_is_imported_by_the_memory_module(self):
-        """
-        The companion half: the decision is 'no scrub', so the absence of a redaction
-        import is asserted deliberately, with the reason on the record. Paired with the
-        round-trip test above as its positive control.
-        """
+    async def test_memory_module_imports_the_shared_redactor(self):
         src = (_REPO_ROOT / "mcp_server" / "tools" / "memory.py").read_text()
-        assert "from proxy.audit.redactor import" not in src
-        assert not hasattr(memory_mod, "redact")
+        assert "from proxy.audit.redactor import redact" in src
+        assert hasattr(memory_mod, "redact")
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +833,20 @@ class TestRelationsAreKeyedByIdentity:
 
         assert row["from_entity_id"] == person["entity_id"]
         assert row["to_entity_id"] == acme["entity_id"]
+
+    def test_endpoint_resolution_and_relation_insert_are_one_write_transaction(self):
+        """
+        The endpoint existence check is not a proof if another writer can change the
+        graph before the INSERT. The public relation path must take a write lock before
+        resolving endpoints and hold it through the insert.
+        """
+        source = inspect.getsource(memory_mod.store_relation)
+        begin = source.index('conn.execute("BEGIN IMMEDIATE")')
+        resolve = source.index("_resolve_endpoint")
+        insert = source.index("INSERT INTO relations")
+        commit = source.index("conn.commit()", insert)
+
+        assert begin < resolve < insert < commit
 
     @pytest.mark.asyncio
     async def test_same_name_different_type_each_keeps_its_own_edges(self, db):

@@ -51,7 +51,7 @@ All non-secret options live here. Key settings:
 | `proxy.port` | `8099` | Port the proxy listens on |
 | `proxy.log_level` | `INFO` | `DEBUG` / `INFO` / `WARNING` |
 | `detection.profile_dir` | `../profiles` | Path to profile YAML files |
-| `detection.high_risk_action` | `warn` | `warn` or `block` on HIGH detections |
+| `detection.high_risk_action` | `warn` | `warn` or `block` on HIGH detections. **`block` is a request, not an authorisation** — see "What actually blocks" below. |
 | `detection.unknown_action` | `pass` | `pass`, `warn`, or `block` on UNKNOWN |
 | `detection.interception_enabled` | `false` | Enable transparent `/v1/*` proxy mode |
 | `detection.upstream_url` | `` | Upstream AI API base URL (e.g. `https://api.openai.com`) |
@@ -151,11 +151,49 @@ detection:
 
 The middleware:
 - Intercepts all `/v1/*` requests
-- Forwards to `upstream_url` transparently
+- Forwards to `upstream_url` transparently, relaying the upstream's own status code and headers
 - Runs detection on the response
-- Adds `X-Arkheia-Risk: LOW|MEDIUM|HIGH|UNKNOWN` header to every response
-- On HIGH + warn: prepends `[ARKHEIA WARNING: HIGH RISK DETECTED]` to the response body
-- On HIGH + block: returns `{"error":"arkheia_blocked","risk_level":"HIGH"}` (still HTTP 200)
+- Signals the verdict in **headers only** — the response body is never modified:
+  - `X-Arkheia-Risk: LOW|MEDIUM|HIGH|UNKNOWN|UNAVAILABLE|ERROR|REFUSED`
+  - `X-Arkheia-Action` — what the proxy DID (`block`/`warn`/`pass`/`refused`/…)
+  - `X-Arkheia-Gate-Action` — the AUTHORITATIVE gate (`block`/`advise`)
+  - `X-Arkheia-Policy-Action` — your configured intent (`block`/`warn`/`pass`)
+  - `X-Arkheia-Detection-Id` — quote this when raising a support ticket
+- On an authorised block: returns `{"error":"arkheia_blocked", …, "reason", "remedy", "receipt"}`
+  (still HTTP 200)
+
+### What actually blocks
+
+**Setting `high_risk_action: block` is not sufficient to withhold a response.** A hard block
+also requires the model profile to have EARNED the gate: `gate_action == "block"`, which a
+profile gets only by declaring it AND carrying a validated `precision` and `f1` within the
+false-positive ceiling. Every other profile — including any model you have not characterised
+— resolves to `advise`.
+
+If policy says `block` and the gate says `advise`, the request is **warned, not blocked**: the
+answer is delivered and the response carries `X-Arkheia-Action: warn`,
+`X-Arkheia-Gate-Action: advise`, `X-Arkheia-Policy-Action: block`. The same two fields appear
+on the audit row, so you can tell a downgraded block from an ordinary warning. This is
+deliberate: enforcing on policy intent alone hard-blocks customers on profiles that never
+earned the right to.
+
+### Which request headers are forwarded upstream
+
+The forward leg is an **allow-list**. Only these are relayed to `upstream_url`:
+
+`authorization`, `x-api-key`, `api-key`, `anthropic-version`, `anthropic-beta`,
+`openai-organization`, `openai-project`, `openai-beta`, `content-type`, `accept`,
+`idempotency-key`
+
+Everything else is dropped, including anything not yet invented. Notably excluded:
+`cookie` (a credential for a different origin), `x-forwarded-*` / `forwarded` / `x-real-ip`
+(your network topology), `x-arkheia-*` (proxy-domain signalling), `user-agent` / `referer` /
+`origin` (caller fingerprinting), `accept-encoding` (the proxy negotiates and decodes), and
+all RFC 9110 hop-by-hop fields. `host` and `content-length` are set by the proxy from the
+resolved destination and the body it actually sends.
+
+If an upstream you use requires a header that is not on this list, that is a bug in the list
+— report it and it will be added with a reason.
 
 Clients that do not route through `/v1/*` can use the explicit `POST /detect/verify` endpoint directly.
 

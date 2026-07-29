@@ -223,23 +223,38 @@ def test_key_loader_no_cache():
 # ---------------------------------------------------------------------------
 
 def test_integrity_no_manifest():
-    """No manifest file should pass (dev mode)."""
-    from proxy.license.integrity import verify_integrity
+    """No manifest must NOT block, and must NOT read as a pass either.
+
+    Updated 2026-07-26 (Codex finding 4): `verify_integrity` used to return `True`
+    both here and for a fully verified artifact, which is exactly the collapse that
+    let proxy/main.py treat a tamper like a missing manifest. The two states are now
+    distinct, so this test asserts the state rather than the truthiness.
+    """
+    from proxy.license.integrity import IntegrityStatus, verify_integrity
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        assert verify_integrity(Path(tmpdir)) is True
+        report = verify_integrity(Path(tmpdir))
+        assert report.status == IntegrityStatus.UNVERIFIED_NO_MANIFEST
+        assert report.verified is False
 
 
 def test_integrity_valid_manifest():
     """Valid manifest should pass verification."""
-    from proxy.license.integrity import generate_manifest, verify_integrity
+    from proxy.license.integrity import (
+        IntegrityStatus,
+        generate_manifest,
+        verify_integrity,
+    )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         p = Path(tmpdir)
         # Create a fake .so file
         (p / "features.cpython-312.so").write_bytes(b"fake compiled module content")
         generate_manifest(p, p / "integrity_manifest.json")
-        assert verify_integrity(p) is True
+        report = verify_integrity(p)
+        assert report.status == IntegrityStatus.VERIFIED
+        assert report.verified is True
+        assert report.modules_checked == 1
 
 
 def test_integrity_tampered_module():
