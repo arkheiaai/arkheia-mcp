@@ -20,6 +20,7 @@ set -euo pipefail
 HOSTED_URL="${ARKHEIA_HOSTED_URL:-https://arkheia-proxy-production.up.railway.app}"
 API_KEY="${ARKHEIA_API_KEY:-}"
 EMAIL=""
+VALIDATE_HOSTED_URL_ONLY=0
 
 # ---------------------------------------------------------------------------
 # Colours (disabled if not a terminal)
@@ -43,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --api-key)  API_KEY="$2"; shift 2 ;;
         --email)    EMAIL="$2"; shift 2 ;;
+        --validate-hosted-url-only) VALIDATE_HOSTED_URL_ONLY=1; shift ;;
         --help|-h)
             echo "Usage: curl -fsSL https://arkheia.ai/install-mcp | bash"
             echo ""
@@ -60,26 +62,28 @@ done
 # ---------------------------------------------------------------------------
 info "Checking prerequisites..."
 
-# Node.js 18+
-if ! command -v node &>/dev/null; then
-    fail "Node.js is required but not found. Install from https://nodejs.org"
-fi
-NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
-if [ "$NODE_VERSION" -lt 18 ]; then
-    fail "Node.js 18+ required (found v$(node -v)). Update from https://nodejs.org"
-fi
-ok "Node.js $(node -v)"
+if [ "$VALIDATE_HOSTED_URL_ONLY" -eq 0 ]; then
+    # Node.js 18+
+    if ! command -v node &>/dev/null; then
+        fail "Node.js is required but not found. Install from https://nodejs.org"
+    fi
+    NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
+    if [ "$NODE_VERSION" -lt 18 ]; then
+        fail "Node.js 18+ required (found v$(node -v)). Update from https://nodejs.org"
+    fi
+    ok "Node.js $(node -v)"
 
-# npx
-if ! command -v npx &>/dev/null; then
-    fail "npx is required but not found. It should come with Node.js."
+    # npx
+    if ! command -v npx &>/dev/null; then
+        fail "npx is required but not found. It should come with Node.js."
+    fi
 fi
 
 # Python 3.10+
 PYTHON_CMD=""
 for cmd in python3 python; do
     if command -v "$cmd" &>/dev/null; then
-        PY_VERSION=$("$cmd" --version 2>&1 | grep -oP '\d+\.\d+' | head -1)
+        PY_VERSION=$("$cmd" --version 2>&1 | sed -E 's/.* ([0-9]+)\.([0-9]+).*/\1.\2/' | head -1)
         PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
         PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
         if [ "$PY_MAJOR" -ge 3 ] && [ "$PY_MINOR" -ge 10 ]; then
@@ -92,6 +96,78 @@ if [ -z "$PYTHON_CMD" ]; then
     fail "Python 3.10+ is required but not found. Install from https://python.org"
 fi
 ok "Python $($PYTHON_CMD --version 2>&1)"
+
+authorize_hosted_url() {
+    "$PYTHON_CMD" - "$HOSTED_URL" "${ARKHEIA_ALLOW_UNSAFE_HOSTED_URL:-}" <<'PY'
+import ipaddress
+import sys
+from urllib.parse import urlsplit, urlunsplit
+
+DEFAULT = "https://arkheia-proxy-production.up.railway.app"
+TRUE_VALUES = {"1", "true", "yes", "on"}
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def default_port(scheme):
+    return 80 if scheme == "http" else 443
+
+
+def self_hosted(host):
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+        return True
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return addr.is_loopback or addr.is_private or addr.is_link_local
+
+
+raw = (sys.argv[1] or DEFAULT).strip() or DEFAULT
+allow_unsafe = sys.argv[2].strip().lower() in TRUE_VALUES
+parsed = urlsplit(raw)
+scheme = parsed.scheme.lower()
+host = (parsed.hostname or "").lower()
+
+if scheme not in {"http", "https"} or not host:
+    fail("hosted URL must be an absolute http(s) URL")
+if parsed.username or parsed.password:
+    fail("hosted URL must not contain userinfo")
+if parsed.query or parsed.fragment:
+    fail("hosted URL must not contain query or fragment")
+try:
+    port = parsed.port
+except ValueError:
+    fail("hosted URL contains an invalid port")
+
+netloc = host
+if port is not None and port != default_port(scheme):
+    netloc = f"{netloc}:{port}"
+path = parsed.path.rstrip("/")
+base_url = urlunsplit((scheme, netloc, path, "", ""))
+origin = urlunsplit((scheme, netloc, "", "", ""))
+is_self_hosted = self_hosted(host)
+
+if not allow_unsafe and origin != DEFAULT and not is_self_hosted:
+    fail(
+        "hosted URL is not the approved Arkheia production authority; "
+        "set ARKHEIA_ALLOW_UNSAFE_HOSTED_URL=1 only for trusted custom endpoints"
+    )
+if not allow_unsafe and scheme != "https" and not is_self_hosted:
+    fail("hosted URL must use HTTPS")
+
+print(base_url)
+PY
+}
+
+AUTHORIZED_HOSTED_URL=$(authorize_hosted_url) || fail "Refusing ARKHEIA_HOSTED_URL=${HOSTED_URL}"
+if [ "$VALIDATE_HOSTED_URL_ONLY" -eq 1 ]; then
+    echo "$AUTHORIZED_HOSTED_URL"
+    exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # API Key provisioning
@@ -114,23 +190,23 @@ if [ -z "$API_KEY" ]; then
     fi
 
     # Validate email format before sending (prevent injection in JSON payload)
-    if ! echo "$EMAIL" | grep -qP '^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$'; then
+    if [[ ! "$EMAIL" =~ ^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$ ]]; then
         fail "Invalid email format: ${EMAIL}"
     fi
 
     # Call the provisioning endpoint — email is validated above, payload built safely
     PROVISION_PAYLOAD=$(printf '{"email": "%s"}' "$EMAIL")
     PROVISION_RESPONSE=$(curl -sS -w "\n%{http_code}" \
-        -X POST "${HOSTED_URL}/v1/provision" \
+        -X POST "${AUTHORIZED_HOSTED_URL}/v1/provision" \
         -H "Content-Type: application/json" \
-        -d "$PROVISION_PAYLOAD" 2>&1) || fail "Failed to reach ${HOSTED_URL}"
+        -d "$PROVISION_PAYLOAD" 2>&1) || fail "Failed to reach ${AUTHORIZED_HOSTED_URL}"
 
     HTTP_CODE=$(echo "$PROVISION_RESPONSE" | tail -1)
     BODY=$(echo "$PROVISION_RESPONSE" | sed '$d')
 
     case "$HTTP_CODE" in
         201)
-            API_KEY=$(echo "$BODY" | grep -oP '"api_key"\s*:\s*"[^"]*"' | head -1 | cut -d'"' -f4)
+            API_KEY=$(printf '%s' "$BODY" | "$PYTHON_CMD" -c 'import json, sys; print(json.load(sys.stdin).get("api_key", ""))' 2>/dev/null || true)
             if [ -z "$API_KEY" ]; then
                 fail "Provisioning succeeded but could not parse API key from response."
             fi
@@ -157,7 +233,7 @@ fi
 # ---------------------------------------------------------------------------
 info "Verifying API key..."
 VERIFY_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
-    -X POST "${HOSTED_URL}/v1/detect" \
+    -X POST "${AUTHORIZED_HOSTED_URL}/v1/detect" \
     -H "Content-Type: application/json" \
     -H "X-Arkheia-Key: ${API_KEY}" \
     -d '{"model": "test", "response": "Hello world test."}' 2>&1) || true

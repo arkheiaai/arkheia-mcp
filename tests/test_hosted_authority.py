@@ -3,7 +3,11 @@ from __future__ import annotations
 import base64
 import http.server
 import json
+import os
+from pathlib import Path
 import secrets
+import subprocess
+import sys
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,6 +24,8 @@ from arkheia_common.hosted_authority import (
 from mcp_server.proxy_client import ProxyClient
 from proxy.audit.decision_journal import KEY_LOAD_UNAVAILABLE, KEY_SOURCE_NONE
 from proxy.crypto.profile_crypto import DynamicKeyLoader
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class _CaptureEndpoint(http.server.BaseHTTPRequestHandler):
@@ -116,6 +122,61 @@ def test_unsafe_opt_in_is_required_for_custom_hosted_authorities(monkeypatch):
     decision = authorize_hosted_base_url("https://custom.example.test")
     assert decision.base_url == "https://custom.example.test"
     assert decision.allow_unsafe is True
+
+
+def _run_install_hosted_url_validation(url: str, *, allow_unsafe: bool = False):
+    env = os.environ.copy()
+    env["ARKHEIA_HOSTED_URL"] = url
+    env["PATH"] = f"{Path(sys.executable).parent}{os.pathsep}{env.get('PATH', '')}"
+    if allow_unsafe:
+        env[ALLOW_UNSAFE_HOSTED_URL_ENV] = "1"
+    else:
+        env.pop(ALLOW_UNSAFE_HOSTED_URL_ENV, None)
+    return subprocess.run(
+        ["bash", str(ROOT / "install.sh"), "--validate-hosted-url-only"],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+
+def _last_stdout_line(result) -> str:
+    return result.stdout.strip().splitlines()[-1]
+
+
+def test_installer_refuses_custom_public_hosted_url_before_key_egress():
+    result = _run_install_hosted_url_validation("https://evil.example.test")
+
+    assert result.returncode != 0
+    assert "hosted URL is not the approved Arkheia production authority" in result.stderr
+    assert "Refusing ARKHEIA_HOSTED_URL=https://evil.example.test" in result.stderr
+
+
+def test_installer_allows_default_private_and_explicitly_opted_in_custom_urls():
+    default = _run_install_hosted_url_validation(DEFAULT_HOSTED_API_URL)
+    assert default.returncode == 0, default.stderr
+    assert _last_stdout_line(default) == DEFAULT_HOSTED_API_URL
+
+    private = _run_install_hosted_url_validation("http://127.0.0.1:8098/base/")
+    assert private.returncode == 0, private.stderr
+    assert _last_stdout_line(private) == "http://127.0.0.1:8098/base"
+
+    custom = _run_install_hosted_url_validation(
+        "https://custom.example.test/root",
+        allow_unsafe=True,
+    )
+    assert custom.returncode == 0, custom.stderr
+    assert _last_stdout_line(custom) == "https://custom.example.test/root"
+
+
+def test_installer_key_bearing_curls_use_authorized_hosted_url_not_raw_env():
+    source = (ROOT / "install.sh").read_text(encoding="utf-8")
+
+    assert '"${AUTHORIZED_HOSTED_URL}/v1/provision"' in source
+    assert '"${AUTHORIZED_HOSTED_URL}/v1/detect"' in source
+    assert '"${HOSTED_URL}/v1/provision"' not in source
+    assert '"${HOSTED_URL}/v1/detect"' not in source
 
 
 @pytest.mark.asyncio
