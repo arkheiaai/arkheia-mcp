@@ -23,14 +23,16 @@ Hook for enterprise upgrade:
 """
 
 import hashlib
+import ipaddress
 import logging
 import os
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 from mcp_server.provider_key_custody import provider_api_key
-from mcp_server.tool_registry import REGISTRY, require_network_egress
+from mcp_server.tool_registry import PolicyViolation, REGISTRY, require_network_egress
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ _CLOUD_PROVIDER_TOOL = {
     "google": "run_gemini",
     "together": "run_together",
 }
+_DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 
 
 # ---------------------------------------------------------------------------
@@ -107,6 +110,27 @@ def _provider_failure(
 def _parse_failure(function_name: str, model: str, prompt: str) -> dict:
     logger.error("%s: unexpected response shape for model=%s", function_name, model)
     return _err_response(model, prompt, "parse_error")
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    if host is None:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _local_ollama_base_url(raw_url: str | None = None) -> str:
+    base_url = (
+        raw_url or os.environ.get("OLLAMA_BASE_URL") or _DEFAULT_OLLAMA_BASE_URL
+    ).rstrip("/")
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not _is_loopback_host(parsed.hostname):
+        raise PolicyViolation("run_ollama", "OLLAMA_BASE_URL must resolve to a loopback host")
+    return base_url
 
 
 # ---------------------------------------------------------------------------
@@ -289,15 +313,19 @@ async def call_ollama(
     """
     Call local Ollama model via /api/generate (non-streaming).
 
-    OLLAMA_BASE_URL defaults to http://localhost:11434.
-    No network egress — local eval only.
+    OLLAMA_BASE_URL defaults to http://localhost:11434 and must name a
+    loopback host. Local inference only; remote URLs are refused before any
+    HTTP request is opened.
 
     Returns: {response, model, prompt_hash, eval_count, error}
     """
-    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    try:
+        base_url = _local_ollama_base_url()
+    except PolicyViolation:
+        return _err_response(model, prompt, "ollama_base_url_not_local")
 
     try:
-        async with httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT, trust_env=False) as client:
             resp = await _provider_post(
                 "ollama",
                 client,

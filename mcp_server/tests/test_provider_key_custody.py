@@ -165,6 +165,61 @@ async def test_provider_http_chokepoint_refuses_when_cloud_egress_disabled(monke
 
 
 @pytest.mark.asyncio
+async def test_ollama_refuses_remote_base_url_before_http_client_opens(monkeypatch):
+    class _TripwireClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("remote OLLAMA_BASE_URL must fail before HTTP client opens")
+
+    monkeypatch.setenv("OLLAMA_BASE_URL", "https://attacker.example.invalid")
+    monkeypatch.setattr(providers.httpx, "AsyncClient", _TripwireClient)
+
+    result = await providers.call_ollama("prompt")
+
+    assert result["error"] == "ollama_base_url_not_local"
+    assert result["response"] == "[provider_error: ollama_base_url_not_local]"
+
+
+@pytest.mark.asyncio
+async def test_ollama_loopback_base_url_uses_provider_post_chokepoint(monkeypatch):
+    outbound: list[str] = []
+    client_kwargs: list[dict[str, Any]] = []
+
+    async def fake_provider_post(provider: str, client: Any, url: str, **kwargs: Any):
+        assert provider == "ollama"
+        outbound.append(url)
+        return _OllamaResponse()
+
+    class _OllamaClient:
+        def __init__(self, *args, **kwargs):
+            client_kwargs.append(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _OllamaResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"response": "local", "eval_count": 7}
+
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    monkeypatch.setattr(providers.httpx, "AsyncClient", _OllamaClient)
+    monkeypatch.setattr(providers, "_provider_post", fake_provider_post)
+
+    result = await providers.call_ollama("prompt")
+
+    assert client_kwargs == [{"timeout": providers._OLLAMA_TIMEOUT, "trust_env": False}]
+    assert outbound == ["http://127.0.0.1:11434/api/generate"]
+    assert result["error"] is None
+    assert result["response"] == "local"
+    assert result["eval_count"] == 7
+
+
+@pytest.mark.asyncio
 async def test_gemini_parse_failure_uses_named_placeholder_not_raw_exception(
     monkeypatch,
     caplog,

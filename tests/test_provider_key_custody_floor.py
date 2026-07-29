@@ -26,10 +26,20 @@ PROVIDER_FUNCTIONS = {"call_grok", "call_gemini", "call_together", "call_ollama"
 def _production_py_files() -> list[Path]:
     files = [
         path
-        for path in (ROOT / "mcp_server").rglob("*.py")
-        if "tests" not in path.parts and path.name != "__init__.py"
+        for path in ROOT.rglob("*.py")
+        if "tests" not in path.relative_to(ROOT).parts
+        and ".git" not in path.parts
+        and "__pycache__" not in path.parts
     ]
-    assert len(files) >= 5, (
+    expected = {
+        CUSTODY,
+        PROVIDERS,
+        ROOT / "mcp_server" / "tools" / "__init__.py",
+        ROOT / "proxy" / "__init__.py",
+    }
+    missing = sorted(str(path.relative_to(ROOT)) for path in expected - set(files))
+    assert missing == [], f"provider custody floor missed production files: {missing}"
+    assert len(files) >= 50, (
         f"provider custody floor scanned only {len(files)} production files: "
         f"{[str(p.relative_to(ROOT)) for p in files]}"
     )
@@ -65,20 +75,40 @@ def _call_lines(fn: ast.AST, name: str) -> list[int]:
     ]
 
 
-def _literal_arg(node: ast.Call, index: int) -> str | None:
+def _string_value(node: ast.AST, constants: dict[str, str] | None = None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if constants and isinstance(node, ast.Name):
+        return constants.get(node.id)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _string_value(node.left, constants)
+        right = _string_value(node.right, constants)
+        if left is not None and right is not None:
+            return left + right
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+            elif isinstance(value, ast.FormattedValue):
+                part = _string_value(value.value, constants)
+                if part is None:
+                    return None
+                parts.append(part)
+            else:
+                return None
+        return "".join(parts)
+    return None
+
+
+def _literal_arg(node: ast.Call, index: int, constants: dict[str, str] | None = None) -> str | None:
     if len(node.args) <= index:
         return None
-    arg = node.args[index]
-    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-        return arg.value
-    return None
+    return _string_value(node.args[index], constants)
 
 
-def _literal_slice(node: ast.Subscript) -> str | None:
-    sl = node.slice
-    if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
-        return sl.value
-    return None
+def _literal_slice(node: ast.Subscript, constants: dict[str, str] | None = None) -> str | None:
+    return _string_value(node.slice, constants)
 
 
 class _SecretEnvReadScanner(ast.NodeVisitor):
@@ -88,6 +118,7 @@ class _SecretEnvReadScanner(ast.NodeVisitor):
         self.os_aliases: set[str] = set()
         self.environ_aliases: set[str] = set()
         self.getenv_aliases: set[str] = set()
+        self.string_constants: dict[str, str] = {}
         self.reads: list[tuple[int, str]] = []
 
     def visit_Import(self, node: ast.Import) -> None:
@@ -107,33 +138,43 @@ class _SecretEnvReadScanner(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        self._record_string_constants(node.targets, node.value)
         self._record_aliases(node.targets, node.value)
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         if node.value is not None:
+            self._record_string_constants([node.target], node.value)
             self._record_aliases([node.target], node.value)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
         env_name = None
         if self._is_getenv_func(node.func):
-            env_name = _literal_arg(node, 0)
+            env_name = _literal_arg(node, 0, self.string_constants)
         elif (
             isinstance(node.func, ast.Attribute)
-            and node.func.attr == "get"
+            and node.func.attr not in {"clear", "copy", "items", "keys", "values"}
             and self._is_environ_expr(node.func.value)
         ):
-            env_name = _literal_arg(node, 0)
+            env_name = _literal_arg(node, 0, self.string_constants)
         if env_name in SECRET_ENV_NAMES:
             self.reads.append((node.lineno, env_name))
         self.generic_visit(node)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
-        env_name = _literal_slice(node)
+        env_name = _literal_slice(node, self.string_constants)
         if env_name in SECRET_ENV_NAMES and self._is_environ_expr(node.value):
             self.reads.append((node.lineno, env_name))
         self.generic_visit(node)
+
+    def _record_string_constants(self, targets: list[ast.expr], value: ast.expr) -> None:
+        literal = _string_value(value, self.string_constants)
+        if literal is None:
+            return
+        for target in targets:
+            if isinstance(target, ast.Name):
+                self.string_constants[target.id] = literal
 
     def _record_aliases(self, targets: list[ast.expr], value: ast.expr) -> None:
         names = [t.id for t in targets if isinstance(t, ast.Name)]
@@ -193,6 +234,19 @@ def test_secret_env_scanner_catches_common_bypass_forms() -> None:
         "env assignment": "import os\nenv = os.environ\nx = env.get('XAI_API_KEY')\n",
         "getter assignment": (
             "import os\nget = os.environ.get\nx = get('GOOGLE_API_KEY')\n"
+        ),
+        "environ setdefault": (
+            "import os\nx = os.environ.setdefault('XAI_API_KEY', '')\n"
+        ),
+        "environ pop": "import os\nx = os.environ.pop('GOOGLE_API_KEY', '')\n",
+        "constant name": (
+            "import os\n_SECRET = 'TOGETHER_API_KEY'\nx = os.environ.get(_SECRET)\n"
+        ),
+        "constant concatenation": (
+            "import os\n_SECRET = 'XAI_API' + '_KEY'\nx = os.getenv(_SECRET)\n"
+        ),
+        "constant f-string": (
+            "import os\n_PART = 'GOOGLE'\n_SECRET = f'{_PART}_API_KEY'\nx = os.environ[_SECRET]\n"
         ),
     }
     missed = {name: _secret_env_reads(src) for name, src in snippets.items()}
@@ -340,6 +394,46 @@ def test_cloud_provider_tools_enforce_network_egress_before_calling_provider() -
 
     ollama = funcs["run_ollama"]
     assert _call_lines(ollama, "check"), "run_ollama still needs the registry gate"
-    assert not _call_lines(ollama, "require_network_egress"), (
-        "run_ollama is a local transport and should not require cloud egress"
+
+
+def test_ollama_base_url_is_loopback_validated_before_post() -> None:
+    funcs = _functions(_parse(PROVIDERS))
+    call_ollama = funcs["call_ollama"]
+    validator_lines = _call_lines(call_ollama, "_local_ollama_base_url")
+    post_lines = _call_lines(call_ollama, "_provider_post")
+    client_calls = [
+        node
+        for node in ast.walk(call_ollama)
+        if isinstance(node, ast.Call) and _call_name(node) == "AsyncClient"
+    ]
+
+    assert validator_lines, "call_ollama no longer validates OLLAMA_BASE_URL"
+    assert post_lines, "call_ollama no longer calls the provider post chokepoint"
+    assert min(validator_lines) < min(post_lines), (
+        "call_ollama must validate the base URL before opening the HTTP path; "
+        f"got validator={validator_lines}, post={post_lines}"
     )
+    assert len(client_calls) == 1, (
+        "call_ollama must open exactly one local HTTP client; got "
+        f"{len(client_calls)}"
+    )
+    trust_env_keywords = [
+        kw.value
+        for kw in client_calls[0].keywords
+        if kw.arg == "trust_env"
+    ]
+    assert (
+        len(trust_env_keywords) == 1
+        and isinstance(trust_env_keywords[0], ast.Constant)
+        and trust_env_keywords[0].value is False
+    ), "call_ollama must disable proxy/env transport inheritance with trust_env=False"
+
+
+def test_floor_self_test_catches_setdefault_constant_and_off_root_secret_reads() -> None:
+    snippets = {
+        "setdefault": "import os\nx = os.environ.setdefault('XAI_API_KEY', '')\n",
+        "__init__": "import os as _os\nx = _os.environ.get('GOOGLE_API_KEY')\n",
+        "constant": "import os\n_N='TOGETHER_API_KEY'\nx = os.getenv(_N)\n",
+    }
+    missed = {name: _secret_env_reads(src) for name, src in snippets.items()}
+    assert all(reads for reads in missed.values()), missed
