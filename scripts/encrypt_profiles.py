@@ -3,7 +3,8 @@
 Build-time tool: encrypt all YAML profiles into .yaml.enc files.
 
 Usage:
-    ARKHEIA_PROFILE_MASTER_KEY=<base64-master-key> python scripts/encrypt_profiles.py
+    export ARKHEIA_PROFILE_MASTER_KEY from CI or a local secret manager, then run:
+    python scripts/encrypt_profiles.py
     python scripts/encrypt_profiles.py --key-file /run/secrets/profile-master-key
 
 The master key should be a 32-byte key, base64-encoded.
@@ -46,7 +47,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def _read_key_file(key_file: str) -> str:
-    return Path(key_file).read_text(encoding="utf-8").strip()
+    try:
+        return Path(key_file).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError("Could not read profile key file.") from exc
 
 
 def resolve_master_key(key_cli: str | None = None, key_file: str | None = None) -> bytes:

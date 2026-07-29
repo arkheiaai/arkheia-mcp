@@ -52,7 +52,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def _read_profile_key_file(profile_key_file: str) -> str:
-    return Path(profile_key_file).read_text(encoding="utf-8").strip()
+    try:
+        return Path(profile_key_file).read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise ValueError("Could not read profile key file.") from exc
 
 
 def resolve_profile_key(
