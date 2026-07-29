@@ -433,9 +433,6 @@ function collectBundleFiles(dir, relative = "") {
     const rel = relative ? path.join(relative, entry.name) : entry.name;
     const relPosix = toPosix(rel);
     if (relPosix === PROVENANCE_FILE) continue;
-    if (rel.split(path.sep).includes("__pycache__") || relPosix.endsWith(".pyc")) {
-      continue;
-    }
 
     const absolute = path.resolve(dir, entry.name);
     if (!inside(absolute, BUNDLE_ROOT)) {

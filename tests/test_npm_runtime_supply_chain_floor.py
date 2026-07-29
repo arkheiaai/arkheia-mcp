@@ -147,6 +147,43 @@ def _write_fake_python(fakebin: Path) -> None:
     shutil.copy2(fakebin / "python3", fakebin / "python")
 
 
+def _venv_python_path(home: Path) -> Path:
+    return home / ".arkheia" / "venv" / (
+        "Scripts/python.exe" if os.name == "nt" else "bin/python"
+    )
+
+
+def _write_forged_venv_python(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, sys\n"
+        "log = pathlib.Path(os.environ['ARKHEIA_TEST_LOG'])\n"
+        "log.parent.mkdir(parents=True, exist_ok=True)\n"
+        "with log.open('a', encoding='utf-8') as handle:\n"
+        "    handle.write(json.dumps({\n"
+        "        'kind': 'forged_venv_executed',\n"
+        "        'argv': sys.argv[1:],\n"
+        "        'env': {'ARKHEIA_API_KEY': os.environ.get('ARKHEIA_API_KEY')},\n"
+        "    }) + '\\n')\n"
+        "sys.exit(77)\n",
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+def _provenance_identity(package: Path) -> tuple[dict, str]:
+    provenance = json.loads(
+        (package / "python" / _PROVENANCE).read_text(encoding="utf-8")
+    )
+    req_hash = next(
+        entry["sha256"]
+        for entry in provenance["files"]
+        if entry["path"] == "requirements.txt"
+    )
+    return provenance, req_hash
+
+
 def _run_launcher(package: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603 - node path and cwd are test-controlled
         [npm_bundle.require_node(), "bin/arkheia-mcp.js"],
@@ -226,8 +263,8 @@ def test_dependency_install_is_bounded_to_verified_package_requirements(tmp_path
 
     events = _events(log)
     assert [e["kind"] for e in events].count("forbidden_git") == 0
-    assert [e["kind"] for e in events].count("create_venv") == 1
-    assert [e["kind"] for e in events].count("pip_install") == 1
+    assert [e["kind"] for e in events].count("create_venv") == 2
+    assert [e["kind"] for e in events].count("pip_install") == 2
     assert [e["kind"] for e in events].count("server") == 2
 
     create_venv_event = next(e for e in events if e["kind"] == "create_venv")
@@ -254,14 +291,7 @@ def test_dependency_install_is_bounded_to_verified_package_requirements(tmp_path
     assert server_event["env"]["ARKHEIA_API_KEY"] == _fixture_arkheia_key()
     assert server_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
 
-    provenance = json.loads(
-        (package / "python" / _PROVENANCE).read_text(encoding="utf-8")
-    )
-    req_hash = next(
-        entry["sha256"]
-        for entry in provenance["files"]
-        if entry["path"] == "requirements.txt"
-    )
+    provenance, req_hash = _provenance_identity(package)
     marker = tmp_path / "home" / ".arkheia" / "venv" / ".arkheia-deps-installed.json"
     marker_data = json.loads(marker.read_text(encoding="utf-8"))
     assert marker_data["requirements_sha256"] == req_hash
@@ -275,6 +305,60 @@ def test_dependency_install_is_bounded_to_verified_package_requirements(tmp_path
     assert venv_marker_data["package_version"] == provenance["package"]["version"]
 
 
+def test_forged_venv_marker_cannot_select_the_runtime_interpreter(tmp_path):
+    package = _packed_package(tmp_path)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "events.jsonl"
+    _write_fake_python(fakebin)
+
+    home = tmp_path / "home"
+    forged_python = _venv_python_path(home)
+    _write_forged_venv_python(forged_python)
+    provenance, req_hash = _provenance_identity(package)
+    marker_payload = {
+        "schema": "arkheia.npm.venv.v1",
+        "package_name": provenance["package"]["name"],
+        "package_version": provenance["package"]["version"],
+        "requirements_sha256": req_hash,
+    }
+    (home / ".arkheia" / "venv" / ".arkheia-venv.json").write_text(
+        json.dumps(marker_payload), encoding="utf-8"
+    )
+    deps_payload = {**marker_payload, "schema": "arkheia.npm.deps.v1"}
+    (home / ".arkheia" / "venv" / ".arkheia-deps-installed.json").write_text(
+        json.dumps(deps_payload), encoding="utf-8"
+    )
+
+    result = _run_launcher(package, _base_env(tmp_path, fakebin, log))
+
+    assert result.returncode == 0, result.stderr
+    events = _events(log)
+    assert "forged_venv_executed" not in [e["kind"] for e in events]
+    assert [e["kind"] for e in events].count("create_venv") == 1
+    assert [e["kind"] for e in events].count("pip_install") == 1
+    assert [e["kind"] for e in events].count("server") == 1
+
+
+def test_bytecode_debris_is_not_invisible_to_bundle_provenance(tmp_path):
+    package = _packed_package(tmp_path)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "events.jsonl"
+    _write_fake_python(fakebin)
+
+    pycache = package / "python" / "mcp_server" / "__pycache__"
+    pycache.mkdir()
+    (pycache / "server.cpython-311.pyc").write_bytes(b"unchecked bytecode")
+
+    result = _run_launcher(package, _base_env(tmp_path, fakebin, log))
+
+    assert result.returncode != 0
+    assert "bundle provenance file set does not match" in result.stderr
+    assert "server.cpython-311.pyc" in result.stderr
+    assert _events(log) == []
+
+
 def test_launcher_recreates_unmarked_existing_venv_before_execution(tmp_path):
     package = _packed_package(tmp_path)
     fakebin = tmp_path / "fakebin"
@@ -283,9 +367,7 @@ def test_launcher_recreates_unmarked_existing_venv_before_execution(tmp_path):
     _write_fake_python(fakebin)
 
     home = tmp_path / "home"
-    stale_python = home / ".arkheia" / "venv" / (
-        "Scripts/python.exe" if os.name == "nt" else "bin/python"
-    )
+    stale_python = _venv_python_path(home)
     stale_python.parent.mkdir(parents=True)
     stale_python.write_text(
         f"#!{sys.executable}\n"

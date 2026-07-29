@@ -23,12 +23,14 @@ const { spawn, execFileSync } = require("child_process");
 const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
+const os = require("os");
 
 const PACKAGE_ROOT = path.resolve(__dirname, "..");
-const ARKHEIA_HOME = path.join(
-  process.env.HOME || process.env.USERPROFILE || "/tmp",
-  ".arkheia"
-);
+const USER_HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
+if (!USER_HOME) {
+  fail("could not determine a user home directory for Arkheia runtime state");
+}
+const ARKHEIA_HOME = path.join(USER_HOME, ".arkheia");
 const BUNDLED_PYTHON_DIR = path.join(__dirname, "..", "python");
 const VENV_DIR = path.join(ARKHEIA_HOME, "venv");
 const VENV_MARKER = path.join(VENV_DIR, ".arkheia-venv.json");
@@ -173,9 +175,6 @@ function collectBundleFiles(dir, relative = "") {
     const rel = relative ? path.join(relative, entry.name) : entry.name;
     const relPosix = toPosix(rel);
     if (relPosix === PROVENANCE_RELATIVE) continue;
-    if (rel.split(path.sep).includes("__pycache__") || relPosix.endsWith(".pyc")) {
-      continue;
-    }
 
     const absolute = path.resolve(dir, entry.name);
     if (!inside(absolute, BUNDLED_PYTHON_DIR)) {
@@ -363,11 +362,8 @@ function ensureVenv(python, bundle) {
       ? path.join(VENV_DIR, "Scripts", "python.exe")
       : path.join(VENV_DIR, "bin", "python");
 
-  if (fs.existsSync(venvPython)) {
-    if (venvMarkerMatches(bundle)) {
-      return fs.realpathSync(venvPython);
-    }
-    process.stderr.write("[arkheia] Recreating unverified virtual environment...\n");
+  if (fs.existsSync(VENV_DIR)) {
+    process.stderr.write("[arkheia] Recreating virtual environment from verified package bytes...\n");
     fs.rmSync(VENV_DIR, { recursive: true, force: true });
   }
 
@@ -464,11 +460,7 @@ function main() {
   }
 
   // ── Load config from ~/.arkheia/config.json ──────────────────
-  const configPath = path.join(
-    process.env.HOME || process.env.USERPROFILE || "/tmp",
-    ".arkheia",
-    "config.json"
-  );
+  const configPath = path.join(ARKHEIA_HOME, "config.json");
   let arkheiaConfig = {};
   try {
     if (fs.existsSync(configPath)) {
