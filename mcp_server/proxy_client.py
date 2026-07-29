@@ -18,6 +18,7 @@ from arkheia_common.hosted_authority import (
     DEFAULT_HOSTED_API_URL,
     HostedAuthorityError,
     authorize_hosted_base_url,
+    hosted_key_egress_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -154,7 +155,7 @@ class ProxyClient:
         try:
             authorized = authorize_hosted_base_url(self.hosted_url)
             headers = {"X-Arkheia-Key": self.api_key}
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with hosted_key_egress_client(timeout=self.timeout) as client:
                 resp = await client.post(
                     f"{authorized.base_url}/v1/detect",
                     json=payload,

@@ -26,6 +26,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from arkheia_common.hosted_authority import (
     HostedAuthorityError,
     authorize_hosted_base_url,
+    hosted_key_egress_client,
 )
 from proxy.audit.decision_journal import (
     KEY_LOAD_FETCHED_CACHE,
@@ -226,9 +227,8 @@ class DynamicKeyLoader:
             logger.warning("No API key configured — cannot fetch profile key")
             return None
         try:
-            import httpx
             authorized = authorize_hosted_base_url(self.hosted_url)
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with hosted_key_egress_client(timeout=30) as client:
                 resp = await client.post(
                     f"{authorized.base_url}/v1/profile-key",
                     headers={"X-Arkheia-Key": self.api_key},

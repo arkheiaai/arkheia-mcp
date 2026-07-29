@@ -100,11 +100,25 @@ ok "Python $($PYTHON_CMD --version 2>&1)"
 authorize_hosted_url() {
     "$PYTHON_CMD" - "$HOSTED_URL" "${ARKHEIA_ALLOW_UNSAFE_HOSTED_URL:-}" <<'PY'
 import ipaddress
+import socket
 import sys
 from urllib.parse import urlsplit, urlunsplit
 
 DEFAULT = "https://arkheia-proxy-production.up.railway.app"
 TRUE_VALUES = {"1", "true", "yes", "on"}
+SELF_HOSTED_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "169.254.0.0/16",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+    )
+)
 
 
 def fail(message):
@@ -116,24 +130,46 @@ def default_port(scheme):
     return 80 if scheme == "http" else 443
 
 
-def loopback(host):
+def resolve_host_addresses(host):
     if host == "localhost" or host.endswith(".localhost"):
-        return True
+        return (ipaddress.ip_address("127.0.0.1"),)
     try:
-        addr = ipaddress.ip_address(host)
+        return (ipaddress.ip_address(host),)
     except ValueError:
-        return False
-    return addr.is_loopback
+        pass
+
+    addresses = set()
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return ()
+
+    for _family, _socktype, _proto, _canonname, sockaddr in infos:
+        if not sockaddr:
+            continue
+        try:
+            addresses.add(ipaddress.ip_address(sockaddr[0]))
+        except ValueError:
+            continue
+    return tuple(addresses)
+
+
+def normalize_mapped(addr):
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped if mapped is not None else addr
+
+
+def loopback(host):
+    addresses = resolve_host_addresses(host)
+    return bool(addresses) and all(normalize_mapped(addr).is_loopback for addr in addresses)
 
 
 def self_hosted(host):
-    if loopback(host):
-        return True
-    try:
-        addr = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return addr.is_private or addr.is_link_local
+    addresses = resolve_host_addresses(host)
+    return bool(addresses) and all(
+        any(normalize_mapped(addr) in network for network in SELF_HOSTED_NETWORKS)
+        for addr in addresses
+    )
 
 
 raw = (sys.argv[1] or DEFAULT).strip() or DEFAULT
@@ -159,8 +195,10 @@ if port is not None and port != default_port(scheme):
 path = parsed.path.rstrip("/")
 base_url = urlunsplit((scheme, netloc, path, "", ""))
 origin = urlunsplit((scheme, netloc, "", "", ""))
-is_self_hosted = self_hosted(host)
-is_loopback = loopback(host)
+needs_self_hosted_check = not allow_unsafe and origin != DEFAULT
+is_self_hosted = self_hosted(host) if needs_self_hosted_check else False
+needs_loopback_check = not allow_unsafe and scheme != "https"
+is_loopback = loopback(host) if needs_loopback_check else False
 
 if not allow_unsafe and origin != DEFAULT and not is_self_hosted:
     fail(
@@ -179,6 +217,10 @@ if [ "$VALIDATE_HOSTED_URL_ONLY" -eq 1 ]; then
     echo "$AUTHORIZED_HOSTED_URL"
     exit 0
 fi
+
+hosted_curl() {
+    curl --noproxy '*' "$@"
+}
 
 # ---------------------------------------------------------------------------
 # API Key provisioning
@@ -207,7 +249,7 @@ if [ -z "$API_KEY" ]; then
 
     # Call the provisioning endpoint — email is validated above, payload built safely
     PROVISION_PAYLOAD=$(printf '{"email": "%s"}' "$EMAIL")
-    PROVISION_RESPONSE=$(curl -sS -w "\n%{http_code}" \
+    PROVISION_RESPONSE=$(hosted_curl -sS -w "\n%{http_code}" \
         -X POST "${AUTHORIZED_HOSTED_URL}/v1/provision" \
         -H "Content-Type: application/json" \
         -d "$PROVISION_PAYLOAD" 2>&1) || fail "Failed to reach ${AUTHORIZED_HOSTED_URL}"
@@ -243,7 +285,7 @@ fi
 # Verify the key works
 # ---------------------------------------------------------------------------
 info "Verifying API key..."
-VERIFY_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+VERIFY_CODE=$(hosted_curl -sS -o /dev/null -w "%{http_code}" \
     -X POST "${AUTHORIZED_HOSTED_URL}/v1/detect" \
     -H "Content-Type: application/json" \
     -H "X-Arkheia-Key: ${API_KEY}" \

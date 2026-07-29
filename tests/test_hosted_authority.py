@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -20,6 +21,7 @@ from arkheia_common.hosted_authority import (
     HostedAuthorityDecision,
     HostedAuthorityError,
     authorize_hosted_base_url,
+    hosted_key_egress_client,
 )
 from mcp_server.proxy_client import ProxyClient
 from proxy.audit.decision_journal import KEY_LOAD_UNAVAILABLE, KEY_SOURCE_NONE
@@ -45,6 +47,24 @@ class _CaptureEndpoint(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(type(self).payload)))
         self.end_headers()
         self.wfile.write(type(self).payload)
+
+    def log_message(self, *args):
+        pass
+
+
+class _ProxyEndpoint(http.server.BaseHTTPRequestHandler):
+    requests: list[dict] = []
+
+    def do_POST(self):  # noqa: N802 - http.server hook
+        body = self.rfile.read(int(self.headers.get("content-length", "0")))
+        type(self).requests.append({
+            "path": self.path,
+            "headers": dict(self.headers),
+            "body": body,
+        })
+        self.send_response(502)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def log_message(self, *args):
         pass
@@ -82,8 +102,43 @@ def capture_server():
         thread.join(timeout=5)
 
 
+@pytest.fixture
+def proxy_server():
+    _ProxyEndpoint.requests = []
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _ProxyEndpoint)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    class _Server:
+        @property
+        def url(self) -> str:
+            host, port = server.server_address[:2]
+            return f"http://{host}:{port}"
+
+        @property
+        def requests(self) -> list[dict]:
+            return _ProxyEndpoint.requests
+
+    try:
+        yield _Server()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def _socket_infos(*addresses: str):
+    infos = []
+    for address in addresses:
+        family = socket.AF_INET6 if ":" in address else socket.AF_INET
+        sockaddr = (address, 0, 0, 0) if family == socket.AF_INET6 else (address, 0)
+        infos.append((family, socket.SOCK_STREAM, 6, "", sockaddr))
+    return infos
+
+
 def test_default_policy_allows_only_default_https_arkheia_origin(monkeypatch):
     monkeypatch.delenv(ALLOW_UNSAFE_HOSTED_URL_ENV, raising=False)
+    monkeypatch.setattr(socket, "getaddrinfo", MagicMock(side_effect=socket.gaierror))
 
     decision = authorize_hosted_base_url(DEFAULT_HOSTED_API_URL)
     assert decision.base_url == DEFAULT_HOSTED_API_URL
@@ -100,6 +155,7 @@ def test_default_policy_allows_only_default_https_arkheia_origin(monkeypatch):
 
 def test_default_policy_preserves_local_self_hosted_authorities(monkeypatch):
     monkeypatch.delenv(ALLOW_UNSAFE_HOSTED_URL_ENV, raising=False)
+    monkeypatch.setattr(socket, "getaddrinfo", MagicMock(side_effect=socket.gaierror))
 
     for url in (
         "http://127.0.0.1:8098",
@@ -117,8 +173,37 @@ def test_default_policy_preserves_local_self_hosted_authorities(monkeypatch):
         authorize_hosted_base_url("https://arkheia-proxy.local")
 
 
+def test_self_hosted_hostnames_are_resolved_and_all_addresses_must_be_local(monkeypatch):
+    monkeypatch.delenv(ALLOW_UNSAFE_HOSTED_URL_ENV, raising=False)
+    resolutions = {
+        "internal.example.test": _socket_infos("10.2.3.4", "fd00::1"),
+        "mixed.example.test": _socket_infos("10.2.3.4", "93.184.216.34"),
+        "documentation.example.test": _socket_infos("203.0.113.10"),
+    }
+
+    def fake_getaddrinfo(host, *args, **kwargs):
+        try:
+            return resolutions[host]
+        except KeyError as exc:
+            raise socket.gaierror from exc
+
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+
+    decision = authorize_hosted_base_url("https://internal.example.test:8443/base")
+    assert decision.base_url == "https://internal.example.test:8443/base"
+    assert decision.self_hosted is True
+
+    with pytest.raises(HostedAuthorityError, match="approved Arkheia production authority"):
+        authorize_hosted_base_url("https://mixed.example.test")
+    with pytest.raises(HostedAuthorityError, match="approved Arkheia production authority"):
+        authorize_hosted_base_url("https://documentation.example.test")
+    with pytest.raises(HostedAuthorityError, match="must use HTTPS"):
+        authorize_hosted_base_url("http://internal.example.test")
+
+
 def test_unsafe_opt_in_is_required_for_custom_hosted_authorities(monkeypatch):
     monkeypatch.delenv(ALLOW_UNSAFE_HOSTED_URL_ENV, raising=False)
+    monkeypatch.setattr(socket, "getaddrinfo", MagicMock(side_effect=socket.gaierror))
     with pytest.raises(HostedAuthorityError):
         authorize_hosted_base_url("https://custom.example.test")
 
@@ -150,11 +235,11 @@ def _last_stdout_line(result) -> str:
 
 
 def test_installer_refuses_custom_public_hosted_url_before_key_egress():
-    result = _run_install_hosted_url_validation("https://evil.example.test")
+    result = _run_install_hosted_url_validation("https://203.0.113.10")
 
     assert result.returncode != 0
     assert "hosted URL is not the approved Arkheia production authority" in result.stderr
-    assert "Refusing ARKHEIA_HOSTED_URL=https://evil.example.test" in result.stderr
+    assert "Refusing ARKHEIA_HOSTED_URL=https://203.0.113.10" in result.stderr
 
 
 def test_installer_allows_default_private_and_explicitly_opted_in_custom_urls():
@@ -174,9 +259,9 @@ def test_installer_allows_default_private_and_explicitly_opted_in_custom_urls():
     assert private_http.returncode != 0
     assert "hosted URL must use HTTPS unless it is loopback-local" in private_http.stderr
 
-    local_suffix = _run_install_hosted_url_validation("https://arkheia-proxy.local")
-    assert local_suffix.returncode != 0
-    assert "approved Arkheia production authority" in local_suffix.stderr
+    documentation = _run_install_hosted_url_validation("https://203.0.113.10")
+    assert documentation.returncode != 0
+    assert "approved Arkheia production authority" in documentation.stderr
 
     custom = _run_install_hosted_url_validation(
         "https://custom.example.test/root",
@@ -186,6 +271,34 @@ def test_installer_allows_default_private_and_explicitly_opted_in_custom_urls():
     assert _last_stdout_line(custom) == "https://custom.example.test/root"
 
 
+@pytest.mark.parametrize(
+    "url",
+    (
+        DEFAULT_HOSTED_API_URL,
+        "http://127.0.0.1:8098/base/",
+        "https://10.2.3.4:8098/base/",
+        "http://10.2.3.4:8098/base/",
+        "https://203.0.113.10",
+        "https://user:pass@10.2.3.4",
+        "https://10.2.3.4/path?token=1",
+    ),
+)
+def test_installer_hosted_url_policy_matches_python_policy_for_deterministic_urls(
+    url,
+    monkeypatch,
+):
+    monkeypatch.delenv(ALLOW_UNSAFE_HOSTED_URL_ENV, raising=False)
+    result = _run_install_hosted_url_validation(url)
+
+    try:
+        expected = authorize_hosted_base_url(url).base_url
+    except HostedAuthorityError:
+        assert result.returncode != 0, result.stdout
+    else:
+        assert result.returncode == 0, result.stderr
+        assert _last_stdout_line(result) == expected
+
+
 def test_installer_key_bearing_curls_use_authorized_hosted_url_not_raw_env():
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
 
@@ -193,6 +306,16 @@ def test_installer_key_bearing_curls_use_authorized_hosted_url_not_raw_env():
     assert '"${AUTHORIZED_HOSTED_URL}/v1/detect"' in source
     assert '"${HOSTED_URL}/v1/provision"' not in source
     assert '"${HOSTED_URL}/v1/detect"' not in source
+    assert "hosted_curl() {" in source
+    assert "curl --noproxy '*'" in source
+    assert "VERIFY_CODE=$(hosted_curl" in source
+
+
+def test_hosted_key_egress_client_disables_proxy_environment():
+    with patch("httpx.AsyncClient") as async_client:
+        assert hosted_key_egress_client(timeout=12.5) is async_client.return_value
+
+    async_client.assert_called_once_with(timeout=12.5, trust_env=False)
 
 
 @pytest.mark.asyncio
@@ -211,6 +334,36 @@ async def test_detect_verify_does_not_send_api_key_to_foreign_hosted_url(monkeyp
 
     assert result["error"] == "hosted_authority_rejected"
     post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_key_bearing_hosted_egress_ignores_http_proxy_environment(
+    capture_server,
+    proxy_server,
+    monkeypatch,
+):
+    for name in ("HTTP_PROXY", "http_proxy"):
+        monkeypatch.setenv(name, proxy_server.url)
+    for name in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+
+    client = ProxyClient(
+        base_url="http://local-proxy.invalid",
+        hosted_url=capture_server.url,
+        api_key="ak_live_detect_no_proxy",
+    )
+    client._local_available = False
+    result = await client.verify("prompt", "response", "gpt-4o")
+    assert result["source"] == "hosted"
+
+    loader = DynamicKeyLoader(capture_server.url, "ak_live_profile_no_proxy")
+    assert await loader._fetch_from_hosted() == capture_server.profile_key
+
+    assert [request["path"] for request in capture_server.requests] == [
+        "/v1/detect",
+        "/v1/profile-key",
+    ]
+    assert proxy_server.requests == []
 
 
 @pytest.mark.asyncio
