@@ -19,19 +19,28 @@ PASSING CRITERIA (ProfileValidator):
 """
 
 import hashlib
+import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from proxy.auth import require_auth
+from proxy.audit.decision_journal import RECEIPT_ENQUEUED, RECEIPT_UNAVAILABLE
+from proxy.audit.writer import AuditWriter
+from proxy.endpoints.admin import router as admin_router
 from proxy.registry.client import RegistryClient
 from proxy.registry.receipts import (
     EVENT_REGISTRY_PROFILE_PULL,
     OUTCOME_PROFILE_APPLIED,
     OUTCOME_PROFILE_REJECTED_CHECKSUM_MISSING,
     OUTCOME_PROFILE_REJECTED_VALIDATION,
+    OUTCOME_PULL_SKIPPED_NO_API_KEY,
 )
 from proxy.registry.validator import ProfileValidator
 from proxy.tests._receipt_probe import ReceiptProbe
@@ -89,6 +98,35 @@ def registry_client(tmp_path, mock_router):
         router=mock_router,
         validator=ProfileValidator(),
     )
+
+
+def admin_pull_app(registry_client, writer=None):
+    lifespan = None
+    if writer is not None:
+        @asynccontextmanager
+        async def lifespan(app):
+            await writer.start()
+            try:
+                yield
+            finally:
+                await writer.stop()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(admin_router)
+    app.state.registry_client = registry_client
+    app.dependency_overrides[require_auth] = lambda: "registry-test@example.com"
+    return app
+
+
+class BlackholeWriter:
+    """A rail that accepts writes but leaves the durable log empty."""
+
+    def __init__(self, log_path: Path):
+        self.log_path = log_path
+        self.records = []
+
+    async def write(self, record):
+        self.records.append(record)
 
 
 # ---------------------------------------------------------------------------
@@ -516,3 +554,99 @@ class TestRegistryClient:
         assert row["outcome"] == OUTCOME_PROFILE_APPLIED
         assert row["model_id"] == "llama-3-70b"
         assert row["receipt_status"] == "enqueued"
+
+    def test_manual_pull_http_response_surfaces_receipt_identity_and_status(
+        self, tmp_path, mock_router
+    ):
+        """
+        The caller-visible admin API must carry the receipt identity and status.
+        Returning only "Registry pull completed" leaves the receipt proof
+        unreachable from every HTTP surface.
+        """
+        log_path = tmp_path / "audit.jsonl"
+        writer = AuditWriter(str(log_path))
+        client = RegistryClient(
+            base_url="https://registry.arkheia.ai",
+            api_key=SecretStr("test-api-key"),
+            profile_dir=str(tmp_path / "profiles"),
+            router=mock_router,
+            validator=ProfileValidator(),
+            audit_writer=writer,
+        )
+        app = admin_pull_app(client, writer=writer)
+        registry_response = {
+            "profiles": [{
+                "model_id": "llama-3-70b",
+                "version": "2.0",
+                "download_url": "https://registry.arkheia.ai/profiles/llama-3-70b.yaml",
+            }],
+        }
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            list_resp = MagicMock()
+            list_resp.json.return_value = registry_response
+            list_resp.raise_for_status = MagicMock()
+            mock_client.get.return_value = list_resp
+
+            with TestClient(app) as http:
+                response = http.post("/admin/registry/pull")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "ok"
+        assert payload["updated"] == []
+        assert payload["skipped"] == []
+        assert payload["errors"], "missing-checksum refusal should be caller-visible"
+        receipts = payload["receipts"]
+        assert len(receipts) == 1
+
+        receipt = receipts[0]
+        assert str(uuid.UUID(receipt["decision_id"])) == receipt["decision_id"]
+        assert receipt["receipt_status"] == RECEIPT_ENQUEUED
+        assert receipt["outcome"] == OUTCOME_PROFILE_REJECTED_CHECKSUM_MISSING
+        assert receipt["model_id"] == "llama-3-70b"
+
+        probe = ReceiptProbe(log_path, id_field="decision_id")
+        row = probe.require(receipt["decision_id"])
+        assert row["event_type"] == EVENT_REGISTRY_PROFILE_PULL
+        assert row["outcome"] == receipt["outcome"]
+        assert row["model_id"] == receipt["model_id"]
+        assert row["receipt_status"] == receipt["receipt_status"]
+        assert len(probe.raw_bytes()) > 0
+
+    def test_manual_pull_http_response_does_not_claim_enqueued_for_empty_log(
+        self, tmp_path, mock_router
+    ):
+        """
+        Mutation guard: a rail that accepts the write call but leaves zero
+        durable bytes must surface `unavailable`, not hard-coded `enqueued`.
+        """
+        log_path = tmp_path / "audit.jsonl"
+        writer = BlackholeWriter(log_path)
+        client = RegistryClient(
+            base_url="https://registry.arkheia.ai",
+            api_key=SecretStr(""),
+            profile_dir=str(tmp_path / "profiles"),
+            router=mock_router,
+            validator=ProfileValidator(),
+            audit_writer=writer,
+        )
+        app = admin_pull_app(client)
+
+        with TestClient(app) as http:
+            response = http.post("/admin/registry/pull")
+
+        assert response.status_code == 200
+        payload = response.json()
+        receipts = payload["receipts"]
+        assert len(receipts) == 1
+        receipt = receipts[0]
+        assert str(uuid.UUID(receipt["decision_id"])) == receipt["decision_id"]
+        assert receipt["outcome"] == OUTCOME_PULL_SKIPPED_NO_API_KEY
+        assert receipt["receipt_status"] == RECEIPT_UNAVAILABLE
+        assert ReceiptProbe(log_path, id_field="decision_id").find(
+            receipt["decision_id"]
+        ) is None
+        assert not log_path.exists() or log_path.read_bytes() == b""

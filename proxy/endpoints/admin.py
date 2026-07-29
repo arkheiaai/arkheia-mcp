@@ -699,8 +699,12 @@ async def manual_registry_pull(request: Request, _: str = Depends(require_auth))
         return {"status": "error", "detail": "registry_client not configured"}
 
     try:
-        await registry_client.pull()
-        return {"status": "ok", "message": "Registry pull completed"}
+        result = await registry_client.pull()
+        return {
+            "status": "ok",
+            "message": "Registry pull completed",
+            **result,
+        }
     except Exception as e:
         logger.error("Manual registry pull failed: %s", e)
         return {"status": "error", "detail": str(e)}
