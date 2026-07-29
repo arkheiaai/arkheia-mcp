@@ -14,6 +14,7 @@ from typing import Optional
 
 import httpx
 
+from arkheia_common.egress import egress_async_client
 from arkheia_common.hosted_authority import (
     DEFAULT_HOSTED_API_URL,
     HostedAuthorityError,
@@ -103,7 +104,7 @@ class ProxyClient:
             payload["session_id"] = session_id
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with egress_async_client(timeout=self.timeout) as client:
                 resp = await client.post(
                     f"{self.base_url}/detect/verify",
                     json=payload,
@@ -212,7 +213,7 @@ class ProxyClient:
             params["session_id"] = session_id
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with egress_async_client(timeout=self.timeout) as client:
                 resp = await client.get(
                     f"{self.base_url}/audit/log",
                     params=params,

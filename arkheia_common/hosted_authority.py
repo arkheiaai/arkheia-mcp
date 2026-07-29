@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
+from arkheia_common.egress import egress_async_client
+
 
 DEFAULT_HOSTED_API_URL = "https://arkheia-proxy-production.up.railway.app"
 ALLOW_UNSAFE_HOSTED_URL_ENV = "ARKHEIA_ALLOW_UNSAFE_HOSTED_URL"
@@ -175,6 +177,4 @@ def hosted_key_egress_client(*, timeout: float) -> Any:
     ``trust_env=False`` prevents HTTP(S)_PROXY and ALL_PROXY from receiving
     ``X-Arkheia-Key`` on key-bearing hosted requests.
     """
-    import httpx
-
-    return httpx.AsyncClient(timeout=timeout, trust_env=False)
+    return egress_async_client(timeout=timeout)

@@ -19,6 +19,7 @@ from typing import Optional
 import httpx
 from pydantic import SecretStr
 
+from arkheia_common.egress import egress_async_client
 from proxy.registry.validator import ProfileValidator
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ class RegistryClient:
         errors = []
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with egress_async_client(timeout=30.0) as client:
                 resp = await client.get(
                     f"{self.base_url}/profiles",
                     params=params,
@@ -120,7 +121,7 @@ class RegistryClient:
         download_url = meta["download_url"]
         key_value = self.api_key.get_secret_value()
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with egress_async_client(timeout=30.0) as client:
             resp = await client.get(
                 download_url,
                 headers={"Authorization": f"Bearer {key_value}"},
