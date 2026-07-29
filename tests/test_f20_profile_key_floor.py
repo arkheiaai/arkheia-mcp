@@ -48,7 +48,10 @@ violation in the same file, and each asserts a non-zero examined population.
 The plaintext guard must not key only on ``glob("*.yaml.enc")``. Deleting or
 renaming encrypted files is exactly the bypass, so ``ProfileRouter`` must refuse
 plaintext from policy/trust state, and an explicit plaintext opt-in must leave a
-profile-authentication receipt naming the opt-in.
+profile-authentication receipt naming the opt-in. Audited plaintext development
+is an explicit mode, and startup must carry encrypted inventory seen before key
+resolution into the router policy so a key-fetch outage cannot be followed by a
+silent plaintext load after an unlink/rename race.
 
 WHAT THIS FILE DELIBERATELY DOES NOT CLAIM
 ------------------------------------------
@@ -702,6 +705,8 @@ def _plaintext_policy_guard_violations(tree: ast.Module) -> list[str]:
     init_params = {arg.arg for arg in init.args.args}
     if "encrypted_profile_policy" not in init_params:
         violations.append("ProfileRouter.__init__ has no encrypted_profile_policy parameter")
+    if "plaintext_development_mode" not in init_params:
+        violations.append("ProfileRouter.__init__ has no plaintext_development_mode parameter")
 
     if policy_state is not None:
         attrs = _loaded_attrs(policy_state)
@@ -709,6 +714,8 @@ def _plaintext_policy_guard_violations(tree: ast.Module) -> list[str]:
             violations.append("plaintext policy state ignores explicit encrypted-profile policy")
         if "_decryption_key" not in attrs:
             violations.append("plaintext policy state ignores trusted decryption-key state")
+        if "_plaintext_development_mode" not in attrs:
+            violations.append("plaintext policy state ignores explicit development mode")
 
     requires_value = _assigned_value(load_all, "plaintext_requires_opt_in")
     if requires_value is None:
@@ -761,6 +768,27 @@ def _main_router_policy_wiring_violations(tree: ast.Module) -> list[str]:
             "lifespan constructs ProfileRouter without encrypted_profile_policy; "
             "cold-start unlink/rename plants would fall back to directory inventory"
         )
+    if not any(
+        any(kw.arg == "plaintext_development_mode" for kw in call.keywords)
+        for call in calls
+    ):
+        violations.append(
+            "lifespan constructs ProfileRouter without plaintext_development_mode; "
+            "audited development plaintext would be implicit and silent"
+        )
+
+    encrypted_policy = _assigned_value(lifespan, "encrypted_profile_policy")
+    if encrypted_policy is None:
+        violations.append("lifespan does not assign encrypted_profile_policy")
+    elif "encrypted_inventory_seen" not in _loaded_names(encrypted_policy):
+        violations.append(
+            "encrypted_profile_policy does not carry encrypted inventory seen "
+            "before key resolution; key-fetch outage plus unlink/rename can reopen plaintext"
+        )
+
+    plaintext_development = _assigned_value(lifespan, "plaintext_development_mode")
+    if plaintext_development is None:
+        violations.append("lifespan does not assign plaintext_development_mode")
     return violations
 
 
@@ -837,6 +865,7 @@ def test_inv11_negative_self_test_detects_the_old_enc_glob_guard():
     )
     violations = _plaintext_policy_guard_violations(broken)
     assert any("encrypted_profile_policy" in v for v in violations)
+    assert any("plaintext_development_mode" in v for v in violations)
     assert any("enc_files directly" in v for v in violations)
 
 
@@ -847,6 +876,24 @@ def test_inv11_negative_self_test_detects_startup_not_passing_policy():
     )
     violations = _main_router_policy_wiring_violations(broken)
     assert any("without encrypted_profile_policy" in v for v in violations)
+    assert any("without plaintext_development_mode" in v for v in violations)
+    assert any("encrypted_profile_policy" in v for v in violations)
+
+
+def test_inv11_negative_self_test_detects_startup_dropping_pre_key_inventory():
+    broken = ast.parse(
+        "async def lifespan(app):\n"
+        "    decryption_key, _status = await _resolve_profile_key(audit_writer, profiles_dir)\n"
+        "    encrypted_profile_policy = require_flag or decryption_key is not None\n"
+        "    plaintext_development_mode = allow_plaintext\n"
+        "    profile_router = ProfileRouter(\n"
+        "        'profiles', audit_writer=audit_writer,\n"
+        "        encrypted_profile_policy=encrypted_profile_policy,\n"
+        "        plaintext_development_mode=plaintext_development_mode,\n"
+        "    )\n"
+    )
+    violations = _main_router_policy_wiring_violations(broken)
+    assert any("before key resolution" in v for v in violations)
 
 
 def test_inv12_plaintext_refusal_and_opt_in_are_both_receipted():

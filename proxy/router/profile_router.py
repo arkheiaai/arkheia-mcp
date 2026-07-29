@@ -44,6 +44,7 @@ from proxy.audit.decision_journal import (
     PLAINTEXT_POLICY_ENCRYPTED_INVENTORY,
     PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY,
     PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY,
+    PLAINTEXT_POLICY_UNMARKED_PLAINTEXT_DIRECTORY,
     DecisionJournal,
     build_profile_auth_record,
     flush_journal,
@@ -149,6 +150,7 @@ class ProfileRouter:
         audit_writer: Optional[object] = None,
         journal: Optional[DecisionJournal] = None,
         encrypted_profile_policy: Optional[bool] = None,
+        plaintext_development_mode: Optional[bool] = None,
     ):
         self._profiles: dict[str, dict] = {}
         self._lock = asyncio.Lock()
@@ -163,6 +165,14 @@ class ProfileRouter:
         # ``True`` means this installation is in encrypted-profile custody even
         # if the encrypted files have been removed or renamed before this load.
         self._encrypted_profile_policy = bool(encrypted_profile_policy)
+        # Audited plaintext loading must be explicitly marked. Direct, no-writer
+        # router use keeps the historical developer path; production startup
+        # passes the env-derived value explicitly.
+        self._plaintext_development_mode = (
+            audit_writer is None
+            if plaintext_development_mode is None
+            else bool(plaintext_development_mode)
+        )
         self.decision_journal = journal or DecisionJournal()
         #: Fire-and-forget flush tasks, held so the GC cannot collect a pending
         #: one mid-flight (asyncio only holds a weak reference to a bare task).
@@ -230,7 +240,9 @@ class ProfileRouter:
             return PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY
         if enc_files:
             return PLAINTEXT_POLICY_ENCRYPTED_INVENTORY
-        return PLAINTEXT_POLICY_DEVELOPMENT
+        if self._plaintext_development_mode:
+            return PLAINTEXT_POLICY_DEVELOPMENT
+        return PLAINTEXT_POLICY_UNMARKED_PLAINTEXT_DIRECTORY
 
     @staticmethod
     def _plaintext_requires_opt_in(policy_state: str) -> bool:
@@ -259,6 +271,11 @@ class ProfileRouter:
         plaintext_policy_state = self._plaintext_policy_state(enc_files)
         plaintext_requires_opt_in = self._plaintext_requires_opt_in(plaintext_policy_state)
         refusing_plaintext = plaintext_requires_opt_in and not plaintext_allowed
+        receipting_development_opt_in = (
+            plaintext_policy_state == PLAINTEXT_POLICY_DEVELOPMENT
+            and plaintext_allowed
+            and self._audit_writer is not None
+        )
         plaintext_candidate_names: list[str] = []
         refused_plaintext_names: list[str] = []
 
@@ -281,10 +298,12 @@ class ProfileRouter:
 
         if refused_plaintext_names:
             logger.warning(
-                "Refusing %d plaintext profile(s) in encrypted profile directory %s. "
-                "Set %s=true only for an intentional migration window.",
+                "Refusing %d plaintext profile(s) in governed profile directory %s "
+                "(policy_state=%s). Set %s=true only for an intentional "
+                "migration or development window.",
                 len(refused_plaintext_names),
                 self.profile_dir,
+                plaintext_policy_state,
                 _ALLOW_PLAINTEXT_PROFILES_ENV,
             )
             self.decision_journal.record(build_profile_auth_record(
@@ -299,6 +318,18 @@ class ProfileRouter:
                 _ALLOW_PLAINTEXT_PROFILES_ENV,
                 self.profile_dir,
                 plaintext_policy_state,
+            )
+            self.decision_journal.record(build_profile_auth_record(
+                outcome=PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
+                plaintext_profile_names=plaintext_candidate_names,
+                plaintext_opt_in_env=_ALLOW_PLAINTEXT_PROFILES_ENV,
+                plaintext_policy_state=plaintext_policy_state,
+            ))
+        elif receipting_development_opt_in and plaintext_candidate_names:
+            logger.warning(
+                "Development plaintext profile loading explicitly enabled by %s in %s.",
+                _ALLOW_PLAINTEXT_PROFILES_ENV,
+                self.profile_dir,
             )
             self.decision_journal.record(build_profile_auth_record(
                 outcome=PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,

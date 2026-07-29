@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import secrets
 from datetime import date, timedelta
 
@@ -54,8 +53,10 @@ from proxy.audit.decision_journal import (
     PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
     PROFILE_AUTH_PLAINTEXT_REJECTED,
     PROFILE_AUTH_SKIPPED_NO_KEY,
+    PLAINTEXT_POLICY_DEVELOPMENT,
     PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY,
     PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY,
+    PLAINTEXT_POLICY_UNMARKED_PLAINTEXT_DIRECTORY,
     RECEIPT_ENQUEUED,
     RISK_LEVEL,
     build_profile_auth_record,
@@ -112,12 +113,14 @@ async def _build(
     key=None,
     *,
     encrypted_profile_policy: bool | None = None,
+    plaintext_development_mode: bool | None = None,
 ) -> ProfileRouter:
     router = ProfileRouter(
         str(profiles),
         decryption_key=key,
         audit_writer=probe.writer,
         encrypted_profile_policy=encrypted_profile_policy,
+        plaintext_development_mode=plaintext_development_mode,
     )
     await router.flush_decision_journal()
     await probe.writer._queue.join()
@@ -369,6 +372,56 @@ async def test_explicit_plaintext_opt_in_is_receipted(profiles, probe, monkeypat
     assert row["receipt_status"] == RECEIPT_ENQUEUED
 
 
+async def test_unmarked_audited_plaintext_directory_is_rejected_and_receipted(
+    profiles, probe, monkeypatch
+):
+    monkeypatch.delenv("ARKHEIA_ALLOW_PLAINTEXT_PROFILES", raising=False)
+    (profiles / "attacker.yaml").write_text(
+        yaml.dump({"model": "attacker-model", "version": "1.0"}),
+        encoding="utf-8",
+    )
+
+    router = await _build(profiles, probe, key=None)
+
+    assert router.loaded_count == 0
+    assert router.get("attacker-model") is None
+    rows = _rows(probe)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["outcome"] == PROFILE_AUTH_PLAINTEXT_REJECTED
+    assert row["skipped_profile_names"] == ["attacker.yaml"]
+    assert row["plaintext_policy_state"] == PLAINTEXT_POLICY_UNMARKED_PLAINTEXT_DIRECTORY
+    assert row["receipt_status"] == RECEIPT_ENQUEUED
+
+
+async def test_explicit_plaintext_development_mode_loads_and_is_receipted(
+    profiles, probe, monkeypatch
+):
+    monkeypatch.setenv("ARKHEIA_ALLOW_PLAINTEXT_PROFILES", "true")
+    (profiles / "dev.yaml").write_text(
+        yaml.dump({"model": "dev-model", "version": "1.0"}),
+        encoding="utf-8",
+    )
+
+    router = await _build(
+        profiles,
+        probe,
+        key=None,
+        plaintext_development_mode=True,
+    )
+
+    assert router.loaded_count == 1
+    assert router.get("dev-model") is not None
+    rows = _rows(probe)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["outcome"] == PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN
+    assert row["plaintext_profile_names"] == ["dev.yaml"]
+    assert row["plaintext_policy_state"] == PLAINTEXT_POLICY_DEVELOPMENT
+    assert row["plaintext_opt_in_env"] == "ARKHEIA_ALLOW_PLAINTEXT_PROFILES"
+    assert row["receipt_status"] == RECEIPT_ENQUEUED
+
+
 # ---------------------------------------------------------------------------
 # Mixed estate — one bad profile among good ones
 # ---------------------------------------------------------------------------
@@ -551,15 +604,15 @@ async def test_the_profile_auth_taxonomy_admits_its_own_members():
     assert rejected["skipped_profile_names"] == ["plain.yaml"]
 
 
-async def test_plaintext_profiles_produce_no_authentication_rows(profiles, probe):
+async def test_plaintext_profiles_without_a_writer_keep_the_local_developer_path(profiles):
     """
-    Negative control for the whole file. A ``.yaml`` profile is not authenticated
-    by anything, so claiming an authentication verdict for one would be a false
-    positive that makes every other row less trustworthy.
+    Negative control for the whole file. Direct no-writer router use stays usable
+    for local unit/developer callers, but audited startup must mark plaintext
+    explicitly and receipt it.
     """
     (profiles / "plain.yaml").write_text(yaml.dump({"model": "plain", "version": "1"}))
 
-    router = await _build(profiles, probe, key=None)
+    router = ProfileRouter(str(profiles), decryption_key=None)
     assert router.loaded_count == 1
-    assert _rows(probe) == []
-    assert json.dumps(probe.rows()) == "[]"
+    assert router.get("plain") is not None
+    assert router.decision_journal.drain() == ([], 0)
