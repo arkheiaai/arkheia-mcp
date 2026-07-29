@@ -26,6 +26,7 @@ import hashlib
 import ipaddress
 import logging
 import os
+import socket
 from typing import Any
 from urllib.parse import urlparse
 
@@ -112,15 +113,36 @@ def _parse_failure(function_name: str, model: str, prompt: str) -> dict:
     return _err_response(model, prompt, "parse_error")
 
 
+def _resolved_host_addresses(
+    host: str,
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+    try:
+        return (ipaddress.ip_address(host),)
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return ()
+
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            return ()
+        try:
+            addresses.append(ipaddress.ip_address(sockaddr[0]))
+        except ValueError:
+            return ()
+    return tuple(addresses)
+
+
 def _is_loopback_host(host: str | None) -> bool:
     if host is None:
         return False
-    if host.lower() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
+    addresses = _resolved_host_addresses(host)
+    return bool(addresses) and all(address.is_loopback for address in addresses)
 
 
 def _local_ollama_base_url(raw_url: str | None = None) -> str:

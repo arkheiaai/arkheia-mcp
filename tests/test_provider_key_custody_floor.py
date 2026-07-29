@@ -21,6 +21,16 @@ CLOUD_PROVIDER_CALLS = {
     "run_together": "call_together",
 }
 PROVIDER_FUNCTIONS = {"call_grok", "call_gemini", "call_together", "call_ollama"}
+PROVIDER_ENDPOINT_MARKERS = {
+    "api.x.ai",
+    "generativelanguage.googleapis.com",
+    "api.together.xyz",
+}
+PROVIDER_EGRESS_CALL_NAMES = PROVIDER_FUNCTIONS | {
+    "provider_api_key",
+    "_provider_post",
+}
+RAW_HTTP_CALL_NAMES = {"post", "request", "stream"}
 
 
 def _production_py_files() -> list[Path]:
@@ -41,6 +51,23 @@ def _production_py_files() -> list[Path]:
     assert missing == [], f"provider custody floor missed production files: {missing}"
     assert len(files) >= 50, (
         f"provider custody floor scanned only {len(files)} production files: "
+        f"{[str(p.relative_to(ROOT)) for p in files]}"
+    )
+    return sorted(files)
+
+
+def _mcp_production_py_files() -> list[Path]:
+    files = [
+        path
+        for path in (ROOT / "mcp_server").rglob("*.py")
+        if "tests" not in path.relative_to(ROOT).parts
+        and "__pycache__" not in path.parts
+    ]
+    expected = {PROVIDERS, SERVER, CUSTODY}
+    missing = sorted(str(path.relative_to(ROOT)) for path in expected - set(files))
+    assert missing == [], f"provider egress floor missed production files: {missing}"
+    assert len(files) >= 8, (
+        f"provider egress floor scanned only {len(files)} MCP production files: "
         f"{[str(p.relative_to(ROOT)) for p in files]}"
     )
     return sorted(files)
@@ -219,6 +246,68 @@ def _secret_env_reads(source: str) -> list[tuple[int, str]]:
     return scanner.reads
 
 
+class _ProviderEgressReport:
+    def __init__(self) -> None:
+        self.provider_calls: list[tuple[int, str, str]] = []
+        self.endpoint_literals: list[tuple[int, str, str]] = []
+        self.raw_http_calls: list[tuple[str, int, str]] = []
+
+    @property
+    def is_provider_egress(self) -> bool:
+        return bool(self.provider_calls or self.endpoint_literals)
+
+
+class _ProviderEgressScanner(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.report = _ProviderEgressReport()
+        self._function_stack: list[str] = ["<module>"]
+
+    @property
+    def _function_name(self) -> str:
+        return self._function_stack[-1]
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._function_stack.append(node.name)
+        self.generic_visit(node)
+        self._function_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._function_stack.append(node.name)
+        self.generic_visit(node)
+        self._function_stack.pop()
+
+    def visit_Call(self, node: ast.Call) -> None:
+        call_name = _call_name(node)
+        if call_name in PROVIDER_EGRESS_CALL_NAMES:
+            self.report.provider_calls.append((node.lineno, call_name, self._function_name))
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr in RAW_HTTP_CALL_NAMES
+        ):
+            self.report.raw_http_calls.append(
+                (self._function_name, node.lineno, node.func.attr)
+            )
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        if isinstance(node.value, str):
+            for marker in PROVIDER_ENDPOINT_MARKERS:
+                if marker in node.value:
+                    self.report.endpoint_literals.append(
+                        (node.lineno, marker, self._function_name)
+                    )
+
+
+def _provider_egress_report_from_source(source: str) -> _ProviderEgressReport:
+    scanner = _ProviderEgressScanner()
+    scanner.visit(ast.parse(source))
+    return scanner.report
+
+
+def _provider_egress_report(path: Path) -> _ProviderEgressReport:
+    return _provider_egress_report_from_source(path.read_text(encoding="utf-8"))
+
+
 def test_secret_env_scanner_catches_common_bypass_forms() -> None:
     snippets = {
         "os.environ.get": "import os\nx = os.environ.get('XAI_API_KEY')\n",
@@ -253,6 +342,28 @@ def test_secret_env_scanner_catches_common_bypass_forms() -> None:
     assert all(reads for reads in missed.values()), missed
 
 
+def test_provider_egress_scanner_catches_new_raw_http_file() -> None:
+    source = """
+import httpx
+from mcp_server.provider_key_custody import provider_api_key
+
+async def run_shadow_provider(prompt):
+    api_key = provider_api_key("xai")
+    async with httpx.AsyncClient() as client:
+        return await client.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"messages": [{"role": "user", "content": prompt}]},
+        )
+"""
+    report = _provider_egress_report_from_source(source)
+
+    assert report.is_provider_egress
+    assert report.provider_calls == [(6, "provider_api_key", "run_shadow_provider")]
+    assert report.endpoint_literals == [(9, "api.x.ai", "run_shadow_provider")]
+    assert report.raw_http_calls == [("run_shadow_provider", 8, "post")]
+
+
 def test_provider_secret_env_reads_are_confined_to_custody_module() -> None:
     seen_in_custody: set[str] = set()
     offenders: list[str] = []
@@ -277,24 +388,46 @@ def test_provider_secret_env_reads_are_confined_to_custody_module() -> None:
 
 
 def test_provider_http_post_is_chokepointed() -> None:
-    tree = _parse(PROVIDERS)
-    funcs = _functions(tree)
-    post_call_owners: list[str] = []
-
-    for fn_name, fn in funcs.items():
-        for node in ast.walk(fn):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "post"
-            ):
-                post_call_owners.append(fn_name)
-
-    assert post_call_owners == ["_provider_post"], (
-        "raw client.post calls in provider wrappers bypass the provider egress "
-        f"chokepoint: {post_call_owners}"
+    reports = {
+        path: report
+        for path in _mcp_production_py_files()
+        if (report := _provider_egress_report(path)).is_provider_egress
+    }
+    missing_expected = sorted(
+        str(path.relative_to(ROOT))
+        for path in {PROVIDERS, SERVER} - set(reports)
+    )
+    assert missing_expected == [], (
+        "provider egress discovery missed expected production sites: "
+        f"{missing_expected}; discovered "
+        f"{[str(path.relative_to(ROOT)) for path in reports]}"
+    )
+    assert len(reports) >= 2, (
+        "provider egress discovery measured too little work: "
+        f"{[str(path.relative_to(ROOT)) for path in reports]}"
     )
 
+    offenders: list[str] = []
+    raw_http_sites: list[str] = []
+    for path, report in reports.items():
+        rel = path.relative_to(ROOT)
+        for fn_name, line, method in report.raw_http_calls:
+            site = f"{rel}:{fn_name}:{line}:{method}"
+            raw_http_sites.append(site)
+            if not (path == PROVIDERS and fn_name == "_provider_post" and method == "post"):
+                offenders.append(site)
+
+    assert offenders == [], (
+        "raw provider HTTP calls outside the single provider egress chokepoint: "
+        f"{offenders}; discovered provider-egress files were "
+        f"{[str(path.relative_to(ROOT)) for path in reports]}"
+    )
+    assert len(raw_http_sites) == 1, (
+        "provider egress must have exactly one raw HTTP write site, owned by "
+        f"_provider_post; got {raw_http_sites}"
+    )
+
+    funcs = _functions(_parse(PROVIDERS))
     missing = sorted(
         name for name in PROVIDER_FUNCTIONS
         if not _call_lines(funcs[name], "_provider_post")
@@ -427,6 +560,40 @@ def test_ollama_base_url_is_loopback_validated_before_post() -> None:
         and isinstance(trust_env_keywords[0], ast.Constant)
         and trust_env_keywords[0].value is False
     ), "call_ollama must disable proxy/env transport inheritance with trust_env=False"
+
+
+def test_ollama_loopback_validator_resolves_hostname_addresses() -> None:
+    funcs = _functions(_parse(PROVIDERS))
+    resolver = funcs.get("_resolved_host_addresses")
+    validator = funcs.get("_is_loopback_host")
+
+    assert resolver is not None, "loopback validation no longer has a resolver helper"
+    assert validator is not None, "loopback validation helper is missing"
+    assert _call_lines(resolver, "getaddrinfo"), (
+        "hostname loopback validation must resolve DNS/hosts-file addresses"
+    )
+    assert _call_lines(resolver, "ip_address"), (
+        "hostname loopback validation must classify resolved IP addresses"
+    )
+    assert _call_lines(validator, "_resolved_host_addresses"), (
+        "_is_loopback_host must validate the resolved address population"
+    )
+    assert _call_lines(validator, "all"), (
+        "_is_loopback_host must require every resolved address to be loopback"
+    )
+
+    literal_accepts: list[int] = []
+    for node in ast.walk(validator):
+        if not isinstance(node, ast.Compare):
+            continue
+        values = [_string_value(node.left)]
+        values.extend(_string_value(comparator) for comparator in node.comparators)
+        if "localhost" in values:
+            literal_accepts.append(node.lineno)
+    assert literal_accepts == [], (
+        "localhost must not be accepted by string comparison; it must resolve to "
+        f"loopback addresses first: {literal_accepts}"
+    )
 
 
 def test_floor_self_test_catches_setdefault_constant_and_off_root_secret_reads() -> None:

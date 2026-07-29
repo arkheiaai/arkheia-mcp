@@ -180,6 +180,73 @@ async def test_ollama_refuses_remote_base_url_before_http_client_opens(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_ollama_refuses_localhost_when_resolution_is_not_loopback(monkeypatch):
+    class _TripwireClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError(
+                "misresolved OLLAMA_BASE_URL must fail before HTTP client opens"
+            )
+
+    def fake_getaddrinfo(host: str, *args, **kwargs):
+        assert host == "localhost"
+        return [
+            (
+                providers.socket.AF_INET,
+                providers.socket.SOCK_STREAM,
+                0,
+                "",
+                ("203.0.113.7", 11434),
+            ),
+        ]
+
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setattr(providers.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(providers.httpx, "AsyncClient", _TripwireClient)
+
+    result = await providers.call_ollama("prompt")
+
+    assert result["error"] == "ollama_base_url_not_local"
+    assert result["response"] == "[provider_error: ollama_base_url_not_local]"
+
+
+@pytest.mark.asyncio
+async def test_ollama_refuses_localhost_when_any_resolved_address_is_not_loopback(monkeypatch):
+    class _TripwireClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError(
+                "mixed OLLAMA_BASE_URL resolution must fail before HTTP client opens"
+            )
+
+    def fake_getaddrinfo(host: str, *args, **kwargs):
+        assert host == "localhost"
+        return [
+            (
+                providers.socket.AF_INET,
+                providers.socket.SOCK_STREAM,
+                0,
+                "",
+                ("127.0.0.1", 11434),
+            ),
+            (
+                providers.socket.AF_INET,
+                providers.socket.SOCK_STREAM,
+                0,
+                "",
+                ("203.0.113.8", 11434),
+            ),
+        ]
+
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setattr(providers.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(providers.httpx, "AsyncClient", _TripwireClient)
+
+    result = await providers.call_ollama("prompt")
+
+    assert result["error"] == "ollama_base_url_not_local"
+    assert result["response"] == "[provider_error: ollama_base_url_not_local]"
+
+
+@pytest.mark.asyncio
 async def test_ollama_loopback_base_url_uses_provider_post_chokepoint(monkeypatch):
     outbound: list[str] = []
     client_kwargs: list[dict[str, Any]] = []
@@ -217,6 +284,60 @@ async def test_ollama_loopback_base_url_uses_provider_post_chokepoint(monkeypatc
     assert result["error"] is None
     assert result["response"] == "local"
     assert result["eval_count"] == 7
+
+
+@pytest.mark.asyncio
+async def test_ollama_localhost_resolution_accepts_only_loopback_addresses(monkeypatch):
+    outbound: list[str] = []
+
+    def fake_getaddrinfo(host: str, *args, **kwargs):
+        assert host == "localhost"
+        return [
+            (
+                providers.socket.AF_INET,
+                providers.socket.SOCK_STREAM,
+                0,
+                "",
+                ("127.0.0.1", 11434),
+            ),
+            (
+                providers.socket.AF_INET6,
+                providers.socket.SOCK_STREAM,
+                0,
+                "",
+                ("::1", 11434, 0, 0),
+            ),
+        ]
+
+    async def fake_provider_post(provider: str, client: Any, url: str, **kwargs: Any):
+        assert provider == "ollama"
+        outbound.append(url)
+        return _OllamaResponse()
+
+    class _OllamaClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+    class _OllamaResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"response": "local", "eval_count": 7}
+
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    monkeypatch.setattr(providers.socket, "getaddrinfo", fake_getaddrinfo)
+    monkeypatch.setattr(providers.httpx, "AsyncClient", lambda *a, **k: _OllamaClient())
+    monkeypatch.setattr(providers, "_provider_post", fake_provider_post)
+
+    result = await providers.call_ollama("prompt")
+
+    assert outbound == ["http://localhost:11434/api/generate"]
+    assert result["error"] is None
+    assert result["response"] == "local"
 
 
 @pytest.mark.asyncio
