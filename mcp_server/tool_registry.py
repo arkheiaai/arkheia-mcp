@@ -294,7 +294,6 @@ def check(tool_name: object, *, human_confirmed: bool = False) -> ToolPolicy:
 
 GATE_EVENT_TYPE = "mcp.tool_gate"
 RECEIPT_LOG_ENV = "ARKHEIA_TOOL_GATE_RECEIPT_LOG"
-_RECEIPT_FILE_MODE = 0o600
 
 
 @dataclass(frozen=True)
@@ -323,15 +322,6 @@ def _resolve_receipt_path(log_path: str | Path | None) -> Path:
     return path
 
 
-def _prepare_receipt_file(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, _RECEIPT_FILE_MODE)
-        os.close(fd)
-    else:
-        os.chmod(path, _RECEIPT_FILE_MODE)
-
-
 async def _emit_gate_receipt(
     *,
     tool_name: object,
@@ -346,7 +336,6 @@ async def _emit_gate_receipt(
     tool_label = tool_name if isinstance(tool_name, str) else repr(tool_name)
     try:
         resolved = _resolve_receipt_path(log_path)
-        _prepare_receipt_file(resolved)
     except Exception as exc:
         logger.error(
             "tool-gate receipt path failed (%s): tool=%r denied=%s receipt_id=%s",

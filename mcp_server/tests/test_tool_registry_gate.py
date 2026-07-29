@@ -43,6 +43,11 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import multiprocessing
+import os
+import queue
+import random
+import string
 from dataclasses import FrozenInstanceError, fields, replace
 from enum import Enum
 
@@ -50,6 +55,7 @@ import pytest
 
 from mcp_server import server as srv
 from mcp_server import receipts
+from proxy.audit.writer import _compute_hash
 from mcp_server.tool_registry import (
     REGISTRY,
     Permission,
@@ -87,6 +93,9 @@ RAISING_TOOLS = {
     "memory_relate",
 }
 DICT_RETURNING_TOOLS = {"run_grok", "run_gemini", "run_together", "run_ollama"}
+REDACTION_MARKER = "[REDACTED:"
+RECEIPT_PROCESS_COUNT = 8
+RECEIPT_WRITES_PER_PROCESS = 12
 
 
 @pytest.fixture(autouse=True)
@@ -118,6 +127,73 @@ def registry_sandbox():
     finally:
         _REGISTRY.clear()
         _REGISTRY.update(original)
+
+
+def _opaque_receipt_secret() -> str:
+    rng = random.Random("arkheia-receipt-opaque-secret")
+    alphabet = string.ascii_letters + string.digits + "+/"
+    return "".join(rng.choice(alphabet) for _ in range(48))
+
+
+def _emit_receipts_in_process(
+    log_path: str,
+    worker_id: int,
+    write_count: int,
+    barrier,
+    errors,
+) -> None:
+    try:
+        async def _run() -> None:
+            barrier.wait(timeout=30)
+            for idx in range(write_count):
+                receipt_id = f"worker-{worker_id}-receipt-{idx}"
+                record = receipts.build_record(
+                    receipt_id=receipt_id,
+                    tool="memory_retrieve",
+                    decision=receipts.DECISION_ALLOWED,
+                    event_type="mcp.tool_gate",
+                    worker_id=worker_id,
+                    worker_index=idx,
+                )
+                if not await receipts.emit(log_path, record):
+                    raise AssertionError(f"receipt {receipt_id} was not confirmed")
+
+        asyncio.run(_run())
+    except BaseException as exc:
+        errors.put(f"{type(exc).__name__}: {exc}")
+        raise
+
+
+def _assert_receipt_chain_is_intact(rows: list[dict], expected_count: int) -> None:
+    assert len(rows) == expected_count, (
+        f"expected {expected_count} receipt rows, got {len(rows)}"
+    )
+    assert len({row.get("receipt_id") for row in rows}) == expected_count
+    assert [row.get("seq") for row in rows] == list(range(1, expected_count + 1))
+
+    prev_hash = "0" * 64
+    breaks = []
+    for idx, row in enumerate(rows, start=1):
+        body = dict(row)
+        stored_this = body.pop("this_hash", None)
+        expected_this = _compute_hash(body, prev_hash)
+        if row.get("prev_hash") != prev_hash or stored_this != expected_this:
+            breaks.append(
+                {
+                    "row": idx,
+                    "seq": row.get("seq"),
+                    "expected_prev": prev_hash,
+                    "got_prev": row.get("prev_hash"),
+                    "expected_this": expected_this,
+                    "got_this": stored_this,
+                }
+            )
+        prev_hash = stored_this or expected_this
+
+    assert breaks == [], (
+        "receipt hash chain broke under concurrent writers; first breaks: "
+        f"{breaks[:3]}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -882,6 +958,92 @@ class TestReceiptedGate:
             assert row["prev_hash"] == prev_hash
             prev_hash = row["this_hash"]
 
+    async def test_concurrent_first_dispatch_writers_do_not_lose_receipts(
+        self, tmp_path
+    ):
+        log_path = tmp_path / "first-writer-race.jsonl"
+
+        decisions = await asyncio.gather(
+            *[
+                decide(
+                    "memory_retrieve",
+                    call_site=f"first-writer-{idx}",
+                    argument_keys=["query"],
+                    log_path=log_path,
+                )
+                for idx in range(32)
+            ]
+        )
+
+        assert all(d.receipt_status == receipts.STATUS_RECORDED for d in decisions)
+        _assert_receipt_chain_is_intact(receipts.read_rows(log_path), 32)
+
+    async def test_cross_process_receipts_keep_one_hash_chain(self, tmp_path):
+        if os.name == "nt":
+            pytest.skip("POSIX flock is the cross-process lock used by receipts")
+        assert getattr(receipts, "fcntl", None) is not None, (
+            "cross-process receipt integrity requires the POSIX fcntl.flock path; "
+            "the in-process asyncio lock cannot serialize separate MCP processes"
+        )
+
+        log_path = tmp_path / "gate.jsonl"
+        ctx = multiprocessing.get_context("spawn")
+        barrier = ctx.Barrier(RECEIPT_PROCESS_COUNT)
+        errors = ctx.Queue()
+        processes = [
+            ctx.Process(
+                target=_emit_receipts_in_process,
+                args=(
+                    str(log_path),
+                    worker_id,
+                    RECEIPT_WRITES_PER_PROCESS,
+                    barrier,
+                    errors,
+                ),
+            )
+            for worker_id in range(RECEIPT_PROCESS_COUNT)
+        ]
+
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(60)
+
+        stuck = [process.pid for process in processes if process.is_alive()]
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+        assert stuck == [], f"receipt writer child process(es) hung: {stuck}"
+
+        child_errors = []
+        while True:
+            try:
+                child_errors.append(errors.get_nowait())
+            except queue.Empty:
+                break
+        assert child_errors == []
+
+        exitcodes = [process.exitcode for process in processes]
+        assert exitcodes == [0] * RECEIPT_PROCESS_COUNT
+        rows = receipts.read_rows(log_path)
+        _assert_receipt_chain_is_intact(
+            rows,
+            RECEIPT_PROCESS_COUNT * RECEIPT_WRITES_PER_PROCESS,
+        )
+
+    async def test_oversized_receipt_row_does_not_reset_the_hash_chain(
+        self, tmp_path
+    ):
+        log_path = tmp_path / "oversized-row.jsonl"
+
+        first = await decide("x" * 9000, log_path=log_path)
+        second = await decide("memory_retrieve", log_path=log_path)
+
+        assert first.receipt_status == receipts.STATUS_RECORDED
+        assert second.receipt_status == receipts.STATUS_RECORDED
+        _assert_receipt_chain_is_intact(receipts.read_rows(log_path), 2)
+
     async def test_denied_dispatch_decision_is_written_before_refusal_reaches_caller(
         self, tmp_path
     ):
@@ -991,6 +1153,67 @@ class TestReceiptedGate:
         assert row is not None
         assert row["argument_keys"] == ["entity_type", "name", "observations"]
         assert "argument_values" not in row
+
+    async def test_opaque_secrets_in_receipt_subject_fields_are_redacted(
+        self, tmp_path
+    ):
+        log_path = tmp_path / "gate.jsonl"
+        secret = _opaque_receipt_secret()
+
+        denied = await decide(secret, log_path=log_path)
+        allowed = await decide(
+            "memory_retrieve",
+            argument_keys=["query", secret],
+            log_path=log_path,
+        )
+        values_receipt_id = receipts.new_receipt_id()
+        values_record = receipts.build_record(
+            receipt_id=values_receipt_id,
+            tool="memory_retrieve",
+            decision=receipts.DECISION_ALLOWED,
+            event_type="mcp.tool_gate",
+            control="tool_registry_gate",
+            call_site="unit",
+            argument_values={
+                secret: {"nested": secret},
+                "public": ["kept"],
+            },
+        )
+
+        assert await receipts.emit(log_path, values_record) is True
+
+        raw = log_path.read_text(encoding="utf-8")
+        assert secret not in raw
+        assert "memory_retrieve" in raw
+        assert "query" in raw
+        assert "public" in raw
+        assert REDACTION_MARKER in raw
+
+        denied_row = receipts.find_receipt(log_path, denied.receipt_id)
+        assert denied_row is not None
+        assert denied_row["tool"].startswith(REDACTION_MARKER)
+
+        allowed_row = receipts.find_receipt(log_path, allowed.receipt_id)
+        assert allowed_row is not None
+        assert "query" in allowed_row["argument_keys"]
+        redacted_keys = [
+            key for key in allowed_row["argument_keys"]
+            if isinstance(key, str) and key.startswith(REDACTION_MARKER)
+        ]
+        assert len(redacted_keys) == 1
+
+        values_row = receipts.find_receipt(log_path, values_receipt_id)
+        assert values_row is not None
+        assert values_row["tool"] == "memory_retrieve"
+        assert values_row["argument_values"]["public"] == ["kept"]
+        contextual_keys = [
+            key for key in values_row["argument_values"]
+            if key.startswith(REDACTION_MARKER)
+        ]
+        assert len(contextual_keys) == 1
+        assert values_row["argument_values"][contextual_keys[0]]["nested"].startswith(
+            REDACTION_MARKER
+        )
 
     async def test_emit_reports_unrecorded_when_readback_cannot_find_receipt(
         self, tmp_path, monkeypatch

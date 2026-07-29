@@ -528,7 +528,11 @@ _WRAPPED_LINE = re.compile(r'^[A-Za-z0-9+/_-]{16,}={0,6}$')
 _MIN_WRAPPED_RUN = 2
 
 
-def _redact_encoded_and_opaque(value: str) -> str:
+def _redact_encoded_and_opaque(
+    value: str,
+    *,
+    credential_context: bool = False,
+) -> str:
     """
     One line-oriented pass, so the two fallbacks agree.
 
@@ -542,7 +546,9 @@ def _redact_encoded_and_opaque(value: str) -> str:
     lines = value.split("\n")
 
     def _ctx_at(i: int) -> bool:
-        return any(_CREDENTIAL_CONTEXT.search(w) for w in lines[max(0, i - 3): i + 1])
+        return credential_context or any(
+            _CREDENTIAL_CONTEXT.search(w) for w in lines[max(0, i - 3): i + 1]
+        )
 
     def _view_is_secret(view: str, ctx: bool) -> bool:
         if _contains_secret(view):
@@ -603,7 +609,7 @@ def _redact_encoded_and_opaque(value: str) -> str:
     return "\n".join(out)
 
 
-def _redact_string(value: str) -> str:
+def _redact_string(value: str, *, credential_context: bool = False) -> str:
     """
     Replace all secret patterns found in a string.
 
@@ -618,7 +624,10 @@ def _redact_string(value: str) -> str:
             lambda m: m.group("pre") + _placeholder(m.group("secret")) + m.group("post"),
             value,
         )
-    value = _redact_encoded_and_opaque(value)
+    value = _redact_encoded_and_opaque(
+        value,
+        credential_context=credential_context,
+    )
     return value
 
 
@@ -645,6 +654,39 @@ def redact(obj: Any) -> Any:
         # fields, not an iterable, so `type(obj)(generator)` raised TypeError and
         # (inside the writer's try/except) silently DROPPED the whole record.
         items = [redact(item) for item in obj]
+        if isinstance(obj, list):
+            return items
+        try:
+            return type(obj)(items)
+        except TypeError:
+            return type(obj)(*items)
+    return obj
+
+
+def redact_in_credential_context(obj: Any) -> Any:
+    """
+    Redact a value whose field position is already credential-bearing.
+
+    Plain ``redact()`` deliberately requires local credential context before it
+    removes opaque high-entropy strings; otherwise hashes, UUIDs and base64 audit
+    content would disappear. Some receipt fields are themselves context: a secret
+    can be pasted as a tool name, argument key, or argument value. Use this helper
+    only at those boundaries so the opaque fallback can fire without widening the
+    default audit redactor.
+    """
+    if isinstance(obj, str):
+        return _redact_string(obj, credential_context=True)
+    if isinstance(obj, dict):
+        return {
+            (
+                _redact_string(k, credential_context=True)
+                if isinstance(k, str)
+                else k
+            ): redact_in_credential_context(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, (list, tuple)):
+        items = [redact_in_credential_context(item) for item in obj]
         if isinstance(obj, list):
             return items
         try:
