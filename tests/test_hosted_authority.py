@@ -13,6 +13,7 @@ import pytest
 from arkheia_common.hosted_authority import (
     ALLOW_UNSAFE_HOSTED_URL_ENV,
     DEFAULT_HOSTED_API_URL,
+    HostedAuthorityDecision,
     HostedAuthorityError,
     authorize_hosted_base_url,
 )
@@ -150,6 +151,45 @@ async def test_detect_verify_sends_api_key_to_custom_host_only_after_opt_in(monk
 
 
 @pytest.mark.asyncio
+async def test_detect_verify_posts_to_the_authorized_base_url_not_the_configured_url():
+    client = ProxyClient(
+        base_url="http://local-proxy.invalid",
+        hosted_url="https://configured-authority.test/original",
+        api_key="ak_live_authorized_base",
+    )
+    client._local_available = False
+
+    hosted_response = MagicMock()
+    hosted_response.json.return_value = {
+        "risk": "LOW",
+        "confidence": 0.9,
+        "features_triggered": [],
+        "detection_id": "det_authorized",
+    }
+    hosted_response.raise_for_status = MagicMock()
+    post = AsyncMock(return_value=hosted_response)
+    calls = []
+
+    def fake_authorize(url):
+        calls.append(url)
+        return HostedAuthorityDecision(
+            base_url="https://authorized-authority.test/base",
+            origin="https://authorized-authority.test",
+            allow_unsafe=True,
+        )
+
+    with patch("mcp_server.proxy_client.authorize_hosted_base_url", side_effect=fake_authorize), \
+            patch("httpx.AsyncClient.post", post):
+        result = await client.verify("prompt", "response", "gpt-4o")
+
+    assert result["source"] == "hosted"
+    assert calls == ["https://configured-authority.test/original"]
+    post.assert_awaited_once()
+    assert post.await_args.args[0] == "https://authorized-authority.test/base/v1/detect"
+    assert post.await_args.kwargs["headers"] == {"X-Arkheia-Key": "ak_live_authorized_base"}
+
+
+@pytest.mark.asyncio
 async def test_profile_key_fetch_does_not_send_api_key_to_foreign_hosted_url(
     capture_server, monkeypatch
 ):
@@ -173,6 +213,41 @@ async def test_profile_key_fetch_sends_api_key_to_custom_host_only_after_opt_in(
     assert capture_server.requests[0]["headers"]["X-Arkheia-Key"] == (
         "ak_live_explicitly_opted_in"
     )
+
+
+@pytest.mark.asyncio
+async def test_profile_key_fetch_posts_to_the_authorized_base_url_not_the_configured_url():
+    key = secrets.token_bytes(32)
+    response = httpx.Response(
+        200,
+        json={"profile_key": base64.b64encode(key).decode("ascii")},
+        request=httpx.Request("POST", "https://authorized-authority.test/base/v1/profile-key"),
+    )
+    post = AsyncMock(return_value=response)
+    calls = []
+
+    def fake_authorize(url):
+        calls.append(url)
+        return HostedAuthorityDecision(
+            base_url="https://authorized-authority.test/base",
+            origin="https://authorized-authority.test",
+            allow_unsafe=True,
+        )
+
+    loader = DynamicKeyLoader(
+        "https://configured-authority.test/original",
+        "ak_live_authorized_profile_key",
+    )
+    with patch("proxy.crypto.profile_crypto.authorize_hosted_base_url", side_effect=fake_authorize), \
+            patch("httpx.AsyncClient.post", post):
+        assert await loader._fetch_from_hosted() == key
+
+    assert calls == ["https://configured-authority.test/original"]
+    post.assert_awaited_once()
+    assert post.await_args.args[0] == "https://authorized-authority.test/base/v1/profile-key"
+    assert post.await_args.kwargs["headers"] == {
+        "X-Arkheia-Key": "ak_live_authorized_profile_key",
+    }
 
 
 @pytest.mark.asyncio
