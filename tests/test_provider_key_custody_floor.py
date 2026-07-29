@@ -12,6 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PROVIDERS = ROOT / "mcp_server" / "tools" / "providers.py"
 SERVER = ROOT / "mcp_server" / "server.py"
+CUSTODY = ROOT / "mcp_server" / "provider_key_custody.py"
 
 SECRET_ENV_NAMES = {"XAI_API_KEY", "GOOGLE_API_KEY", "TOGETHER_API_KEY"}
 CLOUD_PROVIDER_CALLS = {
@@ -20,6 +21,19 @@ CLOUD_PROVIDER_CALLS = {
     "run_together": "call_together",
 }
 PROVIDER_FUNCTIONS = {"call_grok", "call_gemini", "call_together", "call_ollama"}
+
+
+def _production_py_files() -> list[Path]:
+    files = [
+        path
+        for path in (ROOT / "mcp_server").rglob("*.py")
+        if "tests" not in path.parts and path.name != "__init__.py"
+    ]
+    assert len(files) >= 5, (
+        f"provider custody floor scanned only {len(files)} production files: "
+        f"{[str(p.relative_to(ROOT)) for p in files]}"
+    )
+    return sorted(files)
 
 
 def _parse(path: Path) -> ast.Module:
@@ -60,39 +74,151 @@ def _literal_arg(node: ast.Call, index: int) -> str | None:
     return None
 
 
-def test_provider_secret_env_reads_are_chokepointed() -> None:
-    tree = _parse(PROVIDERS)
-    funcs = _functions(tree)
-    seen: set[str] = set()
+def _literal_slice(node: ast.Subscript) -> str | None:
+    sl = node.slice
+    if isinstance(sl, ast.Constant) and isinstance(sl.value, str):
+        return sl.value
+    return None
+
+
+class _SecretEnvReadScanner(ast.NodeVisitor):
+    """Find direct provider-secret environment reads, including common aliases."""
+
+    def __init__(self) -> None:
+        self.os_aliases: set[str] = set()
+        self.environ_aliases: set[str] = set()
+        self.getenv_aliases: set[str] = set()
+        self.reads: list[tuple[int, str]] = []
+
+    def visit_Import(self, node: ast.Import) -> None:
+        for alias in node.names:
+            if alias.name == "os":
+                self.os_aliases.add(alias.asname or alias.name)
+        self.generic_visit(node)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        if node.module == "os":
+            for alias in node.names:
+                name = alias.asname or alias.name
+                if alias.name == "getenv":
+                    self.getenv_aliases.add(name)
+                elif alias.name == "environ":
+                    self.environ_aliases.add(name)
+        self.generic_visit(node)
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        self._record_aliases(node.targets, node.value)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if node.value is not None:
+            self._record_aliases([node.target], node.value)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        env_name = None
+        if self._is_getenv_func(node.func):
+            env_name = _literal_arg(node, 0)
+        elif (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and self._is_environ_expr(node.func.value)
+        ):
+            env_name = _literal_arg(node, 0)
+        if env_name in SECRET_ENV_NAMES:
+            self.reads.append((node.lineno, env_name))
+        self.generic_visit(node)
+
+    def visit_Subscript(self, node: ast.Subscript) -> None:
+        env_name = _literal_slice(node)
+        if env_name in SECRET_ENV_NAMES and self._is_environ_expr(node.value):
+            self.reads.append((node.lineno, env_name))
+        self.generic_visit(node)
+
+    def _record_aliases(self, targets: list[ast.expr], value: ast.expr) -> None:
+        names = [t.id for t in targets if isinstance(t, ast.Name)]
+        if not names:
+            return
+        if self._is_environ_expr(value):
+            self.environ_aliases.update(names)
+        elif self._is_getenv_func(value):
+            self.getenv_aliases.update(names)
+        elif (
+            isinstance(value, ast.Attribute)
+            and value.attr == "get"
+            and self._is_environ_expr(value.value)
+        ):
+            self.getenv_aliases.update(names)
+
+    def _is_getenv_func(self, node: ast.expr) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in self.getenv_aliases
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr == "getenv"
+            and self._is_os_expr(node.value)
+        )
+
+    def _is_environ_expr(self, node: ast.expr) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in self.environ_aliases
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr == "environ"
+            and self._is_os_expr(node.value)
+        )
+
+    def _is_os_expr(self, node: ast.expr) -> bool:
+        return isinstance(node, ast.Name) and node.id in self.os_aliases
+
+
+def _secret_env_reads(source: str) -> list[tuple[int, str]]:
+    scanner = _SecretEnvReadScanner()
+    scanner.visit(ast.parse(source))
+    return scanner.reads
+
+
+def test_secret_env_scanner_catches_common_bypass_forms() -> None:
+    snippets = {
+        "os.environ.get": "import os\nx = os.environ.get('XAI_API_KEY')\n",
+        "os.getenv": "import os\nx = os.getenv('GOOGLE_API_KEY')\n",
+        "os.environ subscript": "import os\nx = os.environ['TOGETHER_API_KEY']\n",
+        "import os as alias": "import os as _os\nx = _os.environ.get('XAI_API_KEY')\n",
+        "from os import getenv as alias": (
+            "from os import getenv as get\nx = get('GOOGLE_API_KEY')\n"
+        ),
+        "from os import environ as alias": (
+            "from os import environ as env\nx = env.get('TOGETHER_API_KEY')\n"
+        ),
+        "env assignment": "import os\nenv = os.environ\nx = env.get('XAI_API_KEY')\n",
+        "getter assignment": (
+            "import os\nget = os.environ.get\nx = get('GOOGLE_API_KEY')\n"
+        ),
+    }
+    missed = {name: _secret_env_reads(src) for name, src in snippets.items()}
+    assert all(reads for reads in missed.values()), missed
+
+
+def test_provider_secret_env_reads_are_confined_to_custody_module() -> None:
+    seen_in_custody: set[str] = set()
     offenders: list[str] = []
 
-    for fn_name, fn in funcs.items():
-        for node in ast.walk(fn):
-            if not isinstance(node, ast.Call):
-                continue
-            if not isinstance(node.func, ast.Attribute):
-                continue
-            if node.func.attr != "get":
-                continue
-            if not (
-                isinstance(node.func.value, ast.Attribute)
-                and node.func.value.attr == "environ"
-                and isinstance(node.func.value.value, ast.Name)
-                and node.func.value.value.id == "os"
-            ):
-                continue
-            env_name = _literal_arg(node, 0)
-            if env_name in SECRET_ENV_NAMES:
-                seen.add(env_name)
-                if fn_name != "_provider_api_key":
-                    offenders.append(f"{fn_name}:{node.lineno}:{env_name}")
+    for path in _production_py_files():
+        source = path.read_text(encoding="utf-8")
+        reads = _secret_env_reads(source)
+        rel = path.relative_to(ROOT)
+        if path == CUSTODY:
+            seen_in_custody.update(env_name for _, env_name in reads)
+            continue
+        offenders.extend(f"{rel}:{line}:{env_name}" for line, env_name in reads)
 
-    assert seen == SECRET_ENV_NAMES, (
-        f"the floor did not observe every provider secret env read: {sorted(seen)}"
+    assert seen_in_custody == SECRET_ENV_NAMES, (
+        "the custody module must be the single observed reader for every "
+        f"provider secret env var; saw {sorted(seen_in_custody)}"
     )
     assert offenders == [], (
-        "provider API keys must be read only by _provider_api_key; direct reads "
-        f"found at {offenders}"
+        "provider API keys must be read only by mcp_server/provider_key_custody.py; "
+        f"direct reads found at {offenders}"
     )
 
 
@@ -121,6 +247,26 @@ def test_provider_http_post_is_chokepointed() -> None:
     )
     assert missing == [], (
         f"provider wrapper(s) no longer use _provider_post: {missing}"
+    )
+
+
+def test_provider_http_chokepoint_enforces_cloud_network_egress() -> None:
+    fn = _functions(_parse(PROVIDERS))["_provider_post"]
+    require_lines = _call_lines(fn, "require_network_egress")
+    post_lines = [
+        node.lineno
+        for node in ast.walk(fn)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "post"
+        )
+    ]
+    assert require_lines, "_provider_post no longer enforces cloud network egress"
+    assert post_lines, "_provider_post no longer owns the raw client.post call"
+    assert min(require_lines) < min(post_lines), (
+        "_provider_post must enforce network_egress before the HTTP call; "
+        f"got require={require_lines}, post={post_lines}"
     )
 
 

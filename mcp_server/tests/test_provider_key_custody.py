@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 import pytest
 
+from mcp_server.tool_registry import PolicyViolation, REGISTRY
 from mcp_server.tools import providers
 
 
@@ -25,6 +27,25 @@ class _LeakingClient:
         rendered = f"url={url} kwargs={kwargs!r}"
         self._seen["outbound_had_secret"] = self._secret in rendered
         raise RuntimeError(f"transport failure carried {rendered}")
+
+
+class _ProviderResponse:
+    def __init__(self, provider: str):
+        self.provider = provider
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        if self.provider == "google":
+            return {
+                "candidates": [{"content": {"parts": [{"text": "stub"}]}}],
+                "usageMetadata": {},
+            }
+        return {
+            "choices": [{"message": {"content": "stub"}}],
+            "usage": {},
+        }
 
 
 @pytest.mark.asyncio
@@ -77,6 +98,70 @@ async def test_provider_transport_exception_does_not_return_or_log_api_key(
     assert secret not in caplog.text
     assert "transport failure carried" not in rendered_result
     assert "transport failure carried" not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_name", "call"),
+    [
+        ("xai", lambda prompt: providers.call_grok(prompt)),
+        ("google", lambda prompt: providers.call_gemini(prompt)),
+        ("together", lambda prompt: providers.call_together(prompt)),
+    ],
+)
+async def test_provider_calls_obtain_keys_only_through_custody(
+    monkeypatch,
+    provider_name: str,
+    call: Callable[[str], Any],
+):
+    for env_name in ("XAI_API_KEY", "GOOGLE_API_KEY", "TOGETHER_API_KEY"):
+        monkeypatch.delenv(env_name, raising=False)
+
+    secret = f"custody-{provider_name}-secret"
+    custody_calls: list[str] = []
+    outbound: list[str] = []
+
+    def fake_provider_api_key(provider: str) -> str:
+        custody_calls.append(provider)
+        return secret
+
+    async def fake_provider_post(provider: str, client: Any, url: str, **kwargs: Any):
+        assert provider == provider_name
+        rendered = repr(kwargs)
+        assert secret in rendered, "positive control: custody key reached the request"
+        outbound.append(rendered)
+        return _ProviderResponse(provider)
+
+    monkeypatch.setattr(providers, "provider_api_key", fake_provider_api_key)
+    monkeypatch.setattr(providers, "_provider_post", fake_provider_post)
+
+    result = await call("prompt")
+
+    assert custody_calls == [provider_name]
+    assert outbound, "provider call never reached the outbound chokepoint"
+    assert result["error"] is None
+    assert result["response"] == "stub"
+
+
+@pytest.mark.asyncio
+async def test_provider_http_chokepoint_refuses_when_cloud_egress_disabled(monkeypatch):
+    class _TripwireClient:
+        called = False
+
+        async def post(self, url: str, **kwargs: Any):
+            self.called = True
+            raise AssertionError("client.post must not run when egress is disabled")
+
+    registry = dict(REGISTRY)
+    registry["run_grok"] = replace(REGISTRY["run_grok"], network_egress=False)
+    monkeypatch.setattr(providers, "REGISTRY", registry)
+
+    client = _TripwireClient()
+    with pytest.raises(PolicyViolation) as exc:
+        await providers._provider_post("xai", client, "https://api.x.ai/v1/chat/completions")
+
+    assert "network egress" in str(exc.value)
+    assert client.called is False
 
 
 @pytest.mark.asyncio

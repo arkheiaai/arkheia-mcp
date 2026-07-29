@@ -29,10 +29,18 @@ from typing import Any
 
 import httpx
 
+from mcp_server.provider_key_custody import provider_api_key
+from mcp_server.tool_registry import REGISTRY, require_network_egress
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 60.0
 _OLLAMA_TIMEOUT  = 120.0   # local models can be slow to load
+_CLOUD_PROVIDER_TOOL = {
+    "xai": "run_grok",
+    "google": "run_gemini",
+    "together": "run_together",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -52,17 +60,6 @@ def _err_response(model: str, prompt: str, error: str) -> dict:
     }
 
 
-def _provider_api_key(provider: str) -> str:
-    """Single read point for provider credentials."""
-    if provider == "xai":
-        return os.environ.get("XAI_API_KEY", "")
-    if provider == "google":
-        return os.environ.get("GOOGLE_API_KEY", "")
-    if provider == "together":
-        return os.environ.get("TOGETHER_API_KEY", "")
-    raise ValueError(f"unknown provider: {provider}")
-
-
 def _bearer_json_headers(api_key: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {api_key}",
@@ -77,6 +74,9 @@ async def _provider_post(
     **kwargs: Any,
 ) -> httpx.Response:
     """Single outbound HTTP chokepoint for provider calls."""
+    tool_name = _CLOUD_PROVIDER_TOOL.get(provider)
+    if tool_name is not None:
+        require_network_egress(REGISTRY[tool_name], provider=provider)
     return await client.post(url, **kwargs)
 
 
@@ -123,7 +123,7 @@ async def call_grok(
 
     Returns: {response, model, prompt_hash, error}
     """
-    api_key = _provider_api_key("xai")
+    api_key = provider_api_key("xai")
     if not api_key:
         return _err_response(model, prompt, "XAI_API_KEY not set")
 
@@ -177,7 +177,7 @@ async def call_gemini(
 
     Returns: {response, model, prompt_hash, error}
     """
-    api_key = _provider_api_key("google")
+    api_key = provider_api_key("google")
     if not api_key:
         return _err_response(model, prompt, "GOOGLE_API_KEY not set")
 
@@ -240,7 +240,7 @@ async def call_together(
 
     Returns: {response, model, prompt_hash, usage, error}
     """
-    api_key = _provider_api_key("together")
+    api_key = provider_api_key("together")
     if not api_key:
         return _err_response(model, prompt, "TOGETHER_API_KEY not set")
 
