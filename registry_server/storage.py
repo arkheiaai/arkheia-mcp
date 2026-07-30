@@ -101,5 +101,7 @@ class ProfileStorage:
             "updated_at": datetime.fromtimestamp(
                 path.stat().st_mtime, tz=timezone.utc
             ).isoformat(),
+            "source_path": str(path),
+            "provider": data.get("api", {}).get("provider"),
         }
         return {key: meta[key] for key in PUBLIC_PROFILE_METADATA_KEYS}

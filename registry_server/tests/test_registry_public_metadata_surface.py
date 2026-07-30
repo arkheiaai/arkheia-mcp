@@ -116,7 +116,7 @@ def _concrete(path: str) -> str:
     return concrete
 
 
-def test_authenticated_profile_listing_is_metadata_allowlisted(client):
+def test_authenticated_profile_listing_is_metadata_allowlisted(client, profile_dir):
     resp = client.get("/profiles", headers=_auth())
     assert resp.status_code == 200, resp.text
 
@@ -128,7 +128,8 @@ def test_authenticated_profile_listing_is_metadata_allowlisted(client):
     serialized = json.dumps(listed, sort_keys=True)
     for marker in PRIVATE_MARKERS:
         assert marker not in serialized
-    for field in ("api", "provider", "license", "trust", "metadata", "detection", "features"):
+    assert str(profile_dir) not in serialized
+    for field in ("api", "provider", "source_path", "license", "trust", "metadata", "detection", "features"):
         assert field not in listed
 
     # Positive control: the raw authenticated download still contains the
