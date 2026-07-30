@@ -9,11 +9,8 @@ Instantiates and wires all components:
   - Endpoints: /detect/verify, /audit/log, /admin/*
 """
 
-# Load .env BEFORE any proxy.* imports so env vars are available.
 import os
 import sys
-from dotenv import load_dotenv, find_dotenv
-load_dotenv(find_dotenv(usecwd=True), override=True)
 
 import logging
 from contextlib import asynccontextmanager
