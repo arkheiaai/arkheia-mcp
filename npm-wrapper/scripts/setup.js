@@ -4,20 +4,42 @@
  * Does NOT auto-install Python dependencies (that happens on first run).
  */
 
-const { execSync } = require("child_process");
+const { execFileSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 
-const ARKHEIA_DIR = path.join(
-  process.env.HOME || process.env.USERPROFILE || "/tmp",
-  ".arkheia"
-);
-const CONFIG_FILE = path.join(ARKHEIA_DIR, "config.json");
+const USER_HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
+const ARKHEIA_DIR = USER_HOME ? path.join(USER_HOME, ".arkheia") : null;
+const CONFIG_FILE = ARKHEIA_DIR ? path.join(ARKHEIA_DIR, "config.json") : null;
+const BOOTSTRAP_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "SystemRoot",
+  "WINDIR",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "ARKHEIA_TEST_LOG",
+];
+
+function bootstrapEnv() {
+  const env = {};
+  for (const name of BOOTSTRAP_ENV_ALLOWLIST) {
+    if (process.env[name]) {
+      env[name] = process.env[name];
+    }
+  }
+  return env;
+}
 
 function checkApiKey() {
   // Check if config.json exists and has api_key
   try {
-    if (fs.existsSync(CONFIG_FILE)) {
+    if (CONFIG_FILE && fs.existsSync(CONFIG_FILE)) {
       const config = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
       if (config.api_key && config.api_key.length > 0) {
         return config.api_key;
@@ -38,16 +60,28 @@ function checkApiKey() {
 }
 
 function saveConfig(apiKey) {
+  if (!ARKHEIA_DIR || !CONFIG_FILE) {
+    console.error("  [arkheia] Warning: Could not determine a home directory for config");
+    return;
+  }
   try {
     if (!fs.existsSync(ARKHEIA_DIR)) {
-      fs.mkdirSync(ARKHEIA_DIR, { recursive: true });
+      fs.mkdirSync(ARKHEIA_DIR, { recursive: true, mode: 0o700 });
+    } else if (process.platform !== "win32") {
+      fs.chmodSync(ARKHEIA_DIR, 0o700);
     }
     const config = {
       api_key: apiKey,
       proxy_url: "https://arkheia-proxy-production.up.railway.app",
       provisioned_at: new Date().toISOString(),
     };
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
+    if (process.platform !== "win32") {
+      fs.chmodSync(CONFIG_FILE, 0o600);
+    }
   } catch (err) {
     console.error(`  [arkheia] Warning: Could not save config: ${err.message}`);
   }
@@ -57,9 +91,11 @@ function checkPython() {
   const candidates = ["python3", "python"];
   for (const cmd of candidates) {
     try {
-      const version = execSync(`${cmd} --version 2>&1`, {
+      const version = execFileSync(cmd, ["--version"], {
         encoding: "utf-8",
         timeout: 5000,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: bootstrapEnv(),
       }).trim();
       const match = version.match(/Python (\d+)\.(\d+)/);
       if (match && parseInt(match[1]) >= 3 && parseInt(match[2]) >= 10) {

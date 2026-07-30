@@ -438,6 +438,9 @@ function collectBundleFiles(dir, relative = "") {
     if (!inside(absolute, BUNDLE_ROOT)) {
       fail(`refusing to hash ${absolute}, which is outside ${BUNDLE_ROOT}`);
     }
+    if (entry.isSymbolicLink()) {
+      fail(`refusing to hash symlinked bundle entry ${relPosix}`);
+    }
     if (entry.isDirectory()) {
       files.push(...collectBundleFiles(absolute, rel));
     } else if (entry.isFile()) {

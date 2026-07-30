@@ -11,6 +11,7 @@ operation; fake commands are placed first on PATH and record any attempted use.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import stat
@@ -117,6 +118,7 @@ def _write_fake_python(fakebin: Path) -> None:
 
         argv = sys.argv[1:]
         if argv == ["--version"]:
+            record("version_probe")
             print("Python 3.11.8")
             sys.exit(0)
 
@@ -182,6 +184,19 @@ def _provenance_identity(package: Path) -> tuple[dict, str]:
         if entry["path"] == "requirements.txt"
     )
     return provenance, req_hash
+
+
+def _rehash_provenance_entry(package: Path, relative: str) -> None:
+    manifest_path = package / "python" / _PROVENANCE
+    provenance = json.loads(manifest_path.read_text(encoding="utf-8"))
+    digest = hashlib.sha256((package / "python" / relative).read_bytes()).hexdigest()
+    for entry in provenance["files"]:
+        if entry["path"] == relative:
+            entry["sha256"] = digest
+            break
+    else:
+        raise AssertionError(f"{relative} was not present in bundle provenance")
+    manifest_path.write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8")
 
 
 def _run_launcher(package: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -263,9 +278,14 @@ def test_dependency_install_is_bounded_to_verified_package_requirements(tmp_path
 
     events = _events(log)
     assert [e["kind"] for e in events].count("forbidden_git") == 0
-    assert [e["kind"] for e in events].count("create_venv") == 2
-    assert [e["kind"] for e in events].count("pip_install") == 2
+    assert [e["kind"] for e in events].count("version_probe") == 2
+    assert [e["kind"] for e in events].count("create_venv") == 1
+    assert [e["kind"] for e in events].count("pip_install") == 1
     assert [e["kind"] for e in events].count("server") == 2
+
+    probe_event = next(e for e in events if e["kind"] == "version_probe")
+    assert probe_event["env"]["ARKHEIA_API_KEY"] is None
+    assert probe_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
 
     create_venv_event = next(e for e in events if e["kind"] == "create_venv")
     assert create_venv_event["env"]["ARKHEIA_API_KEY"] is None
@@ -274,6 +294,7 @@ def test_dependency_install_is_bounded_to_verified_package_requirements(tmp_path
     pip_event = next(e for e in events if e["kind"] == "pip_install")
     pip_args = pip_event["argv"]
     assert pip_args[:3] == ["-m", "pip", "install"]
+    assert "--require-hashes" in pip_args
     assert "git+https://github.com/arkheiaai/arkheia-mcp.git" not in pip_args
     assert "mcp_server/requirements.txt" not in " ".join(pip_args)
     req_index = pip_args.index("-r")
@@ -359,6 +380,47 @@ def test_bytecode_debris_is_not_invisible_to_bundle_provenance(tmp_path):
     assert _events(log) == []
 
 
+def test_symlink_debris_is_not_invisible_to_bundle_provenance(tmp_path):
+    package = _packed_package(tmp_path)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "events.jsonl"
+    _write_fake_python(fakebin)
+
+    target = tmp_path / "outside.py"
+    target.write_text("raise RuntimeError('outside bundle')\n", encoding="utf-8")
+    (package / "python" / "mcp_server" / "evil.py").symlink_to(target)
+
+    result = _run_launcher(package, _base_env(tmp_path, fakebin, log))
+
+    assert result.returncode != 0
+    assert "refuses symbolic links" in result.stderr
+    assert "mcp_server/evil.py" in result.stderr
+    assert _events(log) == []
+
+
+def test_reforged_requirements_with_unapproved_package_is_rejected(tmp_path):
+    package = _packed_package(tmp_path)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "events.jsonl"
+    _write_fake_python(fakebin)
+
+    requirements = package / "python" / "requirements.txt"
+    requirements.write_text(
+        "evil-package==1.0 \\\n"
+        "    --hash=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        encoding="utf-8",
+    )
+    _rehash_provenance_entry(package, "requirements.txt")
+
+    result = _run_launcher(package, _base_env(tmp_path, fakebin, log))
+
+    assert result.returncode != 0
+    assert "unapproved package/version evil-package==1.0" in result.stderr
+    assert _events(log) == []
+
+
 def test_launcher_recreates_unmarked_existing_venv_before_execution(tmp_path):
     package = _packed_package(tmp_path)
     fakebin = tmp_path / "fakebin"
@@ -398,3 +460,34 @@ def test_launcher_recreates_unmarked_existing_venv_before_execution(tmp_path):
     assert create_venv_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
     assert pip_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
     assert server_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
+
+
+def test_setup_writes_private_config_and_scrubs_python_probe(tmp_path):
+    package = _packed_package(tmp_path)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "events.jsonl"
+    _write_fake_python(fakebin)
+
+    env = _base_env(tmp_path, fakebin, log)
+    result = subprocess.run(  # noqa: S603 - node path and cwd are test-controlled
+        [npm_bundle.require_node(), "scripts/setup.js"],
+        cwd=package,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    config = tmp_path / "home" / ".arkheia" / "config.json"
+    assert config.is_file()
+    if os.name != "nt":
+        assert stat.S_IMODE(config.stat().st_mode) == 0o600
+        assert stat.S_IMODE(config.parent.stat().st_mode) == 0o700
+
+    events = _events(log)
+    probe_event = next(e for e in events if e["kind"] == "version_probe")
+    assert probe_event["env"]["ARKHEIA_API_KEY"] is None
+    assert probe_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
+    assert '|| "/tmp"' not in (package / "scripts" / "setup.js").read_text(encoding="utf-8")

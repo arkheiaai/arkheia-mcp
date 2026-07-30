@@ -42,6 +42,40 @@ const PROVENANCE_PATH = path.join(BUNDLED_PYTHON_DIR, PROVENANCE_RELATIVE);
 const REQUIREMENTS = path.join(BUNDLED_PYTHON_DIR, REQUIREMENTS_RELATIVE);
 const PROVENANCE_SCHEMA = "arkheia.npm.bundle-provenance.v1";
 const VENV_SCHEMA = "arkheia.npm.venv.v1";
+const RUNTIME_REQUIREMENTS = new Map([
+  ["annotated-types", "0.8.0"],
+  ["anyio", "4.14.2"],
+  ["attrs", "26.1.0"],
+  ["certifi", "2026.7.22"],
+  ["cffi", "2.1.0"],
+  ["click", "8.4.2"],
+  ["cryptography", "49.0.0"],
+  ["exceptiongroup", "1.3.1"],
+  ["h11", "0.16.0"],
+  ["httpcore", "1.0.9"],
+  ["httpx", "0.27.1"],
+  ["httpx-sse", "0.4.3"],
+  ["idna", "3.18"],
+  ["jsonschema", "4.26.0"],
+  ["jsonschema-specifications", "2025.9.1"],
+  ["mcp", "1.28.1"],
+  ["pycparser", "3.0"],
+  ["pydantic", "2.11.0"],
+  ["pydantic-core", "2.33.0"],
+  ["pydantic-settings", "2.14.2"],
+  ["pyjwt", "2.13.0"],
+  ["python-dotenv", "1.2.2"],
+  ["python-multipart", "0.0.32"],
+  ["pyyaml", "6.0.3"],
+  ["referencing", "0.37.0"],
+  ["rpds-py", "2026.6.3"],
+  ["sniffio", "1.3.1"],
+  ["sse-starlette", "3.4.6"],
+  ["starlette", "1.3.1"],
+  ["typing-extensions", "4.16.0"],
+  ["typing-inspection", "0.4.2"],
+  ["uvicorn", "0.52.0"],
+]);
 const BOOTSTRAP_ENV_ALLOWLIST = [
   "PATH",
   "HOME",
@@ -105,6 +139,62 @@ function resolveBundlePath(relativePath, label) {
 
 function sha256File(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function currentUid() {
+  if (process.platform === "win32" || typeof process.getuid !== "function") {
+    return null;
+  }
+  return process.getuid();
+}
+
+function ownedByCurrentUser(stat) {
+  const uid = currentUid();
+  return uid === null || stat.uid === uid;
+}
+
+function hasGroupOrOtherBits(stat) {
+  return process.platform !== "win32" && (stat.mode & 0o077) !== 0;
+}
+
+function ensurePrivateRuntimeHome() {
+  if (!fs.existsSync(ARKHEIA_HOME)) {
+    fs.mkdirSync(ARKHEIA_HOME, { recursive: true, mode: 0o700 });
+    return true;
+  }
+
+  const stat = fs.lstatSync(ARKHEIA_HOME);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    fail(`${ARKHEIA_HOME} is not a private runtime directory`);
+  }
+  if (!ownedByCurrentUser(stat)) {
+    fail(`${ARKHEIA_HOME} is not owned by the current user`);
+  }
+  if (hasGroupOrOtherBits(stat)) {
+    fs.chmodSync(ARKHEIA_HOME, 0o700);
+    return false;
+  }
+  return true;
+}
+
+function privateRegularFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return false;
+  }
+  const stat = fs.lstatSync(filePath);
+  return (
+    stat.isFile() &&
+    !stat.isSymbolicLink() &&
+    ownedByCurrentUser(stat) &&
+    !hasGroupOrOtherBits(stat)
+  );
+}
+
+function writePrivateFile(filePath, contents) {
+  fs.writeFileSync(filePath, contents, { encoding: "utf-8", mode: 0o600 });
+  if (process.platform !== "win32") {
+    fs.chmodSync(filePath, 0o600);
+  }
 }
 
 function readJson(filePath, label) {
@@ -180,6 +270,9 @@ function collectBundleFiles(dir, relative = "") {
     if (!inside(absolute, BUNDLED_PYTHON_DIR)) {
       fail(`bundled path resolves outside the bundled Python tree: ${relPosix}`);
     }
+    if (entry.isSymbolicLink()) {
+      fail(`bundle provenance refuses symbolic links in the bundled Python tree: ${relPosix}`);
+    }
     if (entry.isDirectory()) {
       files.push(...collectBundleFiles(absolute, rel));
     } else if (entry.isFile()) {
@@ -187,6 +280,70 @@ function collectBundleFiles(dir, relative = "") {
     }
   }
   return files.sort();
+}
+
+function normaliseRequirementName(name) {
+  return name.toLowerCase().replace(/_/g, "-");
+}
+
+function validateRequirementsPolicy() {
+  const lines = fs.readFileSync(REQUIREMENTS, "utf-8").split(/\r?\n/);
+  const seen = new Set();
+  let pendingRequirement = null;
+  let pendingHashes = 0;
+
+  const finishRequirement = () => {
+    if (pendingRequirement && pendingHashes === 0) {
+      fail(`${REQUIREMENTS_RELATIVE} entry ${pendingRequirement} has no --hash pins`);
+    }
+    pendingRequirement = null;
+    pendingHashes = 0;
+  };
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (trimmed.startsWith("--hash=")) {
+      if (!pendingRequirement) {
+        fail(`${REQUIREMENTS_RELATIVE} contains a hash with no requirement`);
+      }
+      pendingHashes += 1;
+      continue;
+    }
+    if (trimmed.startsWith("-")) {
+      fail(`${REQUIREMENTS_RELATIVE} contains unsupported pip option: ${trimmed}`);
+    }
+
+    finishRequirement();
+    const requirement = trimmed.endsWith("\\") ? trimmed.slice(0, -1).trim() : trimmed;
+    const match = requirement.match(
+      /^([A-Za-z0-9_.-]+)(?:\[[A-Za-z0-9_,.-]+\])?==([^\s;]+)(?:\s*;\s*[^#]+)?$/
+    );
+    if (!match) {
+      fail(`${REQUIREMENTS_RELATIVE} entries must be exact hash-pinned packages: ${trimmed}`);
+    }
+    const name = normaliseRequirementName(match[1]);
+    const version = match[2];
+    const expectedVersion = RUNTIME_REQUIREMENTS.get(name);
+    if (expectedVersion !== version) {
+      fail(
+        `${REQUIREMENTS_RELATIVE} contains unapproved package/version ` +
+          `${name}==${version}`
+      );
+    }
+    if (seen.has(name)) {
+      fail(`${REQUIREMENTS_RELATIVE} contains duplicate package ${name}`);
+    }
+    seen.add(name);
+    pendingRequirement = `${name}==${version}`;
+  }
+  finishRequirement();
+
+  for (const [name] of RUNTIME_REQUIREMENTS) {
+    if (!seen.has(name)) {
+      fail(`${REQUIREMENTS_RELATIVE} is missing approved package ${name}`);
+    }
+  }
 }
 
 function verifyBundle() {
@@ -276,6 +433,7 @@ function verifyBundle() {
       fail(`bundle provenance does not pin required file ${required}`);
     }
   }
+  validateRequirementsPolicy();
 
   const actualFiles = collectBundleFiles(BUNDLED_PYTHON_DIR);
   const declaredFiles = [...manifestFiles.keys()].sort();
@@ -305,6 +463,7 @@ function findPython() {
         encoding: "utf-8",
         timeout: 5000,
         stdio: ["ignore", "pipe", "pipe"],
+        env: bootstrapEnv(),
       }).trim();
       const match = version.match(/Python (\d+)\.(\d+)/);
       if (match) {
@@ -322,7 +481,7 @@ function findPython() {
 }
 
 function venvMarkerMatches(bundle) {
-  if (!fs.existsSync(VENV_MARKER)) {
+  if (!privateRegularFile(VENV_MARKER)) {
     return false;
   }
   try {
@@ -340,7 +499,7 @@ function venvMarkerMatches(bundle) {
 }
 
 function writeVenvMarker(bundle) {
-  fs.writeFileSync(
+  writePrivateFile(
     VENV_MARKER,
     JSON.stringify(
       {
@@ -356,19 +515,40 @@ function writeVenvMarker(bundle) {
   );
 }
 
-function ensureVenv(python, bundle) {
+function venvCanBeReused(bundle, runtimeHomeTrusted, venvPython) {
+  if (!runtimeHomeTrusted || !venvMarkerMatches(bundle)) {
+    return false;
+  }
+  try {
+    const venvStat = fs.lstatSync(VENV_DIR);
+    const pythonStat = fs.lstatSync(venvPython);
+    if (!venvStat.isDirectory() || venvStat.isSymbolicLink()) {
+      return false;
+    }
+    if (!pythonStat.isFile() || pythonStat.isSymbolicLink()) {
+      return false;
+    }
+    const realVenv = fs.realpathSync(VENV_DIR);
+    const realPython = fs.realpathSync(venvPython);
+    return inside(realPython, realVenv);
+  } catch {
+    return false;
+  }
+}
+
+function ensureVenv(python, bundle, runtimeHomeTrusted) {
   const venvPython =
     process.platform === "win32"
       ? path.join(VENV_DIR, "Scripts", "python.exe")
       : path.join(VENV_DIR, "bin", "python");
 
+  if (venvCanBeReused(bundle, runtimeHomeTrusted, venvPython)) {
+    return fs.realpathSync(venvPython);
+  }
+
   if (fs.existsSync(VENV_DIR)) {
     process.stderr.write("[arkheia] Recreating virtual environment from verified package bytes...\n");
     fs.rmSync(VENV_DIR, { recursive: true, force: true });
-  }
-
-  if (!fs.existsSync(ARKHEIA_HOME)) {
-    fs.mkdirSync(ARKHEIA_HOME, { recursive: true, mode: 0o700 });
   }
 
   process.stderr.write("[arkheia] Creating virtual environment...\n");
@@ -385,7 +565,7 @@ function ensureVenv(python, bundle) {
 }
 
 function depsMarkerMatches(marker, bundle) {
-  if (!fs.existsSync(marker)) {
+  if (!privateRegularFile(marker)) {
     return false;
   }
   try {
@@ -418,6 +598,7 @@ function installDeps(venvPython, bundle) {
       "--quiet",
       "--disable-pip-version-check",
       "--no-cache-dir",
+      "--require-hashes",
       "-r",
       REQUIREMENTS,
     ],
@@ -432,7 +613,7 @@ function installDeps(venvPython, bundle) {
     }
   );
 
-  fs.writeFileSync(
+  writePrivateFile(
     marker,
     JSON.stringify(
       {
@@ -458,14 +639,19 @@ function main() {
     );
     process.exit(1);
   }
+  const runtimeHomeTrusted = ensurePrivateRuntimeHome();
 
   // ── Load config from ~/.arkheia/config.json ──────────────────
   const configPath = path.join(ARKHEIA_HOME, "config.json");
   let arkheiaConfig = {};
   try {
     if (fs.existsSync(configPath)) {
-      arkheiaConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      process.stderr.write(`[arkheia] Loaded config from ${configPath}\n`);
+      if (!runtimeHomeTrusted || !privateRegularFile(configPath)) {
+        process.stderr.write(`[arkheia] Warning: Ignoring non-private config at ${configPath}\n`);
+      } else {
+        arkheiaConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+        process.stderr.write(`[arkheia] Loaded config from ${configPath}\n`);
+      }
     }
   } catch (err) {
     process.stderr.write(
@@ -496,7 +682,7 @@ function main() {
 
   let venvPython;
   try {
-    venvPython = ensureVenv(python, bundle);
+    venvPython = ensureVenv(python, bundle, runtimeHomeTrusted);
     installDeps(venvPython, bundle);
   } catch (err) {
     process.stderr.write(
