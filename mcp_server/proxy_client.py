@@ -10,7 +10,7 @@ Failures surface as UNKNOWN risk with error field set.
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 
@@ -60,6 +60,9 @@ class ProxyClient:
         response: str,
         model_id: str,
         session_id: Optional[str] = None,
+        usage: Optional[dict[str, Any]] = None,
+        output_tokens: Any = None,
+        is_function_call: Any = None,
     ) -> dict:
         """
         Detect fabrication in a model response.
@@ -78,7 +81,15 @@ class ProxyClient:
         # Try local proxy first (if last attempt didn't fail with ConnectError)
         if self._local_available:
             attempted_sources.append("local")
-            local_result = await self._verify_local(prompt, response, model_id, session_id)
+            local_result = await self._verify_local(
+                prompt,
+                response,
+                model_id,
+                session_id,
+                usage=usage,
+                output_tokens=output_tokens,
+                is_function_call=is_function_call,
+            )
             local_error = local_result.get("error")
             if local_error:
                 route_errors.append(local_error)
@@ -115,7 +126,14 @@ class ProxyClient:
         # Fallback: hosted API
         if self.api_key:
             attempted_sources.append("hosted")
-            hosted_result = await self._verify_hosted(prompt, response, model_id)
+            hosted_result = await self._verify_hosted(
+                prompt,
+                response,
+                model_id,
+                usage=usage,
+                output_tokens=output_tokens,
+                is_function_call=is_function_call,
+            )
             hosted_error = hosted_result.get("error")
             if hosted_error:
                 route_errors.append(hosted_error)
@@ -211,6 +229,9 @@ class ProxyClient:
         response: str,
         model_id: str,
         session_id: Optional[str] = None,
+        usage: Optional[dict[str, Any]] = None,
+        output_tokens: Any = None,
+        is_function_call: Any = None,
     ) -> dict:
         """POST /detect/verify on local Enterprise Proxy."""
         payload = {
@@ -220,6 +241,12 @@ class ProxyClient:
         }
         if session_id:
             payload["session_id"] = session_id
+        if usage is not None:
+            payload["usage"] = usage
+        if output_tokens is not None:
+            payload["output_tokens"] = output_tokens
+        if is_function_call is not None:
+            payload["is_function_call"] = is_function_call
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -264,6 +291,9 @@ class ProxyClient:
         prompt: str,
         response: str,
         model_id: str,
+        usage: Optional[dict[str, Any]] = None,
+        output_tokens: Any = None,
+        is_function_call: Any = None,
     ) -> dict:
         """POST /v1/detect on hosted Arkheia API (arkheia-proxy-production.up.railway.app)."""
         payload = {
@@ -271,6 +301,12 @@ class ProxyClient:
             "response": response,
             "prompt": prompt,
         }
+        if usage is not None:
+            payload["usage"] = usage
+        if output_tokens is not None:
+            payload["output_tokens"] = output_tokens
+        if is_function_call is not None:
+            payload["is_function_call"] = is_function_call
         headers = {"X-Arkheia-Key": self.api_key}
 
         try:
