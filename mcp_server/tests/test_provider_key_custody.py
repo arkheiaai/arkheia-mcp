@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import importlib
 import json
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
 import pytest
 
+from mcp_server import provider_key_custody
 from mcp_server.tool_registry import PolicyViolation, REGISTRY
 from mcp_server.tools import providers
 
@@ -50,20 +53,20 @@ class _ProviderResponse:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("env_name", "secret", "call"),
+    ("provider_name", "secret", "call"),
     [
         (
-            "XAI_API_KEY",
+            "xai",
             "xai-" + "A" * 40,
             lambda prompt: providers.call_grok(prompt),
         ),
         (
-            "GOOGLE_API_KEY",
+            "google",
             "AIzaSy" + "B" * 33,
             lambda prompt: providers.call_gemini(prompt),
         ),
         (
-            "TOGETHER_API_KEY",
+            "together",
             "tg-" + "C" * 48,
             lambda prompt: providers.call_together(prompt),
         ),
@@ -72,12 +75,17 @@ class _ProviderResponse:
 async def test_provider_transport_exception_does_not_return_or_log_api_key(
     monkeypatch,
     caplog,
-    env_name: str,
+    provider_name: str,
     secret: str,
     call: Callable[[str], Any],
 ):
     seen = {"outbound_had_secret": False}
-    monkeypatch.setenv(env_name, secret)
+
+    def fake_provider_api_key(provider: str) -> str:
+        assert provider == provider_name
+        return secret
+
+    monkeypatch.setattr(providers, "provider_api_key", fake_provider_api_key)
     monkeypatch.setattr(
         providers.httpx,
         "AsyncClient",
@@ -98,6 +106,29 @@ async def test_provider_transport_exception_does_not_return_or_log_api_key(
     assert secret not in caplog.text
     assert "transport failure carried" not in rendered_result
     assert "transport failure carried" not in caplog.text
+
+
+def test_provider_key_custody_pops_provider_secrets_from_ambient_environ():
+    secrets = {
+        "XAI_API_KEY": "xai-custody-pop-secret",
+        "GOOGLE_API_KEY": "google-custody-pop-secret",
+        "TOGETHER_API_KEY": "together-custody-pop-secret",
+    }
+
+    for env_name, secret in secrets.items():
+        os.environ[env_name] = secret
+
+    try:
+        reloaded = importlib.reload(provider_key_custody)
+
+        assert all(env_name not in os.environ for env_name in secrets)
+        assert reloaded.provider_api_key("xai") == secrets["XAI_API_KEY"]
+        assert reloaded.provider_api_key("google") == secrets["GOOGLE_API_KEY"]
+        assert reloaded.provider_api_key("together") == secrets["TOGETHER_API_KEY"]
+    finally:
+        for env_name in secrets:
+            os.environ.pop(env_name, None)
+        importlib.reload(provider_key_custody)
 
 
 @pytest.mark.asyncio
@@ -346,7 +377,7 @@ async def test_gemini_parse_failure_uses_named_placeholder_not_raw_exception(
     caplog,
 ):
     secret = "AIzaSy" + "D" * 33
-    monkeypatch.setenv("GOOGLE_API_KEY", secret)
+    monkeypatch.setattr(providers, "provider_api_key", lambda provider: secret)
 
     class _BadShapeResponse:
         def raise_for_status(self):

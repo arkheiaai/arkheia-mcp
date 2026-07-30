@@ -12,9 +12,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PROVIDERS = ROOT / "mcp_server" / "tools" / "providers.py"
 SERVER = ROOT / "mcp_server" / "server.py"
+ROOT_SERVER = ROOT / "server.py"
+PROXY_CLIENT = ROOT / "mcp_server" / "proxy_client.py"
 CUSTODY = ROOT / "mcp_server" / "provider_key_custody.py"
+PROXY_PASSTHROUGH = ROOT / "proxy" / "endpoints" / "passthrough.py"
 
 SECRET_ENV_NAMES = {"XAI_API_KEY", "GOOGLE_API_KEY", "TOGETHER_API_KEY"}
+WHOLE_ENVIRONMENT_READ = "<ambient os.environ>"
 CLOUD_PROVIDER_CALLS = {
     "run_grok": "call_grok",
     "run_gemini": "call_gemini",
@@ -31,21 +35,36 @@ PROVIDER_EGRESS_CALL_NAMES = PROVIDER_FUNCTIONS | {
     "_provider_post",
 }
 RAW_HTTP_CALL_NAMES = {"post", "request", "stream"}
+WHOLE_ENV_METHODS = {"copy", "items", "values", "popitem"}
+WHOLE_ENV_CONSTRUCTORS = {"dict", "list", "tuple", "set", "frozenset"}
+KNOWN_NON_MCP_PROVIDER_EGRESS = {PROXY_PASSTHROUGH}
+NON_RUNTIME_WHOLE_ENV_READ_COUNTS = {
+    ROOT / "scripts" / "pilot_validate.py": 2,
+    ROOT / "tools" / "mutate_f10_interception.py": 1,
+}
+
+
+def _is_production_py_file(path: Path) -> bool:
+    if path.suffix != ".py":
+        return False
+    rel_parts = path.relative_to(ROOT).parts
+    return (
+        "tests" not in rel_parts
+        and ".git" not in rel_parts
+        and "__pycache__" not in rel_parts
+    )
 
 
 def _production_py_files() -> list[Path]:
-    files = [
-        path
-        for path in ROOT.rglob("*.py")
-        if "tests" not in path.relative_to(ROOT).parts
-        and ".git" not in path.parts
-        and "__pycache__" not in path.parts
-    ]
+    files = [path for path in ROOT.rglob("*.py") if _is_production_py_file(path)]
     expected = {
         CUSTODY,
         PROVIDERS,
+        PROXY_CLIENT,
+        ROOT_SERVER,
         ROOT / "mcp_server" / "tools" / "__init__.py",
         ROOT / "proxy" / "__init__.py",
+        PROXY_PASSTHROUGH,
     }
     missing = sorted(str(path.relative_to(ROOT)) for path in expected - set(files))
     assert missing == [], f"provider custody floor missed production files: {missing}"
@@ -56,18 +75,13 @@ def _production_py_files() -> list[Path]:
     return sorted(files)
 
 
-def _mcp_production_py_files() -> list[Path]:
-    files = [
-        path
-        for path in (ROOT / "mcp_server").rglob("*.py")
-        if "tests" not in path.relative_to(ROOT).parts
-        and "__pycache__" not in path.parts
-    ]
-    expected = {PROVIDERS, SERVER, CUSTODY}
+def _provider_egress_py_files() -> list[Path]:
+    files = _production_py_files()
+    expected = {PROVIDERS, SERVER, CUSTODY, PROXY_PASSTHROUGH, ROOT_SERVER}
     missing = sorted(str(path.relative_to(ROOT)) for path in expected - set(files))
     assert missing == [], f"provider egress floor missed production files: {missing}"
-    assert len(files) >= 8, (
-        f"provider egress floor scanned only {len(files)} MCP production files: "
+    assert len(files) >= 50, (
+        f"provider egress floor scanned only {len(files)} production files: "
         f"{[str(p.relative_to(ROOT)) for p in files]}"
     )
     return sorted(files)
@@ -145,6 +159,7 @@ class _SecretEnvReadScanner(ast.NodeVisitor):
         self.os_aliases: set[str] = set()
         self.environ_aliases: set[str] = set()
         self.getenv_aliases: set[str] = set()
+        self.whole_environ_reader_aliases: set[str] = set()
         self.string_constants: dict[str, str] = {}
         self.reads: list[tuple[int, str]] = []
 
@@ -181,18 +196,28 @@ class _SecretEnvReadScanner(ast.NodeVisitor):
             env_name = _literal_arg(node, 0, self.string_constants)
         elif (
             isinstance(node.func, ast.Attribute)
-            and node.func.attr not in {"clear", "copy", "items", "keys", "values"}
+            and node.func.attr not in (WHOLE_ENV_METHODS | {"clear"})
             and self._is_environ_expr(node.func.value)
         ):
             env_name = _literal_arg(node, 0, self.string_constants)
         if env_name in SECRET_ENV_NAMES:
             self.reads.append((node.lineno, env_name))
+        elif self._is_whole_environ_reader_func(node.func):
+            self.reads.append((node.lineno, WHOLE_ENVIRONMENT_READ))
+        elif self._call_materializes_environ(node):
+            self.reads.append((node.lineno, WHOLE_ENVIRONMENT_READ))
         self.generic_visit(node)
 
     def visit_Subscript(self, node: ast.Subscript) -> None:
         env_name = _literal_slice(node, self.string_constants)
         if env_name in SECRET_ENV_NAMES and self._is_environ_expr(node.value):
             self.reads.append((node.lineno, env_name))
+        self.generic_visit(node)
+
+    def visit_Dict(self, node: ast.Dict) -> None:
+        for key, value in zip(node.keys, node.values):
+            if key is None and self._is_environ_expr(value):
+                self.reads.append((node.lineno, WHOLE_ENVIRONMENT_READ))
         self.generic_visit(node)
 
     def _record_string_constants(self, targets: list[ast.expr], value: ast.expr) -> None:
@@ -211,6 +236,8 @@ class _SecretEnvReadScanner(ast.NodeVisitor):
             self.environ_aliases.update(names)
         elif self._is_getenv_func(value):
             self.getenv_aliases.update(names)
+        elif self._is_whole_environ_reader_func(value):
+            self.whole_environ_reader_aliases.update(names)
         elif (
             isinstance(value, ast.Attribute)
             and value.attr == "get"
@@ -226,6 +253,23 @@ class _SecretEnvReadScanner(ast.NodeVisitor):
             and node.attr == "getenv"
             and self._is_os_expr(node.value)
         )
+
+    def _is_whole_environ_reader_func(self, node: ast.expr) -> bool:
+        if isinstance(node, ast.Name):
+            return node.id in self.whole_environ_reader_aliases
+        return (
+            isinstance(node, ast.Attribute)
+            and node.attr in WHOLE_ENV_METHODS
+            and self._is_environ_expr(node.value)
+        )
+
+    def _call_materializes_environ(self, node: ast.Call) -> bool:
+        if not (
+            isinstance(node.func, ast.Name)
+            and node.func.id in WHOLE_ENV_CONSTRUCTORS
+        ):
+            return False
+        return any(self._is_environ_expr(arg) for arg in node.args)
 
     def _is_environ_expr(self, node: ast.expr) -> bool:
         if isinstance(node, ast.Name):
@@ -310,36 +354,59 @@ def _provider_egress_report(path: Path) -> _ProviderEgressReport:
 
 def test_secret_env_scanner_catches_common_bypass_forms() -> None:
     snippets = {
-        "os.environ.get": "import os\nx = os.environ.get('XAI_API_KEY')\n",
-        "os.getenv": "import os\nx = os.getenv('GOOGLE_API_KEY')\n",
-        "os.environ subscript": "import os\nx = os.environ['TOGETHER_API_KEY']\n",
-        "import os as alias": "import os as _os\nx = _os.environ.get('XAI_API_KEY')\n",
-        "from os import getenv as alias": (
-            "from os import getenv as get\nx = get('GOOGLE_API_KEY')\n"
-        ),
-        "from os import environ as alias": (
+        "01 os.environ.get": "import os\nx = os.environ.get('XAI_API_KEY')\n",
+        "02 os.getenv": "import os\nx = os.getenv('GOOGLE_API_KEY')\n",
+        "03 os.environ subscript": "import os\nx = os.environ['TOGETHER_API_KEY']\n",
+        "04 import os as alias": "import os as _os\nx = _os.environ.get('XAI_API_KEY')\n",
+        "05 from os getenv alias": "from os import getenv as get\nx = get('GOOGLE_API_KEY')\n",
+        "06 from os environ alias get": (
             "from os import environ as env\nx = env.get('TOGETHER_API_KEY')\n"
         ),
-        "env assignment": "import os\nenv = os.environ\nx = env.get('XAI_API_KEY')\n",
-        "getter assignment": (
-            "import os\nget = os.environ.get\nx = get('GOOGLE_API_KEY')\n"
-        ),
-        "environ setdefault": (
-            "import os\nx = os.environ.setdefault('XAI_API_KEY', '')\n"
-        ),
-        "environ pop": "import os\nx = os.environ.pop('GOOGLE_API_KEY', '')\n",
-        "constant name": (
-            "import os\n_SECRET = 'TOGETHER_API_KEY'\nx = os.environ.get(_SECRET)\n"
-        ),
-        "constant concatenation": (
-            "import os\n_SECRET = 'XAI_API' + '_KEY'\nx = os.getenv(_SECRET)\n"
-        ),
-        "constant f-string": (
+        "07 env assignment get": "import os\nenv = os.environ\nx = env.get('XAI_API_KEY')\n",
+        "08 getter assignment": "import os\nget = os.environ.get\nx = get('GOOGLE_API_KEY')\n",
+        "09 environ setdefault": "import os\nx = os.environ.setdefault('XAI_API_KEY', '')\n",
+        "10 environ pop": "import os\nx = os.environ.pop('GOOGLE_API_KEY', '')\n",
+        "11 constant name": "import os\n_SECRET = 'TOGETHER_API_KEY'\nx = os.environ.get(_SECRET)\n",
+        "12 constant concatenation": "import os\n_SECRET = 'XAI_API' + '_KEY'\nx = os.getenv(_SECRET)\n",
+        "13 constant f-string": (
             "import os\n_PART = 'GOOGLE'\n_SECRET = f'{_PART}_API_KEY'\nx = os.environ[_SECRET]\n"
+        ),
+        "14 os.environ copy": "import os\nx = os.environ.copy()\n",
+        "15 imported environ copy": "from os import environ\nx = environ.copy()\n",
+        "16 env alias copy": "import os\nenv = os.environ\nx = env.copy()\n",
+        "17 copy method alias": "import os\ncopy = os.environ.copy\nx = copy()\n",
+        "18 os.environ items": "import os\nx = list(os.environ.items())\n",
+        "19 imported environ items": "from os import environ as env\nx = tuple(env.items())\n",
+        "20 items method alias": "import os\nitems = os.environ.items\nx = dict(items())\n",
+        "21 dict os.environ": "import os\nx = dict(os.environ)\n",
+        "22 dict env alias": "import os\nenv = os.environ\nx = dict(env)\n",
+        "23 dict env items": "import os\nenv = os.environ\nx = dict(env.items())\n",
+        "24 dict unpack": "import os\nx = {**os.environ}\n",
+        "25 values materialization": "import os\nx = list(os.environ.values())\n",
+        "26 values method alias": "import os\nvalues = os.environ.values\nx = list(values())\n",
+        "27 explicit getitem": "import os\nx = os.environ.__getitem__('XAI_API_KEY')\n",
+        "28 alias subscript": "import os\nENV = os.environ\nx = ENV['GOOGLE_API_KEY']\n",
+        "29 imported environ getter alias": (
+            "from os import environ\nget = environ.get\nx = get('TOGETHER_API_KEY')\n"
         ),
     }
     missed = {name: _secret_env_reads(src) for name, src in snippets.items()}
+    assert len(snippets) == 29
     assert all(reads for reads in missed.values()), missed
+
+
+def test_secret_env_scanner_catches_proxy_client_whole_environ_copy_regression() -> None:
+    proxy_client_source = PROXY_CLIENT.read_text(encoding="utf-8").rstrip("\n")
+    expected_line = len(proxy_client_source.splitlines()) + 1
+    source = proxy_client_source + "\n_LEAK = os.environ.copy()\n"
+
+    assert (expected_line, WHOLE_ENVIRONMENT_READ) in _secret_env_reads(source)
+
+
+def test_provider_floor_file_selection_includes_repo_root_shadow_files() -> None:
+    assert _is_production_py_file(ROOT / "shadow_provider.py")
+    assert _is_production_py_file(ROOT / "mcp_server" / "proxy_client.py")
+    assert not _is_production_py_file(ROOT / "tests" / "shadow_provider.py")
 
 
 def test_provider_egress_scanner_catches_new_raw_http_file() -> None:
@@ -366,6 +433,9 @@ async def run_shadow_provider(prompt):
 
 def test_provider_secret_env_reads_are_confined_to_custody_module() -> None:
     seen_in_custody: set[str] = set()
+    seen_allowed_whole_env_reads = {
+        path: 0 for path in NON_RUNTIME_WHOLE_ENV_READ_COUNTS
+    }
     offenders: list[str] = []
 
     for path in _production_py_files():
@@ -375,7 +445,14 @@ def test_provider_secret_env_reads_are_confined_to_custody_module() -> None:
         if path == CUSTODY:
             seen_in_custody.update(env_name for _, env_name in reads)
             continue
-        offenders.extend(f"{rel}:{line}:{env_name}" for line, env_name in reads)
+        for line, env_name in reads:
+            if (
+                env_name == WHOLE_ENVIRONMENT_READ
+                and path in NON_RUNTIME_WHOLE_ENV_READ_COUNTS
+            ):
+                seen_allowed_whole_env_reads[path] += 1
+                continue
+            offenders.append(f"{rel}:{line}:{env_name}")
 
     assert seen_in_custody == SECRET_ENV_NAMES, (
         "the custody module must be the single observed reader for every "
@@ -385,31 +462,46 @@ def test_provider_secret_env_reads_are_confined_to_custody_module() -> None:
         "provider API keys must be read only by mcp_server/provider_key_custody.py; "
         f"direct reads found at {offenders}"
     )
+    assert seen_allowed_whole_env_reads == NON_RUNTIME_WHOLE_ENV_READ_COUNTS, (
+        "the only whole-environment reads outside runtime custody must be the "
+        "known script/mutation subprocess env clones; saw "
+        f"{ {str(path.relative_to(ROOT)): count for path, count in seen_allowed_whole_env_reads.items()} }"
+    )
 
 
 def test_provider_http_post_is_chokepointed() -> None:
     reports = {
         path: report
-        for path in _mcp_production_py_files()
+        for path in _provider_egress_py_files()
         if (report := _provider_egress_report(path)).is_provider_egress
     }
     missing_expected = sorted(
         str(path.relative_to(ROOT))
-        for path in {PROVIDERS, SERVER} - set(reports)
+        for path in {PROVIDERS, SERVER, PROXY_PASSTHROUGH} - set(reports)
     )
     assert missing_expected == [], (
         "provider egress discovery missed expected production sites: "
         f"{missing_expected}; discovered "
         f"{[str(path.relative_to(ROOT)) for path in reports]}"
     )
-    assert len(reports) >= 2, (
+    assert len(reports) >= 3, (
         "provider egress discovery measured too little work: "
         f"{[str(path.relative_to(ROOT)) for path in reports]}"
+    )
+    unexpected_reports = sorted(
+        str(path.relative_to(ROOT))
+        for path in set(reports) - {PROVIDERS, SERVER} - KNOWN_NON_MCP_PROVIDER_EGRESS
+    )
+    assert unexpected_reports == [], (
+        "unexpected provider egress found outside the MCP provider wrappers and "
+        f"the known proxy passthrough boundary: {unexpected_reports}"
     )
 
     offenders: list[str] = []
     raw_http_sites: list[str] = []
     for path, report in reports.items():
+        if path in KNOWN_NON_MCP_PROVIDER_EGRESS:
+            continue
         rel = path.relative_to(ROOT)
         for fn_name, line, method in report.raw_http_calls:
             site = f"{rel}:{fn_name}:{line}:{method}"

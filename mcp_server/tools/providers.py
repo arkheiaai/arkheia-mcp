@@ -8,9 +8,9 @@ the MCP tool wrapper in server.py — NOT here.
 This separation means providers.py is testable in isolation and the
 detection layer is applied consistently regardless of which provider is called.
 
-Provider API keys are read through a single helper at call time (not import
-time) so the process can start without all keys present and pick them up when
-they're set:
+Provider API keys are captured by a single custody module at import time, then
+removed from ambient os.environ so unrelated process code cannot copy or forward
+them. Set these before importing the MCP provider modules:
   XAI_API_KEY    — xAI / Grok
   GOOGLE_API_KEY — Google Gemini
   OLLAMA_BASE_URL — defaults to http://localhost:11434
