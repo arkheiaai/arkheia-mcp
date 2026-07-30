@@ -82,6 +82,35 @@ def _raw_async_client_calls(path: Path) -> list[int]:
     )
 
 
+def _ambient_client_imports_from_tree(tree: ast.AST) -> list[str]:
+    bad: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.split(".", 1)[0] == "requests":
+                    bad.append(f"{alias.name} at line {node.lineno}")
+                elif alias.name == "urllib.request" or alias.name.startswith(
+                    "urllib.request."
+                ):
+                    bad.append(f"{alias.name} at line {node.lineno}")
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module == "requests" or module.startswith("requests."):
+                bad.append(f"from {module} at line {node.lineno}")
+            elif module == "urllib" and any(alias.name == "request" for alias in node.names):
+                bad.append(f"from urllib import request at line {node.lineno}")
+            elif module == "urllib.request":
+                names = ", ".join(alias.name for alias in node.names)
+                bad.append(f"from urllib.request import {names} at line {node.lineno}")
+    return bad
+
+
+def _ambient_client_imports(path: Path) -> list[str]:
+    return _ambient_client_imports_from_tree(
+        ast.parse(path.read_text(encoding="utf-8"), str(path))
+    )
+
+
 class _FakeHttpx(types.ModuleType):
     class AsyncClient:
         def __init__(self, **kwargs):
@@ -133,6 +162,23 @@ def test_raw_async_clients_are_confined_to_the_shared_egress_factory():
     assert len(calls[EGRESS_FACTORY]) == 1
 
 
+def test_no_unowned_requests_or_urlopen_clients_enter_custody_surface():
+    violations = {
+        path.relative_to(ROOT).as_posix(): _ambient_client_imports(path)
+        for path in _prod_python_files()
+    }
+    violations = {rel: markers for rel, markers in violations.items() if markers}
+
+    assert violations == {}, (
+        "MCP/proxy credentialed egress must not introduce ambient-proxy-capable "
+        "requests or urllib.request clients outside the owned custody helper:\n  "
+        + "\n  ".join(
+            f"{rel}: {', '.join(markers)}"
+            for rel, markers in sorted(violations.items())
+        )
+    )
+
+
 def test_shared_egress_factory_forces_trust_env_false_and_rejects_true():
     egress = _load_egress_with_fake_httpx()
 
@@ -179,3 +225,27 @@ def test_raw_async_client_census_negative_controls_cover_common_bypass_shapes():
         "async_with.py": [3],
         "module_chain.py": [2],
     }
+
+
+def test_ambient_client_import_negative_controls_cover_common_bypass_shapes():
+    bad = "\n".join([
+        "import requests",
+        "import requests.sessions",
+        "from requests import Session",
+        "from requests.sessions import Session",
+        "import urllib.request as ureq",
+        "from urllib import request",
+        "from urllib.request import urlopen",
+        "from urllib.request import urlretrieve",
+    ])
+
+    assert _ambient_client_imports_from_tree(ast.parse(bad, "bad.py")) == [
+        "requests at line 1",
+        "requests.sessions at line 2",
+        "from requests at line 3",
+        "from requests.sessions at line 4",
+        "urllib.request at line 5",
+        "from urllib import request at line 6",
+        "from urllib.request import urlopen at line 7",
+        "from urllib.request import urlretrieve at line 8",
+    ]
