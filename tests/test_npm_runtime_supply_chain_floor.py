@@ -10,6 +10,7 @@ operation; fake commands are placed first on PATH and record any attempted use.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -117,12 +118,18 @@ def _write_fake_python(fakebin: Path) -> None:
 
         argv = sys.argv[1:]
         if argv == ["--version"]:
+            record("python_version")
             print("Python 3.11.8")
             sys.exit(0)
 
         if len(argv) == 3 and argv[:2] == ["-m", "venv"]:
             record("create_venv")
             venv = pathlib.Path(argv[2])
+            venv.mkdir(parents=True, exist_ok=True)
+            (venv / "pyvenv.cfg").write_text(
+                "home = /arkheia-test-python\\ninclude-system-site-packages = false\\n",
+                encoding="utf-8",
+            )
             bindir = venv / ("Scripts" if os.name == "nt" else "bin")
             bindir.mkdir(parents=True, exist_ok=True)
             target = bindir / ("python.exe" if os.name == "nt" else "python")
@@ -182,6 +189,35 @@ def _provenance_identity(package: Path) -> tuple[dict, str]:
         if entry["path"] == "requirements.txt"
     )
     return provenance, req_hash
+
+
+def _rewrite_bundle_provenance(package: Path) -> None:
+    bundle = package / "python"
+    manifest_path = bundle / _PROVENANCE
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    files = []
+    for path in sorted(bundle.rglob("*")):
+        rel = path.relative_to(bundle).as_posix()
+        if rel == _PROVENANCE:
+            continue
+        if path.is_file():
+            files.append(
+                {
+                    "path": rel,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+    manifest["files"] = files
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def _symlink_or_skip(target: Path, link: Path, *, target_is_directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except (NotImplementedError, OSError) as exc:
+        import pytest
+
+        pytest.skip(f"symlinks are not available in this test environment: {exc}")
 
 
 def _run_launcher(package: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -263,9 +299,15 @@ def test_dependency_install_is_bounded_to_verified_package_requirements(tmp_path
 
     events = _events(log)
     assert [e["kind"] for e in events].count("forbidden_git") == 0
-    assert [e["kind"] for e in events].count("create_venv") == 2
-    assert [e["kind"] for e in events].count("pip_install") == 2
+    assert [e["kind"] for e in events].count("python_version") == 2
+    assert [e["kind"] for e in events].count("create_venv") == 1
+    assert [e["kind"] for e in events].count("pip_install") == 1
     assert [e["kind"] for e in events].count("server") == 2
+
+    version_events = [e for e in events if e["kind"] == "python_version"]
+    assert version_events
+    assert all(e["env"]["ARKHEIA_API_KEY"] is None for e in version_events)
+    assert all(e["env"]["AWS_SECRET_ACCESS_KEY"] is None for e in version_events)
 
     create_venv_event = next(e for e in events if e["kind"] == "create_venv")
     assert create_venv_event["env"]["ARKHEIA_API_KEY"] is None
@@ -356,6 +398,67 @@ def test_bytecode_debris_is_not_invisible_to_bundle_provenance(tmp_path):
     assert result.returncode != 0
     assert "bundle provenance file set does not match" in result.stderr
     assert "server.cpython-311.pyc" in result.stderr
+    assert _events(log) == []
+
+
+def test_bundle_provenance_rejects_symlinked_files_before_bootstrap(tmp_path):
+    package = _packed_package(tmp_path)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "events.jsonl"
+    _write_fake_python(fakebin)
+
+    _symlink_or_skip(
+        package / "python" / "mcp_server" / "server.py",
+        package / "python" / "mcp_server" / "_arkheia_symlink_probe.py",
+    )
+
+    result = _run_launcher(package, _base_env(tmp_path, fakebin, log))
+
+    assert result.returncode != 0
+    assert "unsupported symlink" in result.stderr
+    assert "_arkheia_symlink_probe.py" in result.stderr
+    assert _events(log) == []
+
+
+def test_bundle_provenance_rejects_symlinked_directories_before_bootstrap(tmp_path):
+    package = _packed_package(tmp_path)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "events.jsonl"
+    _write_fake_python(fakebin)
+
+    _symlink_or_skip(
+        package / "python" / "mcp_server",
+        package / "python" / "mcp_server" / "_arkheia_symlink_dir",
+        target_is_directory=True,
+    )
+
+    result = _run_launcher(package, _base_env(tmp_path, fakebin, log))
+
+    assert result.returncode != 0
+    assert "unsupported symlink" in result.stderr
+    assert "_arkheia_symlink_dir" in result.stderr
+    assert _events(log) == []
+
+
+def test_recomputed_bundle_manifest_cannot_authorize_modified_requirements(tmp_path):
+    package = _packed_package(tmp_path)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "events.jsonl"
+    _write_fake_python(fakebin)
+
+    (package / "python" / "requirements.txt").write_text(
+        "evil-package==1.0\n",
+        encoding="utf-8",
+    )
+    _rewrite_bundle_provenance(package)
+
+    result = _run_launcher(package, _base_env(tmp_path, fakebin, log))
+
+    assert result.returncode != 0
+    assert "bundle provenance trust root mismatch" in result.stderr
     assert _events(log) == []
 
 

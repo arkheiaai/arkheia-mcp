@@ -7,6 +7,18 @@
 const { execFileSync } = require("child_process");
 
 const KEY_ENV = "ARKHEIA" + "_API_KEY";
+const BOOTSTRAP_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "SystemRoot",
+  "WINDIR",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "APPDATA",
+  "LOCALAPPDATA",
+];
 
 function truthy(value) {
   return /^(1|true|yes|y|on)$/i.test(String(value || ""));
@@ -19,8 +31,12 @@ function parseOptions(argv = process.argv.slice(2), env = process.env) {
 }
 
 function childEnvWithoutApiKey(env = process.env) {
-  const childEnv = { ...env };
-  delete childEnv[KEY_ENV];
+  const childEnv = {};
+  for (const name of BOOTSTRAP_ENV_ALLOWLIST) {
+    if (env[name]) {
+      childEnv[name] = env[name];
+    }
+  }
   return childEnv;
 }
 

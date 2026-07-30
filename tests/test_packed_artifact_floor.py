@@ -103,6 +103,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -117,6 +118,8 @@ from floor_support import import_closure, npm_bundle  # noqa: E402
 _ROOT = import_closure.REPO_ROOT
 _PROVENANCE = ".arkheia-bundle-provenance.json"
 _PROVENANCE_SCHEMA = "arkheia.npm.bundle-provenance.v1"
+_TRUST_ROOT = "bin/bundle-provenance-root.json"
+_TRUST_ROOT_SCHEMA = "arkheia.npm.bundle-trust-root.v1"
 
 
 # ---------------------------------------------------------------------------
@@ -380,12 +383,18 @@ def test_the_packed_bundle_provenance_manifest_pins_runtime_content(
     a venv, installs dependencies, or starts the server.
     """
     manifest_path = artifact.bundle_dir / _PROVENANCE
+    trust_root_path = artifact.package / _TRUST_ROOT
     assert manifest_path.is_file(), (
         f"{artifact.tarball.name} does not ship {artifact.bundle_root}/{_PROVENANCE}. "
         "The launcher cannot verify the bundled server tree before runtime setup."
     )
+    assert trust_root_path.is_file(), (
+        f"{artifact.tarball.name} does not ship {_TRUST_ROOT}. The launcher has no "
+        "package-owned trust root outside the mutable Python bundle."
+    )
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    trust_root = json.loads(trust_root_path.read_text(encoding="utf-8"))
     package_json = json.loads(
         (artifact.package / "package.json").read_text(encoding="utf-8")
     )
@@ -395,8 +404,16 @@ def test_the_packed_bundle_provenance_manifest_pins_runtime_content(
         "name": package_json.get("name"),
         "version": package_json.get("version"),
     }
+    assert trust_root.get("schema") == _TRUST_ROOT_SCHEMA
+    assert trust_root.get("package") == manifest.get("package")
     assert manifest.get("entry_module") == artifact.entry_module
+    assert trust_root.get("entry_module") == artifact.entry_module
     assert manifest.get("bundle_root") == artifact.bundle_root
+    assert trust_root.get("bundle_root") == artifact.bundle_root
+    assert trust_root.get("provenance_path") == f"{artifact.bundle_root}/{_PROVENANCE}"
+    assert trust_root.get("provenance_sha256") == hashlib.sha256(
+        manifest_path.read_bytes()
+    ).hexdigest()
 
     entries = manifest.get("files")
     assert isinstance(entries, list) and entries, (
@@ -429,6 +446,46 @@ def test_the_packed_bundle_provenance_manifest_pins_runtime_content(
         f"{artifact.bundle_root}/{_PROVENANCE} hash mismatches:\n"
         + "\n".join(f"    {line}" for line in bad_hashes)
     )
+
+
+def test_pack_time_bundle_collector_rejects_symlinked_requirements(tmp_path):
+    """
+    The manifest writer must fail on symlinks instead of omitting them.
+
+    `requirements.txt` is the useful build-time plant because the clean step keeps
+    it as hand-maintained input; if the collector silently skips symlinks, the
+    build can still write a manifest that omits the dependency file the launcher
+    will later use.
+    """
+    entry_module = npm_bundle.launcher_entry_module(_ROOT)
+    first_party = import_closure.first_party_roots(_ROOT)
+    closure = import_closure.required_files((entry_module,), _ROOT, first_party)
+    generated_roots = {p.parts[0] for p in closure}
+    staged = tmp_path / "staged-symlink-build"
+    package_dir = npm_bundle.stage_package_copy(staged, generated_roots, _ROOT)
+    bundle_dir = package_dir / npm_bundle.bundle_root(_ROOT)
+    npm_bundle.prune_generated(bundle_dir, generated_roots)
+
+    target = tmp_path / "outside-requirements.txt"
+    target.write_text("evil-package==1.0\n", encoding="utf-8")
+    requirements = bundle_dir / "requirements.txt"
+    requirements.unlink()
+    try:
+        requirements.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symlinks are not available in this test environment: {exc}")
+
+    result = subprocess.run(
+        [npm_bundle.require_node(), "scripts/build.js"],
+        cwd=package_dir,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode != 0
+    assert "refusing to hash symlink" in result.stderr
+    assert "requirements.txt" in result.stderr
 
 
 def test_stale_bundle_output_does_not_reach_the_tarball(tmp_path):

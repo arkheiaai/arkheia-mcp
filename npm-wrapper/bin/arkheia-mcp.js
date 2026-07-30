@@ -39,8 +39,11 @@ const SERVER_RELATIVE = "mcp_server/server.py";
 const REQUIREMENTS_RELATIVE = "requirements.txt";
 const PROVENANCE_RELATIVE = ".arkheia-bundle-provenance.json";
 const PROVENANCE_PATH = path.join(BUNDLED_PYTHON_DIR, PROVENANCE_RELATIVE);
+const TRUST_ROOT_RELATIVE = "bin/bundle-provenance-root.json";
+const TRUST_ROOT_PATH = path.join(PACKAGE_ROOT, TRUST_ROOT_RELATIVE);
 const REQUIREMENTS = path.join(BUNDLED_PYTHON_DIR, REQUIREMENTS_RELATIVE);
 const PROVENANCE_SCHEMA = "arkheia.npm.bundle-provenance.v1";
+const TRUST_ROOT_SCHEMA = "arkheia.npm.bundle-trust-root.v1";
 const VENV_SCHEMA = "arkheia.npm.venv.v1";
 const BOOTSTRAP_ENV_ALLOWLIST = [
   "PATH",
@@ -115,6 +118,38 @@ function readJson(filePath, label) {
   }
 }
 
+function requireRegularFileNoSymlink(filePath, label) {
+  let stat;
+  try {
+    stat = fs.lstatSync(filePath);
+  } catch (err) {
+    fail(`${label} is missing at ${filePath}: ${err.message}`);
+  }
+  if (stat.isSymbolicLink()) {
+    fail(`${label} is a symlink at ${filePath}`);
+  }
+  if (!stat.isFile()) {
+    fail(`${label} is not a regular file at ${filePath}`);
+  }
+  return stat;
+}
+
+function requireDirectoryNoSymlink(dirPath, label) {
+  let stat;
+  try {
+    stat = fs.lstatSync(dirPath);
+  } catch (err) {
+    fail(`${label} is missing at ${dirPath}: ${err.message}`);
+  }
+  if (stat.isSymbolicLink()) {
+    fail(`${label} is a symlink at ${dirPath}`);
+  }
+  if (!stat.isDirectory()) {
+    fail(`${label} is not a directory at ${dirPath}`);
+  }
+  return stat;
+}
+
 function executableNames(command) {
   if (process.platform !== "win32") {
     return [command];
@@ -170,6 +205,11 @@ function serverEnv(extra = {}) {
 }
 
 function collectBundleFiles(dir, relative = "") {
+  requireDirectoryNoSymlink(
+    dir,
+    relative ? `bundled directory ${toPosix(relative)}` : "bundled Python tree"
+  );
+
   const files = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const rel = relative ? path.join(relative, entry.name) : entry.name;
@@ -180,56 +220,87 @@ function collectBundleFiles(dir, relative = "") {
     if (!inside(absolute, BUNDLED_PYTHON_DIR)) {
       fail(`bundled path resolves outside the bundled Python tree: ${relPosix}`);
     }
+    if (entry.isSymbolicLink()) {
+      fail(`bundled Python tree contains unsupported symlink: ${relPosix}`);
+    }
     if (entry.isDirectory()) {
       files.push(...collectBundleFiles(absolute, rel));
     } else if (entry.isFile()) {
       files.push(relPosix);
+    } else {
+      fail(`bundled Python tree contains unsupported filesystem entry: ${relPosix}`);
     }
   }
   return files.sort();
 }
 
 function verifyBundle() {
-  if (!fs.existsSync(BUNDLED_PYTHON_DIR) || !fs.statSync(BUNDLED_PYTHON_DIR).isDirectory()) {
+  if (!fs.existsSync(BUNDLED_PYTHON_DIR)) {
     fail(
       `bundled Python server tree is absent at ${BUNDLED_PYTHON_DIR}. ` +
         "This npm package is incomplete; refusing to fetch code at runtime."
     );
   }
+  requireDirectoryNoSymlink(BUNDLED_PYTHON_DIR, "bundled Python server tree");
 
   const serverPath = resolveBundlePath(SERVER_RELATIVE, "server module path");
-  if (!fs.existsSync(serverPath) || !fs.statSync(serverPath).isFile()) {
+  if (!fs.existsSync(serverPath)) {
     fail(
       `bundled Python server code is missing at ${serverPath}. ` +
         "This npm package is incomplete; refusing to fetch code at runtime."
     );
   }
+  requireRegularFileNoSymlink(serverPath, "bundled Python server code");
 
-  if (!fs.existsSync(REQUIREMENTS) || !fs.statSync(REQUIREMENTS).isFile()) {
+  if (!fs.existsSync(REQUIREMENTS)) {
     fail(
       `bundled dependency manifest is missing at ${REQUIREMENTS}. ` +
         "Dependencies may only be installed from the package-owned requirements file."
     );
   }
+  requireRegularFileNoSymlink(REQUIREMENTS, "bundled dependency manifest");
 
-  if (!fs.existsSync(PROVENANCE_PATH) || !fs.statSync(PROVENANCE_PATH).isFile()) {
+  if (!fs.existsSync(PROVENANCE_PATH)) {
     fail(
       `bundle provenance manifest is missing at ${PROVENANCE_PATH}. ` +
         "The package content cannot be verified, so startup is blocked."
     );
   }
+  requireRegularFileNoSymlink(PROVENANCE_PATH, "bundle provenance manifest");
+  if (!fs.existsSync(TRUST_ROOT_PATH)) {
+    fail(
+      `bundle provenance trust root is missing at ${TRUST_ROOT_PATH}. ` +
+        "The package content cannot be anchored outside the bundled Python tree."
+    );
+  }
+  requireRegularFileNoSymlink(TRUST_ROOT_PATH, "bundle provenance trust root");
 
   const provenance = readJson(PROVENANCE_PATH, "bundle provenance manifest");
+  const trustRoot = readJson(TRUST_ROOT_PATH, "bundle provenance trust root");
   const packageManifest = readJson(path.join(PACKAGE_ROOT, "package.json"), "package manifest");
   const packageInfo = provenance.package || {};
+  const trustPackageInfo = trustRoot.package || {};
 
   if (provenance.schema !== PROVENANCE_SCHEMA) {
     fail(`unsupported bundle provenance schema: ${JSON.stringify(provenance.schema)}`);
+  }
+  if (trustRoot.schema !== TRUST_ROOT_SCHEMA) {
+    fail(`unsupported bundle provenance trust root schema: ${JSON.stringify(trustRoot.schema)}`);
   }
   if (packageInfo.name !== packageManifest.name || packageInfo.version !== packageManifest.version) {
     fail(
       "bundle provenance package identity does not match package.json " +
         `(${packageInfo.name}@${packageInfo.version} vs ` +
+        `${packageManifest.name}@${packageManifest.version})`
+    );
+  }
+  if (
+    trustPackageInfo.name !== packageManifest.name ||
+    trustPackageInfo.version !== packageManifest.version
+  ) {
+    fail(
+      "bundle provenance trust root package identity does not match package.json " +
+        `(${trustPackageInfo.name}@${trustPackageInfo.version} vs ` +
         `${packageManifest.name}@${packageManifest.version})`
     );
   }
@@ -239,10 +310,40 @@ function verifyBundle() {
         `but the launcher runs ${ENTRY_MODULE}`
     );
   }
+  if (trustRoot.entry_module !== ENTRY_MODULE) {
+    fail(
+      `bundle provenance trust root names entry module ` +
+        `${JSON.stringify(trustRoot.entry_module)}, but the launcher runs ${ENTRY_MODULE}`
+    );
+  }
   if (provenance.bundle_root !== path.relative(PACKAGE_ROOT, BUNDLED_PYTHON_DIR)) {
     fail(
       `bundle provenance root ${JSON.stringify(provenance.bundle_root)} does not ` +
         `match ${path.relative(PACKAGE_ROOT, BUNDLED_PYTHON_DIR)}`
+    );
+  }
+  if (trustRoot.bundle_root !== path.relative(PACKAGE_ROOT, BUNDLED_PYTHON_DIR)) {
+    fail(
+      `bundle provenance trust root names bundle root ` +
+        `${JSON.stringify(trustRoot.bundle_root)}, but the launcher uses ` +
+        `${path.relative(PACKAGE_ROOT, BUNDLED_PYTHON_DIR)}`
+    );
+  }
+  const expectedProvenancePath = `${provenance.bundle_root}/${PROVENANCE_RELATIVE}`;
+  if (trustRoot.provenance_path !== expectedProvenancePath) {
+    fail(
+      `bundle provenance trust root points at ${JSON.stringify(trustRoot.provenance_path)}, ` +
+        `but the launcher verifies ${expectedProvenancePath}`
+    );
+  }
+  if (typeof trustRoot.provenance_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(trustRoot.provenance_sha256)) {
+    fail(`invalid bundle provenance trust root sha256: ${JSON.stringify(trustRoot.provenance_sha256)}`);
+  }
+  const provenanceSha256 = sha256File(PROVENANCE_PATH);
+  if (trustRoot.provenance_sha256 !== provenanceSha256) {
+    fail(
+      "bundle provenance trust root mismatch: the bundled Python manifest has " +
+        `${provenanceSha256}, expected ${trustRoot.provenance_sha256}`
     );
   }
   if (!Array.isArray(provenance.files) || provenance.files.length === 0) {
@@ -261,9 +362,10 @@ function verifyBundle() {
       fail(`duplicate bundle provenance entry for ${entry.path}`);
     }
     const filePath = resolveBundlePath(entry.path, "bundle provenance path");
-    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    if (!fs.existsSync(filePath)) {
       fail(`bundle provenance path is missing from disk: ${entry.path}`);
     }
+    requireRegularFileNoSymlink(filePath, `bundle provenance path ${entry.path}`);
     const actual = sha256File(filePath);
     if (actual !== entry.sha256) {
       fail(`bundle provenance hash mismatch for ${entry.path}`);
@@ -305,6 +407,7 @@ function findPython() {
         encoding: "utf-8",
         timeout: 5000,
         stdio: ["ignore", "pipe", "pipe"],
+        env: bootstrapEnv(),
       }).trim();
       const match = version.match(/Python (\d+)\.(\d+)/);
       if (match) {
@@ -356,14 +459,45 @@ function writeVenvMarker(bundle) {
   );
 }
 
+function regularFileNoSymlink(filePath) {
+  try {
+    const stat = fs.lstatSync(filePath);
+    return stat.isFile() && !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function usableMarkedVenv(venvPython) {
+  try {
+    const venvStat = fs.lstatSync(VENV_DIR);
+    if (!venvStat.isDirectory() || venvStat.isSymbolicLink()) {
+      return false;
+    }
+    const venvRoot = fs.realpathSync(VENV_DIR);
+    const pythonReal = fs.realpathSync(venvPython);
+    return (
+      inside(pythonReal, venvRoot) &&
+      regularFileNoSymlink(venvPython) &&
+      regularFileNoSymlink(path.join(VENV_DIR, "pyvenv.cfg"))
+    );
+  } catch {
+    return false;
+  }
+}
+
 function ensureVenv(python, bundle) {
   const venvPython =
     process.platform === "win32"
       ? path.join(VENV_DIR, "Scripts", "python.exe")
       : path.join(VENV_DIR, "bin", "python");
 
+  if (venvMarkerMatches(bundle) && usableMarkedVenv(venvPython)) {
+    return fs.realpathSync(venvPython);
+  }
+
   if (fs.existsSync(VENV_DIR)) {
-    process.stderr.write("[arkheia] Recreating virtual environment from verified package bytes...\n");
+    process.stderr.write("[arkheia] Recreating untrusted or stale virtual environment...\n");
     fs.rmSync(VENV_DIR, { recursive: true, force: true });
   }
 

@@ -1,0 +1,11 @@
+{
+  "schema": "arkheia.npm.bundle-trust-root.v1",
+  "package": {
+    "name": "@arkheia/mcp-server",
+    "version": "1.3.0"
+  },
+  "entry_module": "mcp_server.server",
+  "bundle_root": "python",
+  "provenance_path": "python/.arkheia-bundle-provenance.json",
+  "provenance_sha256": "60292b757835f6721da181ab7da165a8673cea19b6f40b8d855d54330c42034f"
+}

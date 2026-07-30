@@ -163,6 +163,40 @@ def test_npm_dry_run_writes_nothing_even_with_opt_ins(tmp_path: Path):
     assert "Global Claude instructions not modified" in result.stdout
 
 
+def test_npm_postinstall_python_probe_does_not_receive_runtime_secrets(tmp_path: Path):
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "python-probe.json"
+    python_probe = fakebin / "python3"
+    python_probe.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, sys\n"
+        f"log = pathlib.Path({str(log)!r})\n"
+        "log.write_text(json.dumps({\n"
+        f"    {KEY_ENV!r}: os.environ.get({KEY_ENV!r}),\n"
+        "    'AWS_SECRET_ACCESS_KEY': os.environ.get('AWS_SECRET_ACCESS_KEY'),\n"
+        "}) + '\\n', encoding='utf-8')\n"
+        "print('Python 3.11.8')\n"
+        "raise SystemExit(0)\n",
+        encoding="utf-8",
+    )
+    python_probe.chmod(0o755)
+
+    result = _run_setup(
+        tmp_path,
+        env_extra={
+            "PATH": f"{fakebin}{os.pathsep}{os.environ.get('PATH', '')}",
+            "AWS_SECRET_ACCESS_KEY": "fixture-postinstall-secret",
+        },
+    )
+
+    assert PRIMARY_VALUE not in _combined(result)
+    assert "fixture-postinstall-secret" not in _combined(result)
+    probe_env = json.loads(log.read_text(encoding="utf-8"))
+    assert probe_env[KEY_ENV] is None
+    assert probe_env["AWS_SECRET_ACCESS_KEY"] is None
+
+
 def test_install_sh_dry_run_writes_nothing_and_does_not_echo_key(tmp_path: Path):
     home = tmp_path / "home"
     home.mkdir()

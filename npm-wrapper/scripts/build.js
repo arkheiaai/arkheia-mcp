@@ -76,7 +76,21 @@ const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const PACKAGE_ROOT = path.resolve(__dirname, "..");
 const BUNDLE_ROOT = path.resolve(__dirname, "..", "python");
 const PROVENANCE_FILE = ".arkheia-bundle-provenance.json";
+const TRUST_ROOT_FILE = "bin/bundle-provenance-root.json";
 const PROVENANCE_SCHEMA = "arkheia.npm.bundle-provenance.v1";
+const TRUST_ROOT_SCHEMA = "arkheia.npm.bundle-trust-root.v1";
+const BUILD_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "SystemRoot",
+  "WINDIR",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "APPDATA",
+  "LOCALAPPDATA",
+];
 
 /**
  * The module `bin/arkheia-mcp.js` spawns as `python -m <ENTRY_MODULE>`. It is
@@ -155,6 +169,16 @@ function fail(message) {
   process.exit(1);
 }
 
+function buildEnv(extra = {}) {
+  const env = {};
+  for (const name of BUILD_ENV_ALLOWLIST) {
+    if (process.env[name]) {
+      env[name] = process.env[name];
+    }
+  }
+  return { ...env, ...extra };
+}
+
 /** Is `child` `parent` itself, or beneath it? Both must already be resolved. */
 function inside(child, parent) {
   return child === parent || child.startsWith(parent + path.sep);
@@ -201,6 +225,7 @@ function findBuildPython() {
         encoding: "utf-8",
         timeout: 10000,
         stdio: ["ignore", "pipe", "pipe"],
+        env: buildEnv(),
       }).trim();
       const match = version.match(/Python (\d+)\.(\d+)/);
       if (match && Number(match[1]) === 3 && Number(match[2]) >= 8) {
@@ -248,6 +273,7 @@ function requiredSources() {
       encoding: "utf-8",
       timeout: 120000,
       stdio: ["ignore", "pipe", "inherit"],
+      env: buildEnv(),
     });
   } catch (err) {
     fail(
@@ -427,7 +453,27 @@ function sha256File(filePath) {
   return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
 }
 
+function requireDirectoryNoSymlink(dirPath, label) {
+  let stat;
+  try {
+    stat = fs.lstatSync(dirPath);
+  } catch (err) {
+    fail(`${label} is missing at ${dirPath}: ${err.message}`);
+  }
+  if (stat.isSymbolicLink()) {
+    fail(`${label} is a symlink at ${dirPath}`);
+  }
+  if (!stat.isDirectory()) {
+    fail(`${label} is not a directory at ${dirPath}`);
+  }
+}
+
 function collectBundleFiles(dir, relative = "") {
+  requireDirectoryNoSymlink(
+    dir,
+    relative ? `bundle directory ${toPosix(relative)}` : "bundle root"
+  );
+
   const files = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const rel = relative ? path.join(relative, entry.name) : entry.name;
@@ -438,10 +484,15 @@ function collectBundleFiles(dir, relative = "") {
     if (!inside(absolute, BUNDLE_ROOT)) {
       fail(`refusing to hash ${absolute}, which is outside ${BUNDLE_ROOT}`);
     }
+    if (entry.isSymbolicLink()) {
+      fail(`refusing to hash symlink in bundle: ${relPosix}`);
+    }
     if (entry.isDirectory()) {
       files.push(...collectBundleFiles(absolute, rel));
     } else if (entry.isFile()) {
       files.push(relPosix);
+    } else {
+      fail(`refusing to hash unsupported filesystem entry in bundle: ${relPosix}`);
     }
   }
   return files.sort();
@@ -482,12 +533,37 @@ function writeProvenanceManifest() {
     })),
   };
 
+  const provenancePath = path.join(BUNDLE_ROOT, PROVENANCE_FILE);
   fs.writeFileSync(
-    path.join(BUNDLE_ROOT, PROVENANCE_FILE),
+    provenancePath,
     JSON.stringify(manifest, null, 2) + "\n",
     "utf-8"
   );
   console.log(`Wrote bundle provenance for ${files.length} file(s).`);
+  return provenancePath;
+}
+
+function writeBundleTrustRoot(provenancePath) {
+  const pkg = packageManifest();
+  const trustRoot = {
+    schema: TRUST_ROOT_SCHEMA,
+    package: {
+      name: pkg.name,
+      version: pkg.version,
+    },
+    entry_module: ENTRY_MODULE,
+    bundle_root: toPosix(path.relative(PACKAGE_ROOT, BUNDLE_ROOT)),
+    provenance_path: `${toPosix(path.relative(PACKAGE_ROOT, BUNDLE_ROOT))}/${PROVENANCE_FILE}`,
+    provenance_sha256: sha256File(provenancePath),
+  };
+  const trustRootPath = path.join(PACKAGE_ROOT, TRUST_ROOT_FILE);
+  fs.mkdirSync(path.dirname(trustRootPath), { recursive: true });
+  fs.writeFileSync(
+    trustRootPath,
+    JSON.stringify(trustRoot, null, 2) + "\n",
+    "utf-8"
+  );
+  console.log(`Wrote bundle provenance trust root at ${TRUST_ROOT_FILE}.`);
 }
 
 /**
@@ -537,7 +613,8 @@ function main() {
   for (const source of outsideEntry) {
     copySource(source);
   }
-  writeProvenanceManifest();
+  const provenancePath = writeProvenanceManifest();
+  writeBundleTrustRoot(provenancePath);
 
   console.log("Build complete. Run `npm publish` from npm-wrapper/.");
 }
