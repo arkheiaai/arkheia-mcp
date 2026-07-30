@@ -688,16 +688,61 @@ def _calls_attr(node: ast.AST, attr: str) -> bool:
     )
 
 
+def _is_plaintext_requires_opt_in_guard(fn: ast.AST) -> bool:
+    returns = [node.value for node in ast.walk(fn)
+               if isinstance(node, ast.Return) and node.value is not None]
+    if len(returns) != 1:
+        return False
+    value = returns[0]
+    if isinstance(value, ast.BoolOp):
+        return False
+    if isinstance(value, ast.Constant) and isinstance(value.value, bool):
+        return False
+    return (
+        isinstance(value, ast.Compare)
+        and isinstance(value.left, ast.Name)
+        and value.left.id == "policy_state"
+        and len(value.ops) == 1
+        and isinstance(value.ops[0], ast.NotEq)
+        and len(value.comparators) == 1
+        and isinstance(value.comparators[0], ast.Name)
+        and value.comparators[0].id == "PLAINTEXT_POLICY_DEVELOPMENT"
+    )
+
+
+def _is_encrypted_inventory_prescan(node: ast.AST) -> bool:
+    if not (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "any"
+    ):
+        return False
+    return any(
+        isinstance(child, ast.Call)
+        and isinstance(child.func, ast.Attribute)
+        and child.func.attr == "glob"
+        and isinstance(child.func.value, ast.Name)
+        and child.func.value.id == "profiles_dir"
+        and child.args
+        and isinstance(child.args[0], ast.Constant)
+        and child.args[0].value == "*.yaml.enc"
+        for child in ast.walk(node)
+    )
+
+
 def _plaintext_policy_guard_violations(tree: ast.Module) -> list[str]:
     violations: list[str] = []
     init = _class_method(tree, "ProfileRouter", "__init__")
     policy_state = _class_method(tree, "ProfileRouter", "_plaintext_policy_state")
+    requires_opt_in = _class_method(tree, "ProfileRouter", "_plaintext_requires_opt_in")
     load_all = _class_method(tree, "ProfileRouter", "load_all")
 
     if init is None:
         return ["ProfileRouter.__init__ missing"]
     if policy_state is None:
         violations.append("ProfileRouter._plaintext_policy_state missing")
+    if requires_opt_in is None:
+        violations.append("ProfileRouter._plaintext_requires_opt_in missing")
     if load_all is None:
         violations.append("ProfileRouter.load_all missing")
         return violations
@@ -716,6 +761,11 @@ def _plaintext_policy_guard_violations(tree: ast.Module) -> list[str]:
             violations.append("plaintext policy state ignores trusted decryption-key state")
         if "_plaintext_development_mode" not in attrs:
             violations.append("plaintext policy state ignores explicit development mode")
+
+    if requires_opt_in is not None and not _is_plaintext_requires_opt_in_guard(requires_opt_in):
+        violations.append(
+            "plaintext opt-in helper is not a live comparison against the development policy"
+        )
 
     requires_value = _assigned_value(load_all, "plaintext_requires_opt_in")
     if requires_value is None:
@@ -784,6 +834,13 @@ def _main_router_policy_wiring_violations(tree: ast.Module) -> list[str]:
         violations.append(
             "encrypted_profile_policy does not carry encrypted inventory seen "
             "before key resolution; key-fetch outage plus unlink/rename can reopen plaintext"
+        )
+    inventory_seen = _assigned_value(lifespan, "encrypted_inventory_seen")
+    if inventory_seen is None:
+        violations.append("lifespan does not assign encrypted_inventory_seen before key load")
+    elif not _is_encrypted_inventory_prescan(inventory_seen):
+        violations.append(
+            "encrypted_inventory_seen is not a real profiles_dir.glob('*.yaml.enc') pre-scan"
         )
 
     plaintext_development = _assigned_value(lifespan, "plaintext_development_mode")
@@ -894,6 +951,50 @@ def test_inv11_negative_self_test_detects_startup_dropping_pre_key_inventory():
     )
     violations = _main_router_policy_wiring_violations(broken)
     assert any("before key resolution" in v for v in violations)
+
+
+def test_inv11_negative_self_test_detects_dead_plaintext_requires_guard():
+    broken = ast.parse(
+        "class ProfileRouter:\n"
+        "    def __init__(self, profile_dir, decryption_key=None,\n"
+        "                 encrypted_profile_policy=False, plaintext_development_mode=False):\n"
+        "        self._decryption_key = decryption_key\n"
+        "        self._encrypted_profile_policy = encrypted_profile_policy\n"
+        "        self._plaintext_development_mode = plaintext_development_mode\n"
+        "    def _plaintext_policy_state(self, enc_files):\n"
+        "        if self._encrypted_profile_policy:\n"
+        "            return PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY\n"
+        "        if self._decryption_key is not None:\n"
+        "            return PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY\n"
+        "        if self._plaintext_development_mode:\n"
+        "            return PLAINTEXT_POLICY_DEVELOPMENT\n"
+        "        return PLAINTEXT_POLICY_UNMARKED_PLAINTEXT_DIRECTORY\n"
+        "    @staticmethod\n"
+        "    def _plaintext_requires_opt_in(policy_state):\n"
+        "        return False and policy_state != PLAINTEXT_POLICY_DEVELOPMENT\n"
+        "    def load_all(self):\n"
+        "        plaintext_requires_opt_in = self._plaintext_requires_opt_in(policy_state)\n"
+        "        refusing_plaintext = plaintext_requires_opt_in and not plaintext_allowed\n"
+    )
+    violations = _plaintext_policy_guard_violations(broken)
+    assert any("not a live comparison" in v for v in violations)
+
+
+def test_inv11_negative_self_test_detects_dead_encrypted_inventory_prescan():
+    broken = ast.parse(
+        "async def lifespan(app):\n"
+        "    encrypted_inventory_seen = False\n"
+        "    decryption_key, _status = await _resolve_profile_key(audit_writer, profiles_dir)\n"
+        "    encrypted_profile_policy = require_flag or decryption_key is not None or encrypted_inventory_seen\n"
+        "    plaintext_development_mode = allow_plaintext\n"
+        "    profile_router = ProfileRouter(\n"
+        "        'profiles', audit_writer=audit_writer,\n"
+        "        encrypted_profile_policy=encrypted_profile_policy,\n"
+        "        plaintext_development_mode=plaintext_development_mode,\n"
+        "    )\n"
+    )
+    violations = _main_router_policy_wiring_violations(broken)
+    assert any("not a real" in v for v in violations)
 
 
 def test_inv12_plaintext_refusal_and_opt_in_are_both_receipted():
