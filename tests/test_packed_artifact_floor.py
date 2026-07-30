@@ -240,6 +240,24 @@ def test_the_pack_ran_and_the_archive_was_read(artifact: Artifact):
     )
 
 
+@pytest.mark.parametrize(
+    "module",
+    [
+        "proxy.does_not_exist",
+        "mcp_server.server.nope",
+        "registry_server.does_not_exist",
+    ],
+)
+def test_shared_import_closure_requires_the_terminal_component(module):
+    """
+    The shared resolver must not treat an intermediate package as proof that a
+    dotted entry module exists.
+    """
+    first_party = import_closure.first_party_roots(_ROOT)
+    assert import_closure.module_to_paths(module, _ROOT, first_party) == []
+    assert import_closure.required_files((module,), _ROOT, first_party) == set()
+
+
 # ---------------------------------------------------------------------------
 # THE INVARIANT
 # ---------------------------------------------------------------------------

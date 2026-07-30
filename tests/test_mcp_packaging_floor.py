@@ -94,6 +94,12 @@ def _module_to_paths(module: str) -> list[Path]:
     if not parts or parts[0] not in _FIRST_PARTY_ROOTS:
         return []
 
+    terminal = Path(*parts)
+    terminal_init = terminal / "__init__.py"
+    terminal_file = terminal.with_suffix(".py")
+    if not (_ROOT / terminal_init).exists() and not (_ROOT / terminal_file).exists():
+        return []
+
     paths: list[Path] = []
     for i in range(1, len(parts) + 1):
         prefix = Path(*parts[:i])
@@ -279,12 +285,26 @@ def entry_module_from_command(command: list[str], origin: str) -> str:
 # Parse: the npm bundle
 # ---------------------------------------------------------------------------
 
-def buildjs_sources(text: str) -> list[str]:
-    """Entries of the declared `PACKAGE_SOURCES` array in the npm build script."""
+def buildjs_sources(text: str, entry_module: str) -> list[str]:
+    """
+    Sources the npm bundle carries for the launcher entry point.
+
+    Older branches declared `PACKAGE_SOURCES`; current master derives the bundle
+    from the import closure. Keep both forms readable here so the Docker floor can
+    rebase over the stronger bundle builder without reintroducing the declared list.
+    The packed-artifact floors observe the real tarball; this model is only the
+    source-prefix analogue used by this multi-distribution floor.
+    """
     match = re.search(r"PACKAGE_SOURCES\s*=\s*\[(.*?)\]", text, re.DOTALL)
-    if not match:
-        return []
-    return re.findall(r"[\"']([^\"']+)[\"']", match.group(1))
+    if match:
+        return re.findall(r"[\"']([^\"']+)[\"']", match.group(1))
+
+    assert "function requiredSources()" in text, (
+        f"{_NPM_BUILD_SCRIPT}: no PACKAGE_SOURCES declaration and no "
+        "`requiredSources()` graph-derived builder found. The npm copy set cannot "
+        "be analysed by this floor."
+    )
+    return sorted(p.as_posix() for p in required_files((entry_module,)))
 
 
 def launcher_entry_module(text: str) -> str:
@@ -350,7 +370,7 @@ def discover_distributions() -> list[Distribution]:
     build_text = (_ROOT / _NPM_BUILD_SCRIPT).read_text(encoding="utf-8")
     launcher_text = (_ROOT / _NPM_LAUNCHER).read_text(encoding="utf-8")
     module = launcher_entry_module(launcher_text)
-    sources = buildjs_sources(build_text)
+    sources = buildjs_sources(build_text, module)
     distributions.append(
         Distribution(
             _NPM_BUILD_SCRIPT.as_posix(),
@@ -422,6 +442,26 @@ def test_the_discovery_reached_every_distribution_on_disk():
         f"distribution count {len(names)} does not match {len(dockerfiles)} "
         f"Dockerfile(s) + 1 npm bundle: {names}"
     )
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "proxy.does_not_exist",
+        "mcp_server.server.nope",
+        "registry_server.does_not_exist",
+    ],
+)
+def test_entry_module_resolution_requires_the_terminal_component(module):
+    """
+    Reverse mutation for Docker CMD drift.
+
+    A bad command such as `python -m proxy.does_not_exist` used to return the
+    intermediate `proxy/__init__.py`, giving the work-done guard a non-empty
+    closure and letting the floor pass over a container that cannot start.
+    """
+    assert _module_to_paths(module) == []
+    assert required_files((module,)) == set()
 
 
 @pytest.mark.parametrize("dist", DISTRIBUTIONS, ids=lambda d: d.name)

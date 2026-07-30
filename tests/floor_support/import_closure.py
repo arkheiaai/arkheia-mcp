@@ -57,6 +57,12 @@ def module_to_paths(
     if not parts or parts[0] not in roots:
         return []
 
+    terminal = Path(*parts)
+    terminal_init = terminal / "__init__.py"
+    terminal_file = terminal.with_suffix(".py")
+    if not (root / terminal_init).exists() and not (root / terminal_file).exists():
+        return []
+
     paths: list[Path] = []
     for i in range(1, len(parts) + 1):
         prefix = Path(*parts[:i])

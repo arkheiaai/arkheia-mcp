@@ -59,10 +59,11 @@ per module and names the ones no record covers — "1 of 2 modules recorded"
 passes every non-zero assertion, which is precisely the case floor invariant
 9(a) exists for.
 
-Closed on current ``master``, and pinned here rather than hidden:
-``verify_integrity`` itself now raises ``TamperDetected`` over a hand-written
-empty manifest. The build guard below is still load-bearing: release builds must
-not ship a false manifest and then rely on startup to reject the artifact.
+Closed by the integrity library since this receipt proof was first written:
+``verify_integrity`` itself now refuses a hand-written empty manifest, raising
+``TamperDetected`` rather than returning ``VERIFIED`` with ``modules_checked=0``.
+The test below pins that stronger contract so this receipt proof cannot regress
+the later integrity fix while rebasing.
 """
 from __future__ import annotations
 
@@ -168,11 +169,11 @@ def test_the_verifier_consumes_exactly_this_record(module_dir):
     build_release.step_generate_manifest(module_dir)
     manifest_path = module_dir / MANIFEST_FILE
 
-    # Positive: the artifact as built verifies, using the current IntegrityReport
-    # contract rather than the old bool return.
+    # Positive: the artifact as built verifies, and the report says how much work
+    # was actually done.
     report = verify_integrity(module_dir)
-    assert report.status == IntegrityStatus.VERIFIED
     assert report.verified is True
+    assert report.status == IntegrityStatus.VERIFIED
     assert report.modules_checked == 2
 
     # Vacuity guard 1 — a FABRICATED entry. If the verifier did not really read
@@ -199,7 +200,8 @@ def test_the_verifier_consumes_exactly_this_record(module_dir):
     manifest[real] = hashlib.sha256((module_dir / real).read_bytes()).hexdigest()
     manifest_path.write_text(json.dumps(manifest))
     report = verify_integrity(module_dir)
-    assert report.status == IntegrityStatus.VERIFIED  # restored: positive control
+    assert report.verified is True  # restored: positive control
+    assert report.status == IntegrityStatus.VERIFIED
     assert report.modules_checked == 2
     (module_dir / real).write_bytes(b"\x7fELF" + b"tampered" * 8)
     with pytest.raises(TamperDetected, match=real):
@@ -210,10 +212,13 @@ def test_the_verifier_consumes_exactly_this_record(module_dir):
 # 2. The false receipt: a manifest that certifies nothing.
 # ---------------------------------------------------------------------------
 
-def test_an_empty_manifest_is_rejected_as_a_check_that_did_not_happen(tmp_path):
+def test_verify_integrity_refuses_an_empty_manifest_record(tmp_path):
     """
-    Pin the runtime half now supplied by current ``master``: an empty manifest is
-    evidence, not absence, and must fail closed just like a corrupt manifest.
+    The library-level half of the empty-manifest refusal now exists too.
+
+    A manifest that EXISTS and lists nothing is evidence of a broken or tampered
+    artifact, not absence of evidence. It must never verify as intact over zero
+    modules.
     """
     empty_dir = tmp_path / "no_binaries"
     empty_dir.mkdir()
@@ -221,8 +226,7 @@ def test_an_empty_manifest_is_rejected_as_a_check_that_did_not_happen(tmp_path):
     manifest = generate_manifest(empty_dir, empty_dir / MANIFEST_FILE)
     assert manifest == {}, "test setup: the directory must contain no artifacts"
 
-    # A manifest that EXISTS and lists nothing is a positive integrity failure.
-    with pytest.raises(TamperDetected, match="[Ee]mpty"):
+    with pytest.raises(TamperDetected, match="Empty integrity manifest"):
         verify_integrity(empty_dir)
 
 
