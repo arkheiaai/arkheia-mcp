@@ -109,6 +109,10 @@ proxy = ProxyClient(
 )
 
 
+def _present_metadata(**metadata: Any) -> dict[str, Any]:
+    return {key: value for key, value in metadata.items() if value is not None}
+
+
 # ---------------------------------------------------------------------------
 # Detection & audit
 # ---------------------------------------------------------------------------
@@ -120,7 +124,14 @@ proxy = ProxyClient(
     idempotentHint=True,
     openWorldHint=False,
 ))
-async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
+async def arkheia_verify(
+    prompt: str,
+    response: str,
+    model: str,
+    usage: dict[str, Any] | None = None,
+    output_tokens: Any = None,
+    is_function_call: Any = None,
+) -> dict:
     """
     Verify whether an AI response shows signs of fabrication.
 
@@ -132,6 +143,9 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
         response: The model's response to evaluate
         model:    The model identifier (e.g. 'gpt-4o', 'llama-3-70b',
                   'claude-sonnet-4-6')
+        usage: Optional provider usage metadata.
+        output_tokens: Optional provider output token count.
+        is_function_call: Optional provider tool/function-call flag.
 
     Returns:
         risk_level:          LOW / MEDIUM / HIGH / UNKNOWN
@@ -147,7 +161,16 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
         LOW     -- surface normally
     """
     check("arkheia_verify")
-    result = await proxy.verify(prompt=prompt, response=response, model_id=model)
+    result = await proxy.verify(
+        prompt=prompt,
+        response=response,
+        model_id=model,
+        **_present_metadata(
+            usage=usage,
+            output_tokens=output_tokens,
+            is_function_call=is_function_call,
+        ),
+    )
     logger.debug(
         "arkheia_verify: model=%s risk=%s confidence=%.2f",
         model,
@@ -231,6 +254,7 @@ async def run_grok(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        **_present_metadata(usage=provider_result.get("usage")),
     )
     logger.info(
         "run_grok: model=%s risk=%s confidence=%.2f",
@@ -277,6 +301,7 @@ async def run_gemini(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        **_present_metadata(usage=provider_result.get("usage")),
     )
     logger.info(
         "run_gemini: model=%s risk=%s confidence=%.2f",
@@ -326,6 +351,7 @@ async def run_ollama(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        **_present_metadata(output_tokens=provider_result.get("eval_count")),
     )
     logger.info(
         "run_ollama: model=%s risk=%s confidence=%.2f",
@@ -377,6 +403,7 @@ async def run_together(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        **_present_metadata(usage=provider_result.get("usage")),
     )
     logger.info(
         "run_together: model=%s risk=%s confidence=%.2f",
@@ -443,7 +470,6 @@ async def memory_retrieve(query: str, entity_type: str | None = None, limit: int
         total:     Total count of matches (before limit)
     """
     check("memory_retrieve")
-    limit = min(limit, 50)
     return await retrieve_entities(query=query, entity_type=entity_type, limit=limit)
 
 

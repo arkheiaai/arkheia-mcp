@@ -101,11 +101,15 @@ RECEIPT_WRITES_PER_PROCESS = 12
 
 @pytest.fixture(autouse=True)
 def _isolate_memory_db_and_receipts(tmp_path, monkeypatch):
-    """mcp_server/tools/memory.py defaults MEMORY_DB_PATH to the hard-coded
-    Windows path 'C:/arkheia-mcp/data/memory.db', which on POSIX creates a literal
-    './C:' directory under the CWD. Point it at tmp_path so this suite never
-    writes outside its sandbox. (The hard-coded default is a separate defect,
-    named in the PR body — it belongs to the memory flow, not the gate.)"""
+    """Point memory AND the tool-gate receipt log at tmp_path so this suite never
+    writes real state.
+
+    Keeps this branch's receipt-log isolation, which master's fixture does not have.
+    Master's shorter wording is used for the memory half on purpose: this branch's
+    docstring described the hard-coded 'C:/arkheia-mcp/data/memory.db' default as a
+    live defect, and master has since fixed it (tests/test_memory_db_path_floor.py
+    pins that MEMORY_DB_PATH now raises on POSIX rather than creating a literal
+    './C:' directory), so that rationale is stale."""
     monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "memory.db"))
     monkeypatch.setenv(
         "ARKHEIA_TOOL_GATE_RECEIPT_LOG",

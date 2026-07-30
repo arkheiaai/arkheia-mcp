@@ -47,6 +47,10 @@ _ROOT = Path(__file__).resolve().parents[1]
 FEATURES = _ROOT / "proxy" / "detection" / "features.py"
 ENGINE = _ROOT / "proxy" / "detection" / "engine.py"
 DETECT = _ROOT / "proxy" / "endpoints" / "detect.py"
+PASSTHROUGH = _ROOT / "proxy" / "endpoints" / "passthrough.py"
+INTERCEPTION = _ROOT / "proxy" / "middleware" / "interception.py"
+MCP_SERVER = _ROOT / "mcp_server" / "server.py"
+PROXY_CLIENT = _ROOT / "mcp_server" / "proxy_client.py"
 
 #: The field every consumer must be able to read to tell a suppressed verdict from a
 #: scored clean one. One name, checked at six boundaries.
@@ -247,7 +251,7 @@ def test_inv0_the_contract_this_floor_checks_against_has_not_gone_quiet(features
 
 
 def test_inv0_the_files_and_the_gates_are_actually_found(features_src):
-    for p in (FEATURES, ENGINE, DETECT):
+    for p in (FEATURES, ENGINE, DETECT, PASSTHROUGH, INTERCEPTION, MCP_SERVER, PROXY_CLIENT):
         assert p.exists(), f"floor pointed at a path that does not exist: {p}"
     gates = find_gates(features_src)
     assert len(gates) >= 2, (
@@ -535,3 +539,142 @@ def test_inv6_control_it_does_not_flag_an_equality_comparison():
     fn = find_gates(src)["check_mode_gate"]
     assert unvalidated_names(fn) == {"action"}          # tainted, correctly
     assert raw_signal_comparisons(fn) == []             # but not an ordered compare
+
+
+# ---------------------------------------------------------------------------
+# INV-7 — every wrapper / passthrough / interception surface can carry the
+# provider's empty-output fact to the same detector gate.
+# ---------------------------------------------------------------------------
+
+EMPTY_METADATA_KEYS = {"usage", "output_tokens", "is_function_call"}
+
+
+def _call_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Await):
+        node = node.value
+    if not isinstance(node, ast.Call):
+        return None
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return None
+
+
+def _call_has_empty_metadata(call: ast.Call) -> bool:
+    for kw in call.keywords:
+        if kw.arg in EMPTY_METADATA_KEYS:
+            return True
+        if kw.arg is None:
+            return True
+    return False
+
+
+def _verify_calls_missing_empty_metadata(src: str) -> tuple[int, list[str]]:
+    """Calls that send model output to the detector but cannot carry zero-output facts."""
+    offenders: list[str] = []
+    checked = 0
+    for node in ast.walk(_parse(src)):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _call_name(node)
+        if name not in {"verify", "_verify_hosted", "_detect_and_audit"}:
+            continue
+        checked += 1
+        if not _call_has_empty_metadata(node):
+            offenders.append(f"line {node.lineno}: {ast.unparse(node)}")
+    return checked, offenders
+
+
+def _hard_empty_truthiness_guards(src: str) -> list[str]:
+    """Truthiness guards where `response_text == ""` cannot reach screening."""
+    offenders: list[str] = []
+
+    def bare_response_text(node: ast.AST) -> bool:
+        return isinstance(node, ast.Name) and node.id == "response_text"
+
+    def bad_test(node: ast.AST) -> bool:
+        if bare_response_text(node):
+            return True
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+            return bare_response_text(node.operand)
+        if isinstance(node, ast.BoolOp):
+            return any(bad_test(v) for v in node.values)
+        return False
+
+    for node in ast.walk(_parse(src)):
+        if isinstance(node, ast.If) and bad_test(node.test):
+            offenders.append(f"line {node.lineno}: {ast.unparse(node.test)}")
+    return offenders
+
+
+def test_inv7_empty_output_metadata_reaches_all_runtime_surfaces():
+    sources = {
+        "mcp_server/server.py": MCP_SERVER.read_text(encoding="utf-8"),
+        "mcp_server/proxy_client.py": PROXY_CLIENT.read_text(encoding="utf-8"),
+        "proxy/endpoints/detect.py": DETECT.read_text(encoding="utf-8"),
+        "proxy/endpoints/passthrough.py": PASSTHROUGH.read_text(encoding="utf-8"),
+        "proxy/middleware/interception.py": INTERCEPTION.read_text(encoding="utf-8"),
+    }
+
+    checked = 0
+    soft_empty: dict[str, list[str]] = {}
+    hard_empty: dict[str, list[str]] = {}
+    for rel, src in sources.items():
+        n, offenders = _verify_calls_missing_empty_metadata(src)
+        checked += n
+        if offenders:
+            soft_empty[rel] = offenders
+        guards = _hard_empty_truthiness_guards(src)
+        if guards:
+            hard_empty[rel] = guards
+
+    assert checked >= 10, (
+        f"only discovered {checked} detector calls across the wrapper/passthrough/"
+        "interception surfaces. The empty-output floor would be passing over an "
+        "empty or near-empty population."
+    )
+    assert not soft_empty, (
+        "soft-empty suppression is unreachable on these detector calls because "
+        f"provider output metadata is not forwarded: {soft_empty}"
+    )
+    assert not hard_empty, (
+        "hard-empty suppression is unreachable behind truthiness guards that skip "
+        f"response_text == '': {hard_empty}"
+    )
+
+
+def test_inv7_negative_self_test_soft_empty_offender_is_measured():
+    src = (
+        "async def wrapper(prompt, response_text, model_id):\n"
+        "    return await proxy.verify(prompt=prompt, response=response_text, model_id=model_id)\n"
+    )
+    checked, offenders = _verify_calls_missing_empty_metadata(src)
+    assert checked == 1
+    assert offenders and "proxy.verify" in offenders[0]
+
+
+def test_inv7_negative_self_test_hard_empty_guard_is_measured():
+    src = (
+        "async def route(response_text):\n"
+        "    if response_text:\n"
+        "        return await _detect_and_audit(request, prompt, response_text, model_id)\n"
+        "    return 'SKIP'\n"
+    )
+    offenders = _hard_empty_truthiness_guards(src)
+    assert offenders == ["line 2: response_text"]
+
+
+def test_inv7_control_empty_string_can_reach_screening_when_metadata_is_present():
+    src = (
+        "async def route(response_text, output_tokens):\n"
+        "    if response_text is not None or _is_zero_count(output_tokens):\n"
+        "        return await _detect_and_audit(\n"
+        "            request, prompt, response_text or '', model_id,\n"
+        "            output_tokens=output_tokens,\n"
+        "        )\n"
+    )
+    checked, offenders = _verify_calls_missing_empty_metadata(src)
+    assert checked == 1
+    assert offenders == []
+    assert _hard_empty_truthiness_guards(src) == []

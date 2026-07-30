@@ -16,7 +16,7 @@ jobs:
   unit:
     name: unit-tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       # Pin: actions/checkout v4.2.2
@@ -27,6 +27,7 @@ jobs:
           # runs, which executes repo-authored build scripts. This job never
           # pushes, so the credential has no purpose here.
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Set up Python
         # Pin: actions/setup-python v5.3.0
@@ -56,7 +57,64 @@ jobs:
           # pytest-timeout are now DECLARED in requirements.txt. Installing them
           # here instead meant CI green did not prove the declared manifest could
           # run the suite — the workflow papered over its own dependency gap.
+          # Security scanner tools are installed in the next step and are
+          # explicitly classified as CI-only by INV-2.
           # Enforced by tests/test_ci_enforcement_floor.py (INV-2).
+
+      - name: Install required security scanners
+        run: pip install bandit[toml] pip-audit
+
+      - name: Run required security scan aggregate
+        run: |
+          set -euo pipefail
+          bandit -r proxy/ mcp_server/ registry_server/ scripts/ \
+            --exclude proxy/tests,mcp_server/tests,registry_server/tests \
+            --skip B101,B601 \
+            -lll -f json -o bandit-results.json
+          pip-audit -r requirements.txt --format json -o pip-audit-results.json
+          python - <<'PY'
+          import json
+          import sys
+
+          with open("pip-audit-results.json", encoding="utf-8") as f:
+              report = json.load(f)
+          dependencies = report.get("dependencies")
+          if not isinstance(dependencies, list) or not dependencies:
+              print("pip-audit produced no dependency records; failing closed")
+              sys.exit(1)
+          findings = []
+          for dep in dependencies:
+              for vuln in dep.get("vulns", []):
+                  aliases = ", ".join(vuln.get("aliases", [])) or "no aliases"
+                  findings.append(
+                      f"{dep.get('name')} {dep.get('version', '?')}: "
+                      f"{vuln.get('id')} ({aliases})"
+                  )
+          if findings:
+              print("pip-audit reported vulnerabilities:")
+              for finding in findings:
+                  print(f"  - {finding}")
+              sys.exit(1)
+          print("pip-audit reported no vulnerabilities")
+          PY
+
+      - name: Check for committed secrets
+        # Pin: trufflesecurity/trufflehog v3.88.22
+        uses: trufflesecurity/trufflehog@34339eaf08bf5c2a27dbd969812127721f3743ed  # v3.88.22
+        with:
+          path: ./
+          extra_args: --only-verified
+
+      - name: Upload required security scan aggregate results
+        if: always()
+        # Pin: actions/upload-artifact v4.4.3
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
+        with:
+          name: required-security-scan-results-${{ github.run_number }}
+          path: |
+            bandit-results.json
+            pip-audit-results.json
+          retention-days: 90
 
       - name: Run hermetic unit suites
         env:
