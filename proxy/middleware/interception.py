@@ -92,6 +92,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from arkheia_common.egress import egress_async_client
+
 logger = logging.getLogger(__name__)
 
 
@@ -781,7 +783,7 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
         )
         forward_headers = _forward_headers(request.headers)
 
-        async with httpx.AsyncClient(follow_redirects=False) as client:
+        async with egress_async_client(follow_redirects=False) as client:
             upstream_response = await client.request(
                 method=request.method,
                 url=target_url,

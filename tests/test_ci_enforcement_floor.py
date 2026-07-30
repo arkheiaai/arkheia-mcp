@@ -1245,6 +1245,12 @@ def orphaned_test_files(
     ]
 
 
+REQUIRED_CUSTODY_FLOOR_FILES = frozenset({
+    "tests/test_mcp_httpx_custody_floor.py",
+    "tests/test_mcp_hosted_authority_floor.py",
+})
+
+
 def test_every_test_file_is_collectable_by_a_required_context() -> None:
     test_files = _repo_test_files()
     assert test_files, (
@@ -1286,6 +1292,40 @@ def test_every_test_file_is_collectable_by_a_required_context() -> None:
         + "\n\nNOT credited (ran pytest but is not a required gate):\n  - "
         + ("\n  - ".join(rejected) if rejected else "(none)")
         + "\n\n" + TRUST_STATEMENT
+    )
+
+
+def test_custody_floor_files_are_present_and_collected_by_required_floor_context() -> None:
+    test_files = set(_repo_test_files())
+    missing = sorted(REQUIRED_CUSTODY_FLOOR_FILES - test_files)
+    assert not missing, (
+        "custody floor file(s) disappeared from the tree; this is not a global "
+        "collection-count check, it anchors the named custody invariants:\n  - "
+        + "\n  - ".join(missing)
+    )
+
+    required, problems = required_contexts()
+    assert not problems, (
+        "custody floor collection not observed because required contexts could "
+        "not be read:\n  - " + "\n  - ".join(problems)
+    )
+    credited, rejected = credited_invocations(workflow_texts(), required)
+    floor_invocations = [
+        inv for _wf, ctx, inv in credited
+        if ctx == "floor-invariants"
+    ]
+    assert floor_invocations, (
+        "no required floor-invariants pytest invocation was credited; rejected:\n  - "
+        + ("\n  - ".join(rejected) if rejected else "(none)")
+    )
+
+    uncollected = sorted(
+        rel for rel in REQUIRED_CUSTODY_FLOOR_FILES
+        if not any(inv.collects(rel) for inv in floor_invocations)
+    )
+    assert not uncollected, (
+        "custody floor file(s) exist but are not collected by required "
+        "floor-invariants:\n  - " + "\n  - ".join(uncollected)
     )
 
 

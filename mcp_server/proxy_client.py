@@ -14,10 +14,18 @@ from typing import Optional
 
 import httpx
 
+from arkheia_common.egress import egress_async_client
+from arkheia_common.hosted_authority import (
+    DEFAULT_HOSTED_API_URL,
+    HostedAuthorityError,
+    authorize_hosted_base_url,
+    hosted_key_egress_client,
+)
+
 logger = logging.getLogger(__name__)
 
 # Hosted API defaults
-HOSTED_API_URL = "https://arkheia-proxy-production.up.railway.app"
+HOSTED_API_URL = DEFAULT_HOSTED_API_URL
 
 _LOCAL_TRANSPORT_ERRORS = frozenset({
     "proxy_unavailable",
@@ -222,7 +230,7 @@ class ProxyClient:
             payload["session_id"] = session_id
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with egress_async_client(timeout=self.timeout) as client:
                 resp = await client.post(
                     f"{self.base_url}/detect/verify",
                     json=payload,
@@ -271,12 +279,13 @@ class ProxyClient:
             "response": response,
             "prompt": prompt,
         }
-        headers = {"X-Arkheia-Key": self.api_key}
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            authorized = authorize_hosted_base_url(self.hosted_url)
+            headers = {"X-Arkheia-Key": self.api_key}
+            async with hosted_key_egress_client(timeout=self.timeout) as client:
                 resp = await client.post(
-                    f"{self.hosted_url}/v1/detect",
+                    f"{authorized.base_url}/v1/detect",
                     json=payload,
                     headers=headers,
                 )
@@ -293,6 +302,9 @@ class ProxyClient:
                     source="hosted",
                     error=data.get("error"),
                 )
+        except HostedAuthorityError as e:
+            logger.error("ProxyClient: hosted API authority rejected: %s", e)
+            return _unavailable("hosted_authority_rejected")
         except httpx.TimeoutException:
             logger.warning("ProxyClient: hosted /v1/detect timed out for model=%s", model_id)
             return _unavailable("hosted_timeout")
@@ -329,7 +341,7 @@ class ProxyClient:
             params["session_id"] = session_id
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with egress_async_client(timeout=self.timeout) as client:
                 resp = await client.get(
                     f"{self.base_url}/audit/log",
                     params=params,
