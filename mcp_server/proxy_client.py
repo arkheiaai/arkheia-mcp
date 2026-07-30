@@ -14,6 +14,8 @@ from typing import Optional
 
 import httpx
 
+from arkheia_common.egress import egress_async_client
+
 logger = logging.getLogger(__name__)
 
 # Hosted API defaults
@@ -96,7 +98,7 @@ class ProxyClient:
             payload["session_id"] = session_id
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with egress_async_client(timeout=self.timeout) as client:
                 resp = await client.post(
                     f"{self.base_url}/detect/verify",
                     json=payload,
@@ -147,7 +149,7 @@ class ProxyClient:
         headers = {"X-Arkheia-Key": self.api_key}
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with egress_async_client(timeout=self.timeout) as client:
                 resp = await client.post(
                     f"{self.hosted_url}/v1/detect",
                     json=payload,
@@ -201,7 +203,7 @@ class ProxyClient:
             params["session_id"] = session_id
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with egress_async_client(timeout=self.timeout) as client:
                 resp = await client.get(
                     f"{self.base_url}/audit/log",
                     params=params,

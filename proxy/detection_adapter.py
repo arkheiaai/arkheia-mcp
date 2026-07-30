@@ -16,7 +16,7 @@ import os
 import time
 from typing import Any
 
-import httpx
+from arkheia_common.egress import egress_async_client
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +60,7 @@ async def push_event(
     headers = _sign_headers(body, DETECTION_ADAPTER_HMAC_SECRET, DETECTION_ADAPTER_KEY_ID)
 
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with egress_async_client(timeout=3.0) as client:
             resp = await client.post(
                 f"{DETECTION_ADAPTER_URL}/v1/events/proxy",
                 content=body,

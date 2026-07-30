@@ -23,6 +23,7 @@ from typing import Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from arkheia_common.egress import egress_async_client
 from proxy.audit.decision_journal import (
     KEY_LOAD_FETCHED_CACHE,
     KEY_LOAD_FETCHED_HOSTED,
@@ -218,8 +219,7 @@ class DynamicKeyLoader:
             logger.warning("No API key configured — cannot fetch profile key")
             return None
         try:
-            import httpx
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with egress_async_client(timeout=30) as client:
                 resp = await client.post(
                     f"{self.hosted_url}/v1/profile-key",
                     headers={"X-Arkheia-Key": self.api_key},

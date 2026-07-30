@@ -128,13 +128,16 @@ class TestInv1SinglePrefixConstant:
 # INV-2 — every AsyncClient passes follow_redirects=False explicitly
 # ---------------------------------------------------------------------------
 
+CLIENT_FACTORIES = {"AsyncClient", "egress_async_client"}
+
+
 def _async_clients(tree: ast.Module) -> list[ast.Call]:
     out = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             f = node.func
             name = getattr(f, "attr", None) or getattr(f, "id", None)
-            if name == "AsyncClient":
+            if name in CLIENT_FACTORIES:
                 out.append(node)
     return out
 
@@ -170,9 +173,13 @@ class TestInv2RedirectsNeverFollowed:
         pre_fix = ast.parse("async with httpx.AsyncClient() as client:\n    pass\n")
         assert len(_clients_without_explicit_no_redirect(pre_fix)) == 1
 
+    def test_negative_self_test_the_shared_factory_without_redirect_guard_is_flagged(self):
+        pre_fix = ast.parse("async with egress_async_client() as client:\n    pass\n")
+        assert len(_clients_without_explicit_no_redirect(pre_fix)) == 1
+
     def test_control_an_explicit_client_is_not_flagged(self):
         good = ast.parse(
-            "async with httpx.AsyncClient(follow_redirects=False) as client:\n"
+            "async with egress_async_client(follow_redirects=False) as client:\n"
             "    pass\n"
         )
         assert _clients_without_explicit_no_redirect(good) == []

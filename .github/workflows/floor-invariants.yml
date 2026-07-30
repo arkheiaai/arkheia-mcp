@@ -60,6 +60,38 @@ jobs:
           node --version
           npm --version
 
+      - name: Confirm egress custody floor node IDs are collected
+        # Set-shaped guard for the egress-custody floor. This catches deleting or
+        # renaming the floor without turning unrelated floor additions into an
+        # EXPECTED-count conflict.
+        run: |
+          pytest tests \
+            -o python_files="test_*_floor.py test_floor_*.py" \
+            -p no:cacheprovider --collect-only -q > /tmp/floor-nodeids.txt
+          python - <<'PY'
+          from pathlib import Path
+
+          manifest = Path(".github/floor-egress-custody-nodeids.txt")
+          expected = {
+              line.strip()
+              for line in manifest.read_text(encoding="utf-8").splitlines()
+              if line.strip() and not line.startswith("#")
+          }
+          actual = {
+              line.strip()
+              for line in Path("/tmp/floor-nodeids.txt").read_text(encoding="utf-8").splitlines()
+              if "::" in line
+          }
+          if not expected:
+              raise SystemExit("egress custody floor manifest is empty")
+          missing = sorted(expected - actual)
+          if missing:
+              raise SystemExit(
+                  "egress custody floor node IDs were not collected:\n  "
+                  + "\n  ".join(missing)
+              )
+          PY
+
       - name: Run floor invariants
         # Override python_files so ONLY floor tests are collected; a bare pytest
         # must never try to import dependency-heavy suites. Empty collection
