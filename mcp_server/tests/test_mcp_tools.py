@@ -255,6 +255,40 @@ class TestMCPToolBehaviour:
             mcp_server_module.proxy = original_proxy
 
     @pytest.mark.asyncio
+    async def test_arkheia_verify_tool_forwards_empty_output_metadata(self):
+        """Direct verify can prove a hard-empty output; it is not structurally text-only."""
+        from mcp_server import server as mcp_server_module
+
+        expected = {"risk_level": "LOW", "confidence": 0.0,
+                    "features_triggered": [], "detection_id": "uuid-test"}
+
+        original_proxy = mcp_server_module.proxy
+        mock_proxy = AsyncMock(spec=ProxyClient)
+        mock_proxy.verify.return_value = expected
+        mcp_server_module.proxy = mock_proxy
+
+        try:
+            result = await mcp_server_module.arkheia_verify(
+                prompt="test",
+                response="",
+                model="gpt-4o",
+                usage={"completion_tokens": 0},
+                output_tokens=0,
+                is_function_call=False,
+            )
+            assert result == expected
+            mock_proxy.verify.assert_called_once_with(
+                prompt="test",
+                response="",
+                model_id="gpt-4o",
+                usage={"completion_tokens": 0},
+                output_tokens=0,
+                is_function_call=False,
+            )
+        finally:
+            mcp_server_module.proxy = original_proxy
+
+    @pytest.mark.asyncio
     async def test_arkheia_verify_returns_unknown_on_proxy_failure(self):
         """CRITERION 7: Tool never raises -- UNKNOWN returned on proxy failure."""
         from mcp_server import server as mcp_server_module

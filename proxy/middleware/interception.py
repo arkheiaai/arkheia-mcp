@@ -84,7 +84,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 from starlette.datastructures import Headers
@@ -312,6 +312,39 @@ def _extract_prompt(body: bytes) -> str:
         return body_json.get("prompt", "")
     except Exception:
         return ""
+
+
+def _json_object(body: bytes) -> Optional[dict[str, Any]]:
+    try:
+        body_json = json.loads(body)
+    except Exception:
+        return None
+    return body_json if isinstance(body_json, dict) else None
+
+
+def _output_tokens_from_usage(usage: Optional[dict[str, Any]]) -> Any:
+    if not isinstance(usage, dict):
+        return None
+    for key in (
+        "output_tokens",
+        "completion_tokens",
+        "candidatesTokenCount",
+        "eval_count",
+        "response_tokens",
+    ):
+        if key in usage:
+            return usage[key]
+    return None
+
+
+def _extract_output_tokens(body: bytes) -> Any:
+    body_json = _json_object(body)
+    if body_json is None:
+        return None
+    usage = body_json.get("usage")
+    if not isinstance(usage, dict):
+        usage = body_json.get("usageMetadata")
+    return _output_tokens_from_usage(usage if isinstance(usage, dict) else None)
 
 
 # ---------------------------------------------------------------------------
@@ -645,10 +678,15 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
             )
 
         try:
+            metadata = {}
+            output_tokens = _extract_output_tokens(response_body)
+            if output_tokens is not None:
+                metadata["output_tokens"] = output_tokens
             result = await engine.verify(
                 prompt,
                 response_body.decode("utf-8", errors="replace"),
                 model_id,
+                **metadata,
             )
         except Exception as exc:
             # Fail-open: deliver the answer we already hold, unchanged. Never

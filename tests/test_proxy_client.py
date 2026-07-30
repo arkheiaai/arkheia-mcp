@@ -198,6 +198,38 @@ class TestHostedFallback:
         assert result["source"] == "hosted"
 
     @pytest.mark.asyncio
+    async def test_hosted_fallback_receives_structural_usage_metadata(self, client_with_key):
+        """Local failure must not strand the zero-output signal before hosted scoring."""
+        client_with_key._local_available = False
+
+        hosted_response = MagicMock()
+        hosted_response.json.return_value = {
+            "risk": "LOW",
+            "confidence": 0.0,
+            "features_triggered": [],
+            "detection_id": "det_empty_hosted",
+            "detection_method": "empty_output_suppressed",
+            "evidence_depth_limited": True,
+        }
+        hosted_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock,
+                   return_value=hosted_response) as post:
+            await client_with_key.verify(
+                "prompt",
+                "",
+                "gpt-4o",
+                usage={"completion_tokens": 0},
+                output_tokens=0,
+                is_function_call=False,
+            )
+
+        payload = post.call_args.kwargs["json"]
+        assert payload["usage"] == {"completion_tokens": 0}
+        assert payload["output_tokens"] == 0
+        assert payload["is_function_call"] is False
+
+    @pytest.mark.asyncio
     async def test_hosted_auth_failure(self, client_with_key):
         """Hosted API returns 401 → auth error."""
         client_with_key._local_available = False
