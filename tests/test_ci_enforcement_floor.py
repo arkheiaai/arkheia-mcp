@@ -770,13 +770,20 @@ def _security_gate_job_failures(job_id: str, job: WorkflowJob) -> list[str]:
         failures.extend(_scanner_target_failures(job_id, line_no, line, kinds))
 
     if "trufflehog" in scanner_kinds and re.search(
-        r"^-?\s*uses:\s*trufflesecurity/trufflehog@", job.text, re.M | re.I
+        r"^\s*-?\s*uses:\s*trufflesecurity/trufflehog@", job.text, re.M | re.I
     ):
         if not re.search(r"^\s*path:\s*\S+", job.text, re.M):
             failures.append(
                 f"{job_id} runs the TruffleHog action without `with.path`; this "
                 "gate must name the tree it scans."
             )
+        for key in ("base", "head"):
+            if re.search(rf"^\s*{key}:\s*\S+", job.text, re.M):
+                failures.append(
+                    f"{job_id} pins TruffleHog `with.{key}`. On push events the "
+                    "pinned action can collapse to BASE == HEAD and fail before "
+                    "scanning; let the action derive the event range."
+                )
     if "codeql" in scanner_kinds:
         has_init = re.search(r"github/codeql-action/init@", job.text, re.I)
         has_analyze = re.search(r"github/codeql-action/analyze@", job.text, re.I)
@@ -1764,6 +1771,30 @@ def test_inv6_fail_closed_positive_controls() -> None:
     assert any("without a concrete `-r` target" in f for f in bandit_failures), (
         bandit_failures
     )
+
+    pinned_trufflehog = (
+        "jobs:\n"
+        "  secrets-check:\n"
+        "    name: Check for committed secrets\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - uses: trufflesecurity/trufflehog@34339eaf08bf5c2a27dbd969812127721f3743ed\n"
+        "        with:\n"
+        "          path: ./\n"
+        "          base: ${{ github.event.repository.default_branch }}\n"
+        "          head: HEAD\n"
+        "          extra_args: --only-verified\n"
+    )
+    trufflehog_failures = _security_scan_gate_failures(
+        {".github/workflows/security_scan.yml": pinned_trufflehog},
+        classified={
+            ".github/workflows/security_scan.yml:secrets-check": (
+                "Check for committed secrets",
+            )
+        },
+    )
+    assert any("with.base" in f for f in trufflehog_failures), trufflehog_failures
+    assert any("with.head" in f for f in trufflehog_failures), trufflehog_failures
 
 
 def test_inv6_discovers_new_security_jobs_and_classification_shrink() -> None:
