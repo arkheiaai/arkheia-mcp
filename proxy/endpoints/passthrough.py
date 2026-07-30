@@ -30,10 +30,11 @@ Security:
 import hashlib
 import json
 import logging
+import math
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, Request
@@ -107,6 +108,57 @@ def _extract_gemini_text(body: bytes) -> Optional[str]:
         return data["candidates"][0]["content"]["parts"][0]["text"]
     except Exception:
         return None
+
+
+def _json_object(body: bytes) -> Optional[dict[str, Any]]:
+    try:
+        data = json.loads(body)
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _extract_openai_usage(body: bytes) -> Optional[dict[str, Any]]:
+    data = _json_object(body)
+    usage = data.get("usage") if data else None
+    return usage if isinstance(usage, dict) else None
+
+
+def _extract_gemini_usage(body: bytes) -> Optional[dict[str, Any]]:
+    data = _json_object(body)
+    usage = data.get("usageMetadata") if data else None
+    return usage if isinstance(usage, dict) else None
+
+
+def _extract_anthropic_usage(body: bytes) -> Optional[dict[str, Any]]:
+    data = _json_object(body)
+    usage = data.get("usage") if data else None
+    return usage if isinstance(usage, dict) else None
+
+
+def _output_tokens_from_usage(usage: Optional[dict[str, Any]]) -> Any:
+    if not isinstance(usage, dict):
+        return None
+    for key in (
+        "output_tokens",
+        "completion_tokens",
+        "candidatesTokenCount",
+        "eval_count",
+        "response_tokens",
+    ):
+        if key in usage:
+            return usage[key]
+    return None
+
+
+def _is_zero_count(value: Any) -> bool:
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(v) and v == 0
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +246,7 @@ async def _detect_and_audit(
     prompt: str,
     response_text: str,
     model_id: str,
+    output_tokens: Any = None,
 ) -> str:
     """
     Run detection and write audit record. Returns risk_level string.
@@ -202,11 +255,17 @@ async def _detect_and_audit(
     engine = getattr(request.app.state, "engine", None)
     audit = getattr(request.app.state, "audit_writer", None)
 
-    if engine is None or not response_text:
+    if engine is None:
+        return "UNKNOWN"
+
+    if response_text == "" and output_tokens is None:
         return "UNKNOWN"
 
     try:
-        result = await engine.verify(prompt, response_text, model_id)
+        metadata = {}
+        if output_tokens is not None:
+            metadata["output_tokens"] = output_tokens
+        result = await engine.verify(prompt, response_text, model_id, **metadata)
         risk_level = result.risk_level
 
         if audit:
@@ -219,6 +278,10 @@ async def _detect_and_audit(
                 "risk_level": risk_level,
                 "confidence": result.confidence,
                 "features_triggered": result.features_triggered,
+                "evidence_depth_limited": getattr(result, "evidence_depth_limited", True),
+                "detection_method": getattr(result, "detection_method", None),
+                "profile_model_id": getattr(result, "profile_model_id", None),
+                "gate_reason": getattr(result, "gate_reason", None),
                 "prompt_hash": hashlib.sha256(prompt.encode()).hexdigest(),
                 "response_hash": hashlib.sha256(response_text.encode()).hexdigest(),
                 "response_length": len(response_text),
@@ -320,10 +383,18 @@ async def grok_passthrough(path: str, request: Request):
     risk_level = "SKIP"
     if status_code == 200:
         response_text = _extract_openai_text(response_body)
-        if response_text:
+        usage = _extract_openai_usage(response_body)
+        output_tokens = _output_tokens_from_usage(usage)
+        if response_text is not None or _is_zero_count(output_tokens):
             prompt = _extract_openai_prompt(request_body)
             model_id = _extract_grok_model(request_body)
-            risk_level = await _detect_and_audit(request, prompt, response_text, model_id)
+            risk_level = await _detect_and_audit(
+                request,
+                prompt,
+                response_text or "",
+                model_id,
+                output_tokens=output_tokens,
+            )
             logger.info("grok_passthrough: model=%s risk=%s", model_id, risk_level)
 
     response_headers["X-Arkheia-Risk"] = risk_level
@@ -374,10 +445,18 @@ async def together_passthrough(path: str, request: Request):
     risk_level = "SKIP"
     if status_code == 200:
         response_text = _extract_openai_text(response_body)
-        if response_text:
+        usage = _extract_openai_usage(response_body)
+        output_tokens = _output_tokens_from_usage(usage)
+        if response_text is not None or _is_zero_count(output_tokens):
             prompt = _extract_openai_prompt(request_body)
             model_id = _extract_grok_model(request_body)  # same field: "model"
-            risk_level = await _detect_and_audit(request, prompt, response_text, model_id)
+            risk_level = await _detect_and_audit(
+                request,
+                prompt,
+                response_text or "",
+                model_id,
+                output_tokens=output_tokens,
+            )
             logger.info("together_passthrough: model=%s risk=%s", model_id, risk_level)
 
     response_headers["X-Arkheia-Risk"] = risk_level
@@ -429,10 +508,18 @@ async def gemini_passthrough(path: str, request: Request):
     risk_level = "SKIP"
     if status_code == 200:
         response_text = _extract_gemini_text(response_body)
-        if response_text:
+        usage = _extract_gemini_usage(response_body)
+        output_tokens = _output_tokens_from_usage(usage)
+        if response_text is not None or _is_zero_count(output_tokens):
             prompt = _extract_gemini_prompt(request_body)
             model_id = _extract_gemini_model(path)
-            risk_level = await _detect_and_audit(request, prompt, response_text, model_id)
+            risk_level = await _detect_and_audit(
+                request,
+                prompt,
+                response_text or "",
+                model_id,
+                output_tokens=output_tokens,
+            )
             logger.info("gemini_passthrough: model=%s risk=%s", model_id, risk_level)
 
     response_headers["X-Arkheia-Risk"] = risk_level
@@ -483,10 +570,18 @@ async def anthropic_passthrough(path: str, request: Request):
     risk_level = "SKIP"
     if status_code == 200:
         response_text = _extract_anthropic_text(response_body)
-        if response_text:
+        usage = _extract_anthropic_usage(response_body)
+        output_tokens = _output_tokens_from_usage(usage)
+        if response_text is not None or _is_zero_count(output_tokens):
             prompt = _extract_openai_prompt(request_body)  # Anthropic uses same messages[] format
             model_id = _extract_anthropic_model(response_body)
-            risk_level = await _detect_and_audit(request, prompt, response_text, model_id)
+            risk_level = await _detect_and_audit(
+                request,
+                prompt,
+                response_text or "",
+                model_id,
+                output_tokens=output_tokens,
+            )
             logger.info("anthropic_passthrough: model=%s risk=%s", model_id, risk_level)
 
     response_headers["X-Arkheia-Risk"] = risk_level
