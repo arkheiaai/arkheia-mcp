@@ -44,18 +44,17 @@ pyyaml>=6.0
 aiofiles>=23.0
 
 # Crypto -- AES-256-GCM encrypt/decrypt for profiles.
-# `proxy/crypto/profile_crypto.py` imports `cryptography` DIRECTLY, and
-# `proxy/main.py` imports `dotenv` DIRECTLY, but neither was declared here.
-# They were only ever satisfied TRANSITIVELY (verified 2026-07-26 in a venv built
-# from this file alone): cryptography arrives via `mcp==1.28.1 -> pyjwt[crypto] ->
-# cryptography`, and python-dotenv via `pydantic-settings -> python-dotenv`.
-# So the documented install in docs/DEPLOYMENT.md did NOT crash -- but the repo
-# was relying on an EXTRA of a transitive dependency to supply a direct import,
-# and, more importantly, the CVE floor already pinned in proxy/requirements.txt
-# was NOT enforced on this install path at all. Declared explicitly so the pin is
-# real and so an upstream dropping `[crypto]` cannot silently break the proxy.
+# `proxy/crypto/profile_crypto.py` imports `cryptography` DIRECTLY. It used to be
+# satisfied TRANSITIVELY (verified 2026-07-26 in a venv built from this file
+# alone) through `mcp==1.28.1 -> pyjwt[crypto] -> cryptography`, at a lower floor
+# than proxy/requirements.txt. Declared explicitly so the CVE pin is real and so
+# an upstream dropping `[crypto]` cannot silently break the proxy.
 cryptography>=48.0.1  # CVE-2026-39892 (buffer overflow) + CVE-2026-26007 (EC key validation) + GHSA-537c-gmf6-5ccf (bundled OpenSSL, high; fixed 48.0.1) fixes -- mirrors proxy/requirements.txt
-python-dotenv>=1.2.2  # CVE-2026-28684 (symlink attack in set_key/unset_key) fix -- imported unconditionally by proxy/main.py; mirrors proxy/requirements.txt
+
+# `pydantic-settings` can bring in dotenv support. Production modules must not
+# call `load_dotenv` or search cwd `.env` files; this direct pin keeps the CVE
+# floor explicit rather than leaving it to a transitive dependency.
+python-dotenv>=1.2.2  # CVE-2026-28684 (symlink attack in set_key/unset_key) fix -- mirrors proxy/requirements.txt
 
 # Build / compilation dependency for release pipeline
 Cython>=3.0
