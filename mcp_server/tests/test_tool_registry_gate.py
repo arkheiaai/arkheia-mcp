@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import multiprocessing
 import os
 import queue
@@ -1214,6 +1215,91 @@ class TestReceiptedGate:
         assert values_row["argument_values"][contextual_keys[0]]["nested"].startswith(
             REDACTION_MARKER
         )
+
+    async def test_short_oauth_and_hex_secrets_in_receipt_subjects_are_redacted(
+        self, tmp_path
+    ):
+        log_path = tmp_path / "gate.jsonl"
+        google_client_secret = "GOCSPX-1a2b3c4d5e6f7g8h9i0j"
+        hex_secret = "0123456789abcdef0123456789abcdef"
+        receipt_id = receipts.new_receipt_id()
+        record = receipts.build_record(
+            receipt_id=receipt_id,
+            tool=google_client_secret,
+            decision=receipts.DECISION_ALLOWED,
+            event_type="mcp.tool_gate",
+            control="tool_registry_gate",
+            call_site=hex_secret,
+            argument_keys=["query", google_client_secret, hex_secret],
+            argument_values={
+                google_client_secret: {"nested": hex_secret},
+                "public": ["kept"],
+            },
+        )
+
+        assert await receipts.emit(log_path, record) is True
+
+        raw = log_path.read_text(encoding="utf-8")
+        assert google_client_secret not in raw
+        assert hex_secret not in raw
+        assert "query" in raw
+        assert "public" in raw
+        row = receipts.find_receipt(log_path, receipt_id)
+        assert row is not None
+        assert row["tool"].startswith(REDACTION_MARKER)
+        assert row["call_site"].startswith(REDACTION_MARKER)
+        assert sum(
+            1
+            for key in row["argument_keys"]
+            if isinstance(key, str) and key.startswith(REDACTION_MARKER)
+        ) == 2
+        contextual_keys = [
+            key for key in row["argument_values"]
+            if isinstance(key, str) and key.startswith(REDACTION_MARKER)
+        ]
+        assert len(contextual_keys) == 1
+        assert row["argument_values"][contextual_keys[0]]["nested"].startswith(
+            REDACTION_MARKER
+        )
+
+    async def test_receipt_emit_failure_logs_redact_tool_subject(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        log_path = tmp_path / "gate.jsonl"
+        secret = "0123456789abcdef0123456789abcdef"
+        record = receipts.build_record(
+            receipt_id=receipts.new_receipt_id(),
+            tool=secret,
+            decision=receipts.DECISION_ALLOWED,
+            event_type="mcp.tool_gate",
+            control="tool_registry_gate",
+            call_site="unit",
+        )
+
+        def fail_append(*args, **kwargs):
+            raise OSError("synthetic append failure")
+
+        monkeypatch.setattr(receipts, "_append_record_and_confirm", fail_append)
+        caplog.set_level(logging.ERROR, logger="mcp_server.receipts")
+
+        assert await receipts.emit(log_path, record) is False
+
+        messages = "\n".join(r.getMessage() for r in caplog.records)
+        assert secret not in messages
+        assert REDACTION_MARKER in messages
+
+    async def test_receipt_path_failure_logs_redact_tool_subject(
+        self, tmp_path, caplog
+    ):
+        secret = "GOCSPX-1a2b3c4d5e6f7g8h9i0j"
+        caplog.set_level(logging.ERROR, logger="mcp_server.tool_registry")
+
+        decision = await decide(secret, log_path=tmp_path / ".hidden.jsonl")
+
+        assert decision.receipt_status == receipts.STATUS_UNRECORDED
+        messages = "\n".join(r.getMessage() for r in caplog.records)
+        assert secret not in messages
+        assert REDACTION_MARKER in messages
 
     async def test_emit_reports_unrecorded_when_readback_cannot_find_receipt(
         self, tmp_path, monkeypatch

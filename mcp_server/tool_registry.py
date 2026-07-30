@@ -319,7 +319,7 @@ def _resolve_receipt_path(log_path: str | Path | None) -> Path:
         raise ValueError(
             f"{RECEIPT_LOG_ENV} must be absolute or start with '~'; got {str(path)!r}"
         )
-    return path
+    return receipts.validate_receipt_log_path(path)
 
 
 async def _emit_gate_receipt(
@@ -340,7 +340,7 @@ async def _emit_gate_receipt(
         logger.error(
             "tool-gate receipt path failed (%s): tool=%r denied=%s receipt_id=%s",
             exc,
-            tool_name,
+            receipts.log_safe_value(tool_name),
             violation is not None,
             receipt_id,
             exc_info=True,
@@ -383,7 +383,7 @@ async def _emit_gate_receipt(
             "tool-gate receipt could not be built (%s): tool=%r denied=%s "
             "receipt_id=%s; writing an unrepresentable receipt",
             exc,
-            tool_name,
+            receipts.log_safe_value(tool_name),
             violation is not None,
             receipt_id,
         )
@@ -404,7 +404,7 @@ async def _emit_gate_receipt(
             logger.error(
                 "tool-gate fallback receipt also failed (%s): tool=%r receipt_id=%s",
                 fallback_exc,
-                tool_name,
+                receipts.log_safe_value(tool_name),
                 receipt_id,
             )
             return receipt_id, receipts.STATUS_UNRECORDED

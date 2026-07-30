@@ -115,6 +115,9 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 _SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
+    # Google OAuth client secrets are short enough to sit below the generic
+    # opaque-entropy floor, but the GOCSPX prefix is itself credential syntax.
+    ("google-oauth-client-secret", re.compile(r'GOCSPX-[A-Za-z0-9_-]{16,80}')),
     # Armoured secret BLOCK, any `-----BEGIN <label>-----` delimiter — not just
     # `PRIVATE KEY`. The first cut hardcoded the PEM label, so a PGP private key
     # block (`-----BEGIN PGP PRIVATE KEY BLOCK-----`) walked straight through:
@@ -420,6 +423,7 @@ _CREDENTIAL_CONTEXT = re.compile(
 #: Charset of an opaque credential body. Deliberately excludes `.` so dotted
 #: identifiers and versions are not candidates.
 _OPAQUE_TOKEN = re.compile(r'[A-Za-z0-9+/_-]{32,200}={0,2}')
+_CREDENTIAL_FIELD_TOKEN = re.compile(r'[A-Za-z0-9+/_-]{16,200}={0,2}')
 
 _HEX_ONLY = re.compile(r'^[0-9a-fA-F]+$')
 _UUID = re.compile(r'^[0-9a-fA-F-]{36}$')
@@ -466,6 +470,33 @@ def _is_opaque_credential(tok: str) -> bool:
     if _base64_views(tok):
         return False
     return _shannon(tok) >= 3.5
+
+
+def _is_credential_field_token(tok: str) -> bool:
+    """
+    Token predicate for values whose field is already credential-bearing.
+
+    This intentionally differs from the generic opaque fallback: a known
+    credential field has no sha/UUID false-positive cost from redacting a
+    32-byte hex secret, while ordinary audit prose still does.
+    """
+    if _UUID.match(tok):
+        return False
+    if _HEX_ONLY.match(tok):
+        return len(tok) >= 32
+    if tok.startswith("GOCSPX-"):
+        return len(tok) >= 16
+    if not any(c.isdigit() for c in tok):
+        return False
+    return _shannon(tok) >= 3.0
+
+
+def _redact_credential_field_tokens(value: str) -> str:
+    return _CREDENTIAL_FIELD_TOKEN.sub(
+        lambda m: _placeholder(m.group(0))
+        if _is_credential_field_token(m.group(0)) else m.group(0),
+        value,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +648,8 @@ def _redact_string(value: str, *, credential_context: bool = False) -> str:
     keeps its specific label; the encoding and entropy passes are the fallbacks
     for bodies those patterns cannot see.
     """
+    if credential_context:
+        value = _redact_credential_field_tokens(value)
     for _label, pattern in _SECRET_PATTERNS:
         value = pattern.sub(lambda m: _placeholder(m.group(0)), value)
     for _label, pattern in _LABELLED_SECRET_PATTERNS:

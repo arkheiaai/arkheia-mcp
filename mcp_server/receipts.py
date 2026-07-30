@@ -31,7 +31,7 @@ _RECEIPT_FILE_MODE = 0o600
 _LOCKS_GUARD = threading.Lock()
 _PATH_LOCKS: dict[tuple[str, int], asyncio.Lock] = {}
 _CONTEXTUAL_RECEIPT_FIELDS = frozenset(
-    {"tool", "argument_keys", "argument_values"}
+    {"tool", "argument_keys", "argument_values", "call_site"}
 )
 _DEFAULT_RECEIPT_DIR = Path("~/.arkheia/mcp").expanduser()
 
@@ -125,6 +125,11 @@ def _validate_receipt_log_path(log_path: str | Path) -> Path:
     return resolved
 
 
+def validate_receipt_log_path(log_path: str | Path) -> Path:
+    """Public wrapper for callers that need to fail before emitting."""
+    return _validate_receipt_log_path(log_path)
+
+
 def _load_receipt_chain_state(log_path: Path) -> tuple[str, int]:
     """Recover the last parseable receipt row without assuming rows fit in a small tail."""
     log_path = _validate_receipt_log_path(log_path)
@@ -195,6 +200,11 @@ def _redact_receipt_record(record: dict[str, Any]) -> dict[str, Any]:
     return clean
 
 
+def log_safe_value(value: Any) -> Any:
+    """Return a receipt subject value safe for diagnostic logging."""
+    return redact_in_credential_context(value)
+
+
 def _append_record_and_confirm(path: Path, record: dict[str, Any], receipt_id: object) -> bool:
     path = _validate_receipt_log_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -234,7 +244,7 @@ async def emit(log_path: str | Path, record: dict[str, Any]) -> bool:
         logger.error(
             "MCP receipt failed to write (%s): tool=%s decision=%s receipt_id=%s",
             exc,
-            record.get("tool"),
+            log_safe_value(record.get("tool")),
             record.get("decision"),
             receipt_id,
             exc_info=True,
@@ -245,7 +255,7 @@ async def emit(log_path: str | Path, record: dict[str, Any]) -> bool:
         logger.error(
             "MCP receipt write was not confirmed on disk: tool=%s decision=%s "
             "receipt_id=%s path=%s",
-            record.get("tool"),
+            log_safe_value(record.get("tool")),
             record.get("decision"),
             receipt_id,
             path,
