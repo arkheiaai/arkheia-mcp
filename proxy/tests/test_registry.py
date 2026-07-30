@@ -109,6 +109,16 @@ class TestProfileValidator:
         """CRITERION 10: Wrong checksum returns False."""
         assert validator.verify_checksum(VALID_YAML, "deadbeef" * 8) is False
 
+    def test_checksum_same_prefix_wrong_tail_is_rejected(self, validator):
+        """Checksum verification must compare the full SHA-256, not a prefix."""
+        wrong_tail = "0" if VALID_CHECKSUM[8] != "0" else "1"
+        same_prefix_wrong_digest = VALID_CHECKSUM[:8] + wrong_tail + VALID_CHECKSUM[9:]
+        assert same_prefix_wrong_digest[:8] == VALID_CHECKSUM[:8]
+        assert same_prefix_wrong_digest != VALID_CHECKSUM
+        assert len(same_prefix_wrong_digest) == 64
+
+        assert validator.verify_checksum(VALID_YAML, same_prefix_wrong_digest) is False
+
     def test_smoke_test_pass(self, validator):
         """Smoke test with expected LOW result passes."""
         profile_with_smoke = dict(VALID_PROFILE)
@@ -337,3 +347,90 @@ class TestRegistryClient:
             await registry_client.pull()
 
         assert (tmp_path / "llama-3-70b.yaml").exists()
+
+    @pytest.mark.asyncio
+    async def test_registry_client_rejects_traversal_model_id_before_write(
+        self, tmp_path, mock_router
+    ):
+        """A registry-supplied model_id must not decide an escaping filesystem path."""
+        profile_dir = tmp_path / "profiles"
+        client = RegistryClient(
+            base_url="https://registry.arkheia.ai",
+            api_key=SecretStr("test-api-key"),
+            profile_dir=str(profile_dir),
+            router=mock_router,
+            validator=ProfileValidator(),
+        )
+        escaped = tmp_path / "escaped.yaml"
+        meta = {
+            "model_id": "../escaped",
+            "version": "2.0",
+            "checksum": VALID_CHECKSUM,
+            "download_url": "https://registry.arkheia.ai/profiles/download?model_id=..%2Fescaped",
+        }
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            download_resp = MagicMock()
+            download_resp.content = VALID_YAML
+            download_resp.raise_for_status = MagicMock()
+            mock_client.get.return_value = download_resp
+
+            with pytest.raises(ValueError, match="Unsafe model_id"):
+                await client._download_and_apply(meta)
+
+        assert not escaped.exists()
+        if profile_dir.exists():
+            assert not any(profile_dir.rglob("*.yaml"))
+        mock_router.reload.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_registry_client_keeps_slash_model_ids_confined(
+        self, tmp_path, mock_router
+    ):
+        """Provider-qualified model IDs are valid, but they must not create subdirs."""
+        profile_dir = tmp_path / "profiles"
+        model_id = "zai-org/GLM-5.2"
+        content = yaml.dump({
+            "model": model_id,
+            "version": "2.0",
+            "detection": {
+                "strategy": "ensemble",
+                "features": {
+                    "word_count": {
+                        "enabled": True,
+                        "weight": 1.0,
+                        "polarity": "positive",
+                        "threshold_low": 1.0,
+                    }
+                },
+            },
+        }).encode("utf-8")
+        client = RegistryClient(
+            base_url="https://registry.arkheia.ai",
+            api_key=SecretStr("test-api-key"),
+            profile_dir=str(profile_dir),
+            router=mock_router,
+            validator=ProfileValidator(),
+        )
+        meta = {
+            "model_id": model_id,
+            "version": "2.0",
+            "checksum": hashlib.sha256(content).hexdigest(),
+            "download_url": "https://registry.arkheia.ai/profiles/download?model_id=zai-org%2FGLM-5.2",
+        }
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+            download_resp = MagicMock()
+            download_resp.content = content
+            download_resp.raise_for_status = MagicMock()
+            mock_client.get.return_value = download_resp
+
+            assert await client._download_and_apply(meta) is True
+
+        assert (profile_dir / "zai-org%2FGLM-5.2.yaml").read_bytes() == content
+        assert not (profile_dir / "zai-org").exists()
+        mock_router.reload.assert_called_once()

@@ -134,6 +134,33 @@ def request_for(client: TestClient, method: str, path: str, **kw):
     return client.request(method, url, **kw)
 
 
+def protected_download_routes() -> list[tuple[str, str]]:
+    """Discover every protected profile-download route registered on the app."""
+    routes = [
+        (method, path)
+        for method, path in protected_routes()
+        if method == "GET" and "download" in path
+    ]
+    assert routes, "discovered ZERO protected download routes"
+    return routes
+
+
+def request_download_for_model(
+    client: TestClient,
+    method: str,
+    path: str,
+    model_id: str,
+    **kw,
+):
+    """Issue a download request with a caller-chosen model_id for any route shape."""
+    if path.endswith("/profiles/download"):
+        kw.setdefault("params", {})["model_id"] = model_id
+        return client.request(method, concrete(path), **kw)
+    hostile_path = re.sub(r"\{[^}]+\}", model_id, path)
+    assert "{" not in hostile_path, f"unsubstituted path parameter in {path!r}"
+    return client.request(method, hostile_path, **kw)
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -555,6 +582,43 @@ def test_path_shaping_never_serves_content_unauthenticated(provisioned, raw_path
     assert b"checksum" not in resp.content, f"{raw_path} leaked listing content"
     assert b"thresholds" not in resp.content, f"{raw_path} leaked profile content"
     assert_authorised_call_succeeds(provisioned, "GET", "/profiles")
+
+
+def test_every_discovered_download_route_rejects_traversal_ids_with_a_valid_key(
+    env, tmp_path
+):
+    """
+    Discovery floor for route/path traversal: every current and future download
+    route must reject path-shaped profile IDs even for an authenticated caller,
+    and the empty profiles directory must not make a sibling file reachable.
+    """
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    planted = "planted-profile-content"
+    (tmp_path / "escaped.yaml").write_text(
+        f"model: {planted}\nversion: '1.0'\nthresholds:\n  high: 1\n",
+        encoding="utf-8",
+    )
+    env.setenv("ARKHEIA_REGISTRY_KEYS", VALID_KEY)
+    env.setenv("ARKHEIA_REGISTRY_PROFILE_DIR", str(profiles))
+    env.setenv("ARKHEIA_REGISTRY_BASE_URL", "http://testserver")
+
+    with TestClient(app) as c:
+        for method, path in protected_download_routes():
+            for model_id in ("../escaped", "nested/../../escaped", "x" * 129):
+                resp = request_download_for_model(
+                    c,
+                    method,
+                    path,
+                    model_id,
+                    headers=auth(VALID_KEY),
+                )
+                assert resp.status_code in (404, 422), (
+                    f"{method} {path} accepted hostile model_id={model_id!r}: "
+                    f"{resp.status_code} {resp.text[:200]!r}"
+                )
+                assert planted.encode() not in resp.content
+                assert b"thresholds" not in resp.content
 
 
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE", "OPTIONS"])

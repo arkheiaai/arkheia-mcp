@@ -13,8 +13,9 @@ On failure: retain current profiles, log error, continue serving.
 import asyncio
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 from pydantic import SecretStr
@@ -22,6 +23,26 @@ from pydantic import SecretStr
 from proxy.registry.validator import ProfileValidator
 
 logger = logging.getLogger(__name__)
+MAX_MODEL_ID_LENGTH = 128
+
+
+def _is_safe_model_id(model_id: str) -> bool:
+    if not isinstance(model_id, str):
+        return False
+    if not model_id or len(model_id) > MAX_MODEL_ID_LENGTH:
+        return False
+    if "\x00" in model_id or "\\" in model_id:
+        return False
+    path = PurePosixPath(model_id)
+    if path.is_absolute():
+        return False
+    return all(part not in ("", ".", "..") for part in path.parts)
+
+
+def _profile_filename(model_id: str) -> str:
+    if not _is_safe_model_id(model_id):
+        raise ValueError(f"Unsafe model_id for profile path: {model_id!r}")
+    return f"{quote(model_id, safe='-._~')}.yaml"
 
 
 class RegistryClient:
@@ -119,6 +140,10 @@ class RegistryClient:
         checksum = meta.get("checksum", "")
         download_url = meta["download_url"]
         key_value = self.api_key.get_secret_value()
+        profile_dir = Path(self.profile_dir).resolve()
+        path = (profile_dir / _profile_filename(model_id)).resolve()
+        if path.parent != profile_dir:
+            raise ValueError(f"Unsafe model_id for profile path: {model_id!r}")
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(
@@ -136,7 +161,6 @@ class RegistryClient:
         profile_data = self.validator.validate(content)
 
         # 3. Write to profile dir (keep .bak for rollback)
-        path = Path(self.profile_dir) / f"{model_id}.yaml"
         if path.exists():
             bak_path = Path(str(path) + ".bak")
             bak_path.write_bytes(path.read_bytes())

@@ -76,7 +76,7 @@ async def root():
         "endpoints": {
             "health": "/health",
             "profiles": "/profiles",
-            "download": "/profiles/{model_id}/download",
+            "download": "/profiles/download?model_id={model_id}",
         },
     }
 
@@ -120,12 +120,7 @@ async def list_profiles(
     return {"profiles": profiles, "count": len(profiles)}
 
 
-@app.get("/profiles/{model_id}/download")
-async def download_profile(
-    model_id: str,
-    api_key: str = Depends(require_auth),
-):
-    """Download raw YAML bytes for the given model_id."""
+def _profile_response(model_id: str) -> Response:
     storage: ProfileStorage = app.state.storage
     content = storage.get_profile_bytes(model_id)
     if content is None:
@@ -134,3 +129,26 @@ async def download_profile(
             detail=f"Profile not found: {model_id}",
         )
     return Response(content=content, media_type="application/yaml")
+
+
+@app.get("/profiles/download")
+async def download_profile_by_query(
+    model_id: str = Query(
+        ...,
+        min_length=1,
+        max_length=128,
+        description="Profile model ID to download.",
+    ),
+    api_key: str = Depends(require_auth),
+):
+    """Download raw YAML bytes for the given model_id."""
+    return _profile_response(model_id)
+
+
+@app.get("/profiles/{model_id}/download")
+async def download_profile(
+    model_id: str,
+    api_key: str = Depends(require_auth),
+):
+    """Download raw YAML bytes for the given model_id."""
+    return _profile_response(model_id)

@@ -17,6 +17,7 @@ Passing criteria:
 import os
 import hashlib
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlsplit
 
 import pytest
 import yaml
@@ -47,6 +48,14 @@ metadata:
   version: "1.0"
 thresholds:
   high_risk: 0.85
+"""
+
+SLASH_MODEL_YAML = """\
+model: deepseek-ai/DeepSeek-V3.1
+version: "1.0"
+detection:
+  thresholds:
+    high_risk: 0.85
 """
 
 
@@ -278,3 +287,63 @@ def test_profiles_since_invalid_format_returns_422(client):
         headers={"Authorization": f"Bearer {VALID_KEY}"},
     )
     assert resp.status_code == 422
+
+
+def test_profile_storage_rejects_traversal_even_when_profiles_dir_is_empty(tmp_path):
+    """
+    A traversal-shaped model_id must not read a sibling YAML file just because
+    the configured profiles directory is empty.
+    """
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    outside = tmp_path / "escaped.yaml"
+    outside.write_text("model: escaped\nversion: '1.0'\n", encoding="utf-8")
+    storage = ProfileStorage(str(profiles), "http://testserver")
+
+    assert storage.list_profiles() == []
+    assert storage.get_profile_bytes("../escaped") is None
+    assert storage.get_profile_bytes("nested/../../escaped") is None
+
+
+def test_profile_storage_skips_unsafe_model_ids_in_listing(tmp_path):
+    """Listing must not publish a download URL for a path-shaped profile id."""
+    (tmp_path / "bad.yaml").write_text(
+        "model: ../escaped\nversion: '1.0'\n",
+        encoding="utf-8",
+    )
+    storage = ProfileStorage(str(tmp_path), "http://testserver")
+
+    assert storage.list_profiles() == []
+
+
+def test_slash_model_download_url_is_retrievable(monkeypatch, tmp_path):
+    """
+    Provider-qualified model IDs are valid profile IDs. The registry listing must
+    publish a URL clients can actually fetch, instead of embedding a raw slash in
+    a path parameter that the route does not match.
+    """
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    (profiles / "deepseek-v3.1.yaml").write_text(SLASH_MODEL_YAML, encoding="utf-8")
+    monkeypatch.setenv("ARKHEIA_REGISTRY_KEYS", VALID_KEY)
+    monkeypatch.setenv("ARKHEIA_REGISTRY_PROFILE_DIR", str(profiles))
+    monkeypatch.setenv("ARKHEIA_REGISTRY_BASE_URL", "http://testserver")
+
+    with TestClient(app) as c:
+        listing = c.get("/profiles", headers={"Authorization": f"Bearer {VALID_KEY}"})
+        assert listing.status_code == 200
+        entries = {
+            p["model_id"]: p
+            for p in listing.json()["profiles"]
+        }
+        entry = entries["deepseek-ai/DeepSeek-V3.1"]
+        assert entry["download_url"].startswith("http://testserver/profiles/download?")
+
+        parsed = urlsplit(entry["download_url"])
+        download = c.get(
+            f"{parsed.path}?{parsed.query}",
+            headers={"Authorization": f"Bearer {VALID_KEY}"},
+        )
+
+    assert download.status_code == 200
+    assert yaml.safe_load(download.content)["model"] == "deepseek-ai/DeepSeek-V3.1"
