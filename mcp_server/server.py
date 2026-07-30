@@ -416,7 +416,6 @@ async def memory_retrieve(query: str, entity_type: str | None = None, limit: int
         total:     Total count of matches (before limit)
     """
     check("memory_retrieve")
-    limit = min(limit, 50)
     return await retrieve_entities(query=query, entity_type=entity_type, limit=limit)
 
 

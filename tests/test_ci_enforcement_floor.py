@@ -88,6 +88,17 @@ INV-4  ``tests/test_smoke_e2e.py::TestHostedFallback`` carried
        strict xfail is the most deceptive available combination, because it reads
        as a rigorous test.
 
+INV-6  ``security_scan.yml`` is the repo's security gate candidate, but its
+       dependency and secret scanners used ``continue-on-error: true``. If those
+       contexts are made required, a high-CVSS ``pip-audit`` finding or verified
+       TruffleHog secret can still post green. PR #61 fixed one dependency-audit
+       step, but the CLASS was still open: a new gate-like security job could
+       continue on error and remain unclassified; Bandit could discard scanner
+       failure with ``|| true`` and pass via a grep-only summary; and none of the
+       standalone security_scan.yml jobs was actually a required branch-protection
+       context. Required security jobs must fail closed, and the floor must
+       discover the workflow tree rather than trusting a literal list.
+
 ------------------------------------------------------------------------------
 Each invariant carries a POSITIVE CONTROL
 ------------------------------------------------------------------------------
@@ -139,8 +150,43 @@ ALLOWED_NON_DEFAULT_BRANCHES: dict[str, str] = {}
 # wrong. Anything a test or production module IMPORTS must be declared instead.
 CI_ONLY_TOOLS: dict[str, str] = {
     "pip": "the installer itself (`pip install --upgrade pip`)",
-    "bandit": "static analyser, security_scan.yml only; not imported by any module",
-    "pip-audit": "CVE scanner, security_scan.yml only; not imported by any module",
+    "bandit": "static analyser for CI security gates; not imported by any module",
+    "pip-audit": "CVE scanner for CI security gates; not imported by any module",
+}
+
+# Security scan jobs that queue policy treats as gates. They may be branch
+# protection requirements today, candidates to become directly required, or an
+# aggregate folded into an existing required context. Either way, their job
+# definitions must be fail-closed before they can safely gate merges.
+SECURITY_SCAN_GATE_JOBS: dict[str, tuple[str, ...]] = {
+    ".github/workflows/codeql.yml:analyze": (
+        "CodeQL Analysis (python)",
+        "CodeQL Analysis (javascript)",
+    ),
+    ".github/workflows/security_scan.yml:bandit": ("Bandit static analysis",),
+    ".github/workflows/security_scan.yml:dependency-audit": (
+        "Dependency vulnerability audit",
+    ),
+    ".github/workflows/security_scan.yml:secrets-check": (
+        "Check for committed secrets",
+    ),
+    ".github/workflows/unit-tests.yml:unit": ("unit-tests",),
+}
+
+# Jobs in SECURITY_SCAN_GATE_JOBS that are deliberately advisory-only. The key is
+# "<workflow path>:<job key>"; the value must explain why a scanner failure should
+# not block. Empty by design: all current security_scan.yml jobs are gates.
+ADVISORY_ONLY_SECURITY_JOBS: dict[str, str] = {}
+
+# Blocking scanner classes that must be represented by at least one existing
+# required context. The direct security_scan.yml jobs are not required per
+# .github/required-status-checks.json; unit-tests therefore aggregates Bandit,
+# pip-audit, and TruffleHog under an existing required context.
+REQUIRED_SECURITY_SCANNERS: dict[str, str] = {
+    "bandit": "Bandit static analysis",
+    "pip-audit": "dependency vulnerability audit",
+    "trufflehog": "verified secret scan",
+    "codeql": "CodeQL analysis",
 }
 
 # Directories whose test files must be collectable by some workflow that can
@@ -499,6 +545,322 @@ def workflow_jobs(text: str) -> list[WorkflowJob]:
         stop = starts[idx + 1][0] if idx + 1 < len(starts) else len(body)
         jobs.append(WorkflowJob(key, "\n".join(body[j:stop])))
     return jobs
+
+
+def _workflow_job_map(texts: dict[str, str]) -> dict[str, WorkflowJob]:
+    """Map '<workflow path>:<job key>' to parsed jobs."""
+    out: dict[str, WorkflowJob] = {}
+    for wf, text in sorted(texts.items()):
+        for job in workflow_jobs(text):
+            out[f"{wf}:{job.key}"] = job
+    return out
+
+
+def _active_continue_on_error_lines(job_text: str) -> list[tuple[int, str]]:
+    """
+    Truthy or opaque `continue-on-error` controls in a job body.
+
+    `continue-on-error: false` is not fail-open. Expressions and unknown literals
+    are treated as active for required security jobs because the floor tier cannot
+    prove they are false under every runtime condition.
+    """
+    active: list[tuple[int, str]] = []
+    for line_no, line in enumerate(job_text.splitlines(), 1):
+        m = re.match(r"^\s*continue-on-error:\s*(.+?)\s*(?:#.*)?$", line)
+        if not m:
+            continue
+        value = m.group(1).strip().strip("'\"")
+        if value.lower() in {"false", "0", "no"}:
+            continue
+        active.append((line_no, value))
+    return active
+
+
+_SECURITY_JOB_NAME_RE = re.compile(
+    r"(security|secret|vulnerabil|scan|audit|sast|bandit|codeql|trufflehog|gitleaks|semgrep|snyk)",
+    re.I,
+)
+
+_SCANNER_COMMAND_PATTERNS: dict[str, re.Pattern[str]] = {
+    "bandit": re.compile(r"(?:^|[;&|]\s*)(?:python\s+-m\s+)?bandit(?:\s|$)", re.I),
+    "pip-audit": re.compile(
+        r"(?:^|[;&|]\s*)(?:python\s+-m\s+pip_audit|pip-audit)(?:\s|$)",
+        re.I,
+    ),
+    "trufflehog": re.compile(r"(?:^|[;&|]\s*)trufflehog(?:\s|$)", re.I),
+    "gitleaks": re.compile(r"(?:^|[;&|]\s*)gitleaks(?:\s|$)", re.I),
+    "semgrep": re.compile(r"(?:^|[;&|]\s*)semgrep(?:\s|$)", re.I),
+    "snyk": re.compile(r"(?:^|[;&|]\s*)snyk(?:\s|$)", re.I),
+    "safety": re.compile(r"(?:^|[;&|]\s*)safety(?:\s|$)", re.I),
+}
+
+_SCANNER_ACTION_PATTERNS: dict[str, re.Pattern[str]] = {
+    "codeql": re.compile(r"^-?\s*uses:\s*github/codeql-action/(?:init|analyze)@", re.I),
+    "trufflehog": re.compile(r"^-?\s*uses:\s*trufflesecurity/trufflehog@", re.I),
+    "gitleaks": re.compile(r"^-?\s*uses:\s*gitleaks/gitleaks-action@", re.I),
+    "semgrep": re.compile(r"^-?\s*uses:\s*(?:returntocorp/semgrep-action|semgrep/semgrep-action)@", re.I),
+    "snyk": re.compile(r"^-?\s*uses:\s*snyk/actions/", re.I),
+}
+
+
+def _workflow_name(text: str) -> str:
+    """Top-level workflow `name:`, or an empty string when absent."""
+    for line in text.splitlines():
+        if line.strip() and _indent(line) != 0:
+            continue
+        m = re.match(r"^name:\s*(.+?)\s*$", line)
+        if m:
+            return m.group(1).strip().strip("'\"")
+    return ""
+
+
+def _logical_shell_lines(text: str) -> list[tuple[int, str]]:
+    """
+    Non-comment logical lines, with shell backslash continuations collapsed.
+
+    The fail-open bugs this invariant guards are often split across YAML block
+    scalars: the scanner command appears on one line and `|| true` on a later
+    continuation. Line-based grep misses that class.
+    """
+    out: list[tuple[int, str]] = []
+    parts: list[str] = []
+    start = 0
+    for line_no, raw in enumerate(text.splitlines(), 1):
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if not parts and stripped.startswith("#"):
+            continue
+        if not parts:
+            start = line_no
+        if stripped.endswith("\\"):
+            parts.append(stripped[:-1].rstrip())
+            continue
+        parts.append(stripped)
+        out.append((start, " ".join(parts)))
+        parts = []
+        start = 0
+    if parts:
+        out.append((start, " ".join(parts)))
+    return out
+
+
+def _scanner_kinds_in_line(line: str) -> set[str]:
+    stripped = line.strip()
+    if stripped.startswith("#"):
+        return set()
+    found = {
+        kind for kind, pattern in _SCANNER_COMMAND_PATTERNS.items()
+        if pattern.search(stripped)
+    }
+    found.update(
+        kind for kind, pattern in _SCANNER_ACTION_PATTERNS.items()
+        if pattern.search(stripped)
+    )
+    return found
+
+
+def _scanner_kinds_in_job(job_text: str) -> set[str]:
+    found: set[str] = set()
+    for _, line in _logical_shell_lines(job_text):
+        found.update(_scanner_kinds_in_line(line))
+    return found
+
+
+def discover_security_scan_jobs(texts: dict[str, str]) -> dict[str, set[str]]:
+    """
+    Gate-like security jobs derived from actual workflow text.
+
+    A job is discovered if it invokes a known security scanner/action, or if its
+    workflow/job naming says it is a security scan. The second rule is what makes
+    an unrecognised new security-scan job fail as UNCLASSIFIED instead of being
+    silently absent from SECURITY_SCAN_GATE_JOBS.
+    """
+    discovered: dict[str, set[str]] = {}
+    for wf, text in sorted(texts.items()):
+        wf_name = _workflow_name(text)
+        for job in workflow_jobs(text):
+            job_id = f"{wf}:{job.key}"
+            kinds = _scanner_kinds_in_job(job.text)
+            label = f"{wf} {wf_name} {job.key} {job.name}"
+            if kinds or _SECURITY_JOB_NAME_RE.search(label):
+                discovered[job_id] = kinds
+    return discovered
+
+
+def _scanner_target_failures(
+    job_id: str, line_no: int, line: str, kinds: set[str]
+) -> list[str]:
+    failures: list[str] = []
+    if "bandit" in kinds and not re.search(
+        r"\bbandit\b.*(?:^|\s)-r\s+(?![-;&|]|$)\S+", line
+    ):
+        failures.append(
+            f"{job_id} line {line_no} runs Bandit without a concrete `-r` target. "
+            "A scanner that scans no source can post green while proving nothing."
+        )
+    if "pip-audit" in kinds and not re.search(
+        r"\bpip-audit\b.*(?:^|\s)(?:-r|--requirement)\s+(?![-;&|]|$)\S+",
+        line,
+    ):
+        failures.append(
+            f"{job_id} line {line_no} runs pip-audit without a requirements file. "
+            "This gate must audit the repo manifest, not an implicit or empty "
+            "environment."
+        )
+    return failures
+
+
+def _security_gate_job_failures(job_id: str, job: WorkflowJob) -> list[str]:
+    scanner_kinds = _scanner_kinds_in_job(job.text)
+    failures: list[str] = []
+    for line_no, value in _active_continue_on_error_lines(job.text):
+        failures.append(
+            f"{job_id} line {line_no} has continue-on-error: {value}. A blocking "
+            "security scanner that continues after failure can post green while "
+            "findings exist."
+        )
+
+    if not scanner_kinds:
+        failures.append(
+            f"{job_id} is classified or named as a security scan gate but no "
+            "known scanner command/action was found. That can mean a new scanner "
+            "needs classification, or the job scans nothing."
+        )
+        return failures
+
+    pipefail_seen = False
+    for line_no, line in _logical_shell_lines(job.text):
+        low = line.lower()
+        if re.search(r"(?:^|[;&|]\s*)set\b.*\bpipefail\b", low):
+            pipefail_seen = True
+        if re.search(r"(?:^|[;&|]\s*)set\s+\+e\b", low):
+            failures.append(
+                f"{job_id} line {line_no} disables `set -e` inside a blocking "
+                "security gate. Scanner non-zero exits must be allowed to fail "
+                "the step directly."
+            )
+        if re.search(r"(?:^|[;&|]\s*)exit\s+0\b", low):
+            failures.append(
+                f"{job_id} line {line_no} contains `exit 0`. A blocking security "
+                "gate must not be able to short-circuit scanner failure to green."
+            )
+        if re.search(r"\bgrep\s+-q\b", low):
+            failures.append(
+                f"{job_id} line {line_no} uses `grep -q` in a scanner gate. "
+                "Scanner exit status, not a grep-only summary check, must decide "
+                "whether the gate is green."
+            )
+
+        kinds = _scanner_kinds_in_line(line)
+        if not kinds:
+            continue
+        if "||" in line:
+            failures.append(
+                f"{job_id} line {line_no} uses `||` around a security scanner. "
+                "Blocking gates must rely on the scanner exit code instead of a "
+                "shell fallback."
+            )
+        if "| tee" in low and not pipefail_seen:
+            failures.append(
+                f"{job_id} line {line_no} pipes scanner output through `tee` "
+                "without an earlier `set -o pipefail`; the job would otherwise "
+                "observe tee's exit code instead of the scanner's."
+            )
+        failures.extend(_scanner_target_failures(job_id, line_no, line, kinds))
+
+    if "trufflehog" in scanner_kinds and re.search(
+        r"^-?\s*uses:\s*trufflesecurity/trufflehog@", job.text, re.M | re.I
+    ):
+        if not re.search(r"^\s*path:\s*\S+", job.text, re.M):
+            failures.append(
+                f"{job_id} runs the TruffleHog action without `with.path`; this "
+                "gate must name the tree it scans."
+            )
+    if "codeql" in scanner_kinds:
+        has_init = re.search(r"github/codeql-action/init@", job.text, re.I)
+        has_analyze = re.search(r"github/codeql-action/analyze@", job.text, re.I)
+        if not has_init or not has_analyze:
+            failures.append(
+                f"{job_id} is a CodeQL security job but does not run both init "
+                "and analyze actions, so analysis may never execute."
+            )
+    return failures
+
+
+def _security_scan_gate_failures(
+    texts: dict[str, str],
+    classified: dict[str, tuple[str, ...]] | None = None,
+    advisory: dict[str, str] | None = None,
+) -> list[str]:
+    if classified is None:
+        classified = SECURITY_SCAN_GATE_JOBS
+    if advisory is None:
+        advisory = ADVISORY_ONLY_SECURITY_JOBS
+
+    jobs = _workflow_job_map(texts)
+    discovered = discover_security_scan_jobs(texts)
+    failures: list[str] = []
+
+    unexpected_advisory = sorted(set(advisory) - set(classified))
+    for job_id in unexpected_advisory:
+        failures.append(
+            f"ADVISORY_ONLY_SECURITY_JOBS contains {job_id}, but that job is not "
+            "classified as a security gate candidate."
+        )
+
+    for job_id in sorted(set(classified) - set(jobs)):
+        failures.append(
+            f"{job_id} is classified as a security scan gate but is missing from "
+            "the workflow tree. Update SECURITY_SCAN_GATE_JOBS only when the "
+            "workflow job is renamed or deliberately removed."
+        )
+
+    for job_id in sorted(set(discovered) - set(classified) - set(advisory)):
+        failures.append(
+            f"{job_id} looks like a security scan job but is not classified in "
+            "SECURITY_SCAN_GATE_JOBS or ADVISORY_ONLY_SECURITY_JOBS. New security "
+            "scan jobs must be deliberately classified before they can be read as "
+            "enforced."
+        )
+
+    for job_id in sorted((set(classified) & set(jobs)) | set(discovered)):
+        if job_id in advisory:
+            continue
+        job = jobs.get(job_id)
+        if job is None:
+            continue
+        expected_contexts = classified.get(job_id)
+        if expected_contexts:
+            contexts = job.check_contexts()
+            missing_contexts = [
+                context for context in expected_contexts if context not in contexts
+            ]
+            for context in missing_contexts:
+                failures.append(
+                    f"{job_id} was expected to post check context {context!r}, "
+                    f"but the parsed contexts are {contexts!r}. Refresh "
+                    "SECURITY_SCAN_GATE_JOBS if the job name changed."
+                )
+        failures.extend(_security_gate_job_failures(job_id, job))
+
+    return failures
+
+
+def _required_security_scanner_coverage(
+    texts: dict[str, str], required: set[str]
+) -> dict[str, list[str]]:
+    covered: dict[str, list[str]] = {}
+    for wf, text in sorted(texts.items()):
+        for job in workflow_jobs(text):
+            contexts = [ctx for ctx in job.check_contexts() if ctx in required]
+            if not contexts:
+                continue
+            for kind in _scanner_kinds_in_job(job.text):
+                covered.setdefault(kind, []).append(
+                    f"{wf}:{job.key} via {contexts}"
+                )
+    return covered
 
 
 # ---------------------------------------------------------------------------
@@ -1225,6 +1587,183 @@ def test_every_required_actions_context_is_produced_by_a_job() -> None:
     )
     # Positive control: a context no job produces MUST be reported missing.
     assert "no-such-context-xyz" not in produced
+
+
+def test_security_scan_gate_jobs_fail_closed_and_are_classified() -> None:
+    """
+    Security scanners must fail closed and be discovered from the workflow tree.
+
+    The offline fixture can prove only workflow-tree coherence, not live branch
+    protection. SECURITY_SCAN_GATE_JOBS therefore records the queue policy claim:
+    these jobs are security gates or candidates to become required gates, so a
+    scanner failure must be able to turn the job red before branch protection can
+    safely rely on it. The discovery pass prevents the allowlist from shrinking
+    into a literal that never sees newly-added scan jobs.
+    """
+    assert SECURITY_SCAN_GATE_JOBS, (
+        "INV-6 examined ZERO security scan jobs. If the security workflow has no "
+        "required gate candidates, either remove this invariant with a reason or "
+        "name the advisory-only jobs explicitly."
+    )
+    texts = workflow_texts()
+    discovered = discover_security_scan_jobs(texts)
+    assert discovered, (
+        f"INV-6 parsed {len(texts)} workflow file(s) but discovered ZERO "
+        "security scan jobs. That is not a pass; either the repo lost every "
+        "scanner or discover_security_scan_jobs() no longer understands the "
+        "workflow syntax."
+    )
+    failures = _security_scan_gate_failures(texts)
+    assert not failures, (
+        "security scan gate job(s) are fail-open, missing, or unclassified "
+        f"({len(discovered)} job(s) discovered; "
+        f"{len(SECURITY_SCAN_GATE_JOBS)} classified; advisory-only exceptions: "
+        f"{sorted(ADVISORY_ONLY_SECURITY_JOBS)}):\n  - "
+        + "\n  - ".join(failures)
+    )
+
+
+def test_security_scanners_are_aggregated_into_a_required_context() -> None:
+    """
+    The direct security_scan.yml contexts are not required by branch protection.
+
+    This cannot be changed by a repo patch. What this patch can do is make an
+    existing required context run the blocking scanner class, and fail if that
+    aggregate is later removed.
+    """
+    required, problems = required_contexts()
+    assert not problems, (
+        "INV-6 NOT OBSERVED — the required-status-context fixture is unusable, "
+        "so no statement about required security scanner aggregation can be made:"
+        "\n  - " + "\n  - ".join(problems) + "\n\n" + TRUST_STATEMENT
+    )
+
+    coverage = _required_security_scanner_coverage(workflow_texts(), required)
+    missing = [
+        f"{kind} ({reason})"
+        for kind, reason in sorted(REQUIRED_SECURITY_SCANNERS.items())
+        if kind not in coverage
+    ]
+    assert not missing, (
+        "security scanner class(es) are not covered by any existing REQUIRED "
+        f"context (required contexts from fixture: {sorted(required)}). Direct "
+        "security_scan.yml contexts are recorded as not required in "
+        ".github/required-status-checks.json, so these scanners must be folded "
+        "into an existing required context until branch protection is changed:\n"
+        "  - " + "\n  - ".join(missing) + "\n\nCoverage observed:\n  - "
+        + "\n  - ".join(
+            f"{kind}: {jobs}" for kind, jobs in sorted(coverage.items())
+        )
+        + "\n\n" + TRUST_STATEMENT
+    )
+
+
+def test_inv6_fail_closed_positive_controls() -> None:
+    """The INV-6 detectors must flag the fail-open class, not just today's file."""
+    bad_job = (
+        "on:\n"
+        "  pull_request:\n"
+        "    branches: [master]\n"
+        "jobs:\n"
+        "  dependency-audit:\n"
+        "    name: Dependency vulnerability audit\n"
+        "    runs-on: ubuntu-latest\n"
+        "    continue-on-error: true\n"
+        "    steps:\n"
+        "      - name: Audit dependencies\n"
+        "        run: |\n"
+        "          set +e\n"
+        "          pip-audit -r requirements.txt --format json -o out.json || true\n"
+        "          grep -q CVE out.txt\n"
+        "          exit 0\n"
+    )
+    job_id = ".github/workflows/security_scan.yml:dependency-audit"
+    failures = _security_scan_gate_failures(
+        {".github/workflows/security_scan.yml": bad_job},
+        classified={job_id: ("Dependency vulnerability audit",)},
+    )
+    assert any("continue-on-error" in f for f in failures), failures
+    assert any("uses `||` around a security scanner" in f for f in failures), failures
+    assert any("disables `set -e`" in f for f in failures), failures
+    assert any("grep -q" in f for f in failures), failures
+    assert any("exit 0" in f for f in failures), failures
+    assert _active_continue_on_error_lines(
+        "job:\n  continue-on-error: false\n"
+    ) == []
+
+    no_target = bad_job.replace(
+        "pip-audit -r requirements.txt --format json -o out.json || true",
+        "pip-audit --format json -o out.json",
+    ).replace("    continue-on-error: true\n", "")
+    target_failures = _security_scan_gate_failures(
+        {".github/workflows/security_scan.yml": no_target},
+        classified={job_id: ("Dependency vulnerability audit",)},
+    )
+    assert any("without a requirements file" in f for f in target_failures), (
+        target_failures
+    )
+
+    empty_bandit = (
+        "jobs:\n"
+        "  bandit:\n"
+        "    name: Bandit static analysis\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: |\n"
+        "          set -euo pipefail\n"
+        "          bandit -r\n"
+    )
+    bandit_failures = _security_scan_gate_failures(
+        {".github/workflows/security_scan.yml": empty_bandit},
+        classified={
+            ".github/workflows/security_scan.yml:bandit": (
+                "Bandit static analysis",
+            )
+        },
+    )
+    assert any("without a concrete `-r` target" in f for f in bandit_failures), (
+        bandit_failures
+    )
+
+
+def test_inv6_discovers_new_security_jobs_and_classification_shrink() -> None:
+    """New gate-like jobs and a shrunken classifier must go red."""
+    new_job = (
+        "name: Security Scan\n"
+        "on:\n"
+        "  pull_request:\n"
+        "    branches: [master]\n"
+        "jobs:\n"
+        "  new-security-audit:\n"
+        "    name: New dependency security audit\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: |\n"
+        "          pip-audit -r requirements.txt || true\n"
+    )
+    failures = _security_scan_gate_failures(
+        {".github/workflows/security_extra.yml": new_job},
+        classified={},
+    )
+    assert any("not classified" in f for f in failures), failures
+    assert any("uses `||` around a security scanner" in f for f in failures), failures
+
+    shrink = {
+        job_id: contexts
+        for job_id, contexts in SECURITY_SCAN_GATE_JOBS.items()
+        if job_id != ".github/workflows/security_scan.yml:bandit"
+    }
+    shrink_failures = _security_scan_gate_failures(
+        workflow_texts(), classified=shrink
+    )
+    assert any(
+        ".github/workflows/security_scan.yml:bandit" in f and "not classified" in f
+        for f in shrink_failures
+    ), (
+        "INV-6 classifier population shrink survived: removing the real Bandit "
+        "gate from SECURITY_SCAN_GATE_JOBS must be detected by workflow discovery. "
+        f"Failures: {shrink_failures}"
+    )
 
 
 def test_inv3_positive_control() -> None:
