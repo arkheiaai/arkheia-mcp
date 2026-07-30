@@ -94,10 +94,10 @@ class TestProxyClientVerify:
             )
         # ...inside the full verdict shape, so no caller has to guess whether a
         # transparency field is absent or false.
-        from mcp_server.proxy_client import DETECTION_FIELDS
-        assert set(result) == set(DETECTION_FIELDS), (
+        from mcp_server.proxy_client import ROUTED_DETECTION_FIELDS
+        assert set(result) == set(ROUTED_DETECTION_FIELDS), (
             f"local success path returned {sorted(result)}, contract is "
-            f"{sorted(DETECTION_FIELDS)}"
+            f"{sorted(ROUTED_DETECTION_FIELDS)}"
         )
         assert result["source"] == "local"
         assert result["error"] is None
