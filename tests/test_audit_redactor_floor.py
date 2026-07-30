@@ -1019,6 +1019,39 @@ MAX_UNREDACTED_GAPS = 0
 
 _WRITE_MODES = ("w", "a", "x", "+")
 
+# os.open() flags (os.O_WRONLY, os.O_RDWR, os.O_CREAT, os.O_TRUNC, os.O_APPEND)
+# that mean the call can put bytes on disk, however the flags expression is
+# built (a single name, or a chain of bitwise-ORs).
+_OS_OPEN_WRITE_FLAGS = ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND")
+
+
+def _os_open_is_write(node: ast.Call) -> bool:
+    """
+    True if a call is ``os.open(path, flags, ...)`` with a write-implying flag.
+
+    The builtin ``open(path, "wb")`` heuristic below reads a string-literal
+    mode argument, which ``os.open``'s integer ``flags`` (``os.O_WRONLY |
+    os.O_CREAT | ...``) never is — so a raw fd write via ``os.open``/``os.write``
+    (the pattern that replaced ``Path.write_bytes()`` in
+    ``proxy/crypto/profile_crypto.py::_save_cache`` precisely so the file could
+    be created 0600 from its first byte) was invisible to the scan. Walked
+    rather than pattern-matched on a fixed BinOp shape, so it does not care
+    whether the flags are combined with one ``|`` or several.
+    """
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and func.attr == "open"):
+        return False
+    if not (isinstance(func.value, ast.Name) and func.value.id == "os"):
+        return False
+    if len(node.args) < 2:
+        return False
+    for sub in ast.walk(node.args[1]):
+        if isinstance(sub, ast.Attribute) and sub.attr in _OS_OPEN_WRITE_FLAGS:
+            return True
+        if isinstance(sub, ast.Name) and sub.id in _OS_OPEN_WRITE_FLAGS:
+            return True
+    return False
+
 
 def _production_py_files() -> list[Path]:
     files: list[Path] = []
@@ -1075,7 +1108,7 @@ def _discover_disk_sinks() -> dict[str, list[int]]:
                 for kw in node.keywords:
                     if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
                         mode = str(kw.value.value)
-                hit = any(m in mode for m in _WRITE_MODES)
+                hit = any(m in mode for m in _WRITE_MODES) or _os_open_is_write(node)
             elif name in ("write_text", "write_bytes"):
                 hit = True
             elif name == "connect":
