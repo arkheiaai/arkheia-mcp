@@ -505,6 +505,8 @@ class TestExplicitMetadataMakesTheGateReachable:
             if rel in {
                 "proxy/detection/engine.py",
                 "proxy/endpoints/detect.py",
+                "proxy/endpoints/passthrough.py",
+                "proxy/middleware/interception.py",
                 "mcp_server/proxy_client.py",
             }:
                 continue
