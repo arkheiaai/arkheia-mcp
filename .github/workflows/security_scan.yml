@@ -33,19 +33,11 @@ jobs:
 
       - name: Run bandit (source only, skip tests and venv)
         run: |
+          set -euo pipefail
           bandit -r proxy/ mcp_server/ registry_server/ scripts/ \
             --exclude proxy/tests,mcp_server/tests,registry_server/tests \
             --skip B101,B601 \
-            -f json -o bandit-results.json || true
-          bandit -r proxy/ mcp_server/ registry_server/ scripts/ \
-            --exclude proxy/tests,mcp_server/tests,registry_server/tests \
-            --skip B101,B601 \
-            -ll 2>&1 | tee bandit-summary.txt
-          # Fail on HIGH severity only
-          if grep -q "Severity: High" bandit-summary.txt; then
-            echo "HIGH severity findings detected"
-            exit 1
-          fi
+            -lll -f json -o bandit-results.json
 
       - name: Upload results
         if: always()
@@ -55,7 +47,6 @@ jobs:
           name: bandit-results-${{ github.run_number }}
           path: |
             bandit-results.json
-            bandit-summary.txt
           retention-days: 90
 
   dependency-audit:
@@ -76,15 +67,33 @@ jobs:
 
       - name: Audit dependencies
         run: |
-          pip install -r requirements.txt --dry-run 2>/dev/null || true
-          pip-audit -r requirements.txt --format json -o pip-audit-results.json || true
-          pip-audit -r requirements.txt 2>&1 | tee pip-audit-summary.txt
-          # Fail only on critical/high CVEs
-          if pip-audit -r requirements.txt --fail-on-cvss 8.0 2>&1 | grep -q "Found"; then
-            echo "High-severity CVEs found"
-            exit 1
-          fi
-        continue-on-error: true
+          set -euo pipefail
+          pip-audit -r requirements.txt --format json -o pip-audit-results.json
+          python - <<'PY'
+          import json
+          import sys
+
+          with open("pip-audit-results.json", encoding="utf-8") as f:
+              report = json.load(f)
+          dependencies = report.get("dependencies")
+          if not isinstance(dependencies, list) or not dependencies:
+              print("pip-audit produced no dependency records; failing closed")
+              sys.exit(1)
+          findings = []
+          for dep in dependencies:
+              for vuln in dep.get("vulns", []):
+                  aliases = ", ".join(vuln.get("aliases", [])) or "no aliases"
+                  findings.append(
+                      f"{dep.get('name')} {dep.get('version', '?')}: "
+                      f"{vuln.get('id')} ({aliases})"
+                  )
+          if findings:
+              print("pip-audit reported vulnerabilities:")
+              for finding in findings:
+                  print(f"  - {finding}")
+              sys.exit(1)
+          print("pip-audit reported no vulnerabilities")
+          PY
 
       - name: Upload results
         if: always()
@@ -94,7 +103,6 @@ jobs:
           name: pip-audit-results-${{ github.run_number }}
           path: |
             pip-audit-results.json
-            pip-audit-summary.txt
           retention-days: 90
 
   secrets-check:
@@ -114,4 +122,3 @@ jobs:
           base: ${{ github.event.repository.default_branch }}
           head: HEAD
           extra_args: --only-verified
-        continue-on-error: true

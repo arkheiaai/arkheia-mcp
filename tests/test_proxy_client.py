@@ -40,6 +40,7 @@ class TestLocalProxy:
             "confidence": 0.85,
             "features_triggered": ["word_count"],
             "detection_id": "det_abc123",
+            "evidence_depth_limited": False,
         }
         mock_response.raise_for_status = MagicMock()
 
@@ -48,6 +49,58 @@ class TestLocalProxy:
 
         assert result["risk_level"] == "LOW"
         assert result["confidence"] == 0.85
+
+    @pytest.mark.asyncio
+    async def test_evidence_limited_local_escalates_to_hosted_with_routing_receipt(
+        self, client_with_key
+    ):
+        """
+        A local evidence-limited LOW is not a clean verdict. With a hosted key,
+        the client must route onward and receipt both legs so the caller can see
+        why the hosted verdict won.
+        """
+        local_response = MagicMock()
+        local_response.json.return_value = {
+            "risk_level": "LOW",
+            "confidence": 0.0,
+            "features_triggered": [],
+            "detection_id": "det_local_limited",
+            "detection_method": "tool_surface_suppressed",
+            "evidence_depth_limited": True,
+        }
+        local_response.raise_for_status = MagicMock()
+
+        hosted_response = MagicMock()
+        hosted_response.json.return_value = {
+            "risk": "HIGH",
+            "confidence": 0.93,
+            "features_triggered": ["entropy_anomaly"],
+            "detection_id": "det_hosted_real",
+            "detection_method": "profile_ensemble",
+            "evidence_depth_limited": False,
+        }
+        hosted_response.raise_for_status = MagicMock()
+
+        calls = []
+
+        async def mock_post(url, **kwargs):
+            calls.append(url)
+            if "/detect/verify" in url:
+                return local_response
+            return hosted_response
+
+        with patch("httpx.AsyncClient.post", side_effect=mock_post):
+            result = await client_with_key.verify("prompt", "fabricated claim", "gpt-4o")
+
+        assert result["risk_level"] == "HIGH"
+        assert result["source"] == "hosted"
+        assert result["detection_id"] == "det_hosted_real"
+        assert result["routing"] == {
+            "attempted_sources": ["local", "hosted"],
+            "route_errors": [],
+            "fallback_reason": "local_evidence_limited",
+        }
+        assert len(calls) == 2
 
     @pytest.mark.asyncio
     async def test_local_connect_error_falls_back_to_hosted(self, client_with_key):
@@ -77,6 +130,11 @@ class TestLocalProxy:
         assert result["risk_level"] == "MEDIUM"
         assert result["confidence"] == 0.72
         assert result.get("source") == "hosted"
+        assert result["routing"] == {
+            "attempted_sources": ["local", "hosted"],
+            "route_errors": ["proxy_unavailable"],
+            "fallback_reason": "proxy_unavailable",
+        }
         assert call_count == 2  # local failed, then hosted
 
     @pytest.mark.asyncio
@@ -90,6 +148,102 @@ class TestLocalProxy:
 
         assert result["risk_level"] == "UNKNOWN"
         assert result["error"] == "no_detection_available"
+        assert result["routing"] == {
+            "attempted_sources": ["local"],
+            "route_errors": ["proxy_unavailable"],
+            "fallback_reason": "proxy_unavailable",
+        }
+
+    @pytest.mark.asyncio
+    async def test_local_error_field_survives_without_hosted_key(self, client_no_key):
+        """A local UNKNOWN reason must not be dropped while normalising shape."""
+        local_response = MagicMock()
+        local_response.json.return_value = {
+            "risk_level": "UNKNOWN",
+            "confidence": 0.0,
+            "features_triggered": [],
+            "detection_id": "det_engine",
+            "error": "engine_error",
+            "evidence_depth_limited": True,
+        }
+        local_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=local_response):
+            result = await client_no_key.verify("prompt", "response", "gpt-4o")
+
+        assert result["risk_level"] == "UNKNOWN"
+        assert result["error"] == "engine_error"
+        assert result["source"] == "local"
+        assert result["routing"] == {
+            "attempted_sources": ["local"],
+            "route_errors": ["engine_error"],
+            "fallback_reason": "engine_error",
+        }
+
+    @pytest.mark.asyncio
+    async def test_local_http_error_falls_back_to_hosted_with_routing_receipt(
+        self, client_with_key
+    ):
+        """Local service HTTP failure should not stop hosted fail-safe routing."""
+        local_503 = httpx.Response(
+            503,
+            request=httpx.Request("POST", "http://localhost:8098/detect/verify"),
+        )
+        hosted_response = MagicMock()
+        hosted_response.json.return_value = {
+            "risk": "MEDIUM",
+            "confidence": 0.61,
+            "features_triggered": ["semantic_drift"],
+            "detection_id": "det_hosted_after_503",
+            "detection_method": "profile_ensemble",
+            "evidence_depth_limited": False,
+        }
+        hosted_response.raise_for_status = MagicMock()
+
+        async def mock_post(url, **kwargs):
+            if "/detect/verify" in url:
+                raise httpx.HTTPStatusError(
+                    "Service unavailable",
+                    request=local_503.request,
+                    response=local_503,
+                )
+            return hosted_response
+
+        with patch("httpx.AsyncClient.post", side_effect=mock_post):
+            result = await client_with_key.verify("prompt", "response", "gpt-4o")
+
+        assert result["risk_level"] == "MEDIUM"
+        assert result["source"] == "hosted"
+        assert result["routing"] == {
+            "attempted_sources": ["local", "hosted"],
+            "route_errors": ["proxy_http_error_503"],
+            "fallback_reason": "proxy_http_error_503",
+        }
+
+    @pytest.mark.asyncio
+    async def test_both_detection_paths_failed_is_receipted(self, client_with_key):
+        """When neither backend scores, aggregate the fail-safe and keep specifics."""
+        call_count = 0
+
+        async def mock_post(url, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if "/detect/verify" in url:
+                raise httpx.ConnectError("Connection refused")
+            raise httpx.TimeoutException("Hosted read timed out")
+
+        with patch("httpx.AsyncClient.post", side_effect=mock_post):
+            result = await client_with_key.verify("prompt", "response", "gpt-4o")
+
+        assert result["risk_level"] == "UNKNOWN"
+        assert result["error"] == "all_detection_paths_failed"
+        assert result["source"] == "unavailable"
+        assert result["routing"] == {
+            "attempted_sources": ["local", "hosted"],
+            "route_errors": ["proxy_unavailable", "hosted_timeout"],
+            "fallback_reason": "proxy_unavailable",
+        }
+        assert call_count == 2
 
 
     @pytest.mark.asyncio
@@ -325,7 +479,11 @@ class TestNeverRaises:
 import ast
 from pathlib import Path
 
-from mcp_server.proxy_client import DETECTION_FIELDS, _detection_response
+from mcp_server.proxy_client import (
+    DETECTION_FIELDS,
+    ROUTED_DETECTION_FIELDS,
+    _detection_response,
+)
 
 _SRC_PATH = Path(__file__).resolve().parents[1] / "mcp_server" / "proxy_client.py"
 
@@ -439,11 +597,25 @@ class TestVerdictShapeParity:
             f"  declared but not built: {sorted(set(DETECTION_FIELDS) - set(built))}\n"
             f"  built but not declared: {sorted(set(built) - set(DETECTION_FIELDS))}"
         )
-        # Positive control: the contract is not empty, and it really does carry
-        # the fields whose absence was the defect.
+        routed = _detection_response(
+            source="unit-test",
+            routing={
+                "attempted_sources": ["local"],
+                "route_errors": [],
+                "fallback_reason": None,
+            },
+        )
+        assert set(routed) == set(ROUTED_DETECTION_FIELDS), (
+            "ROUTED_DETECTION_FIELDS has drifted from routed verdict output:\n"
+            f"  declared but not built: {sorted(set(ROUTED_DETECTION_FIELDS) - set(routed))}\n"
+            f"  built but not declared: {sorted(set(routed) - set(ROUTED_DETECTION_FIELDS))}"
+        )
+        # Positive control: the routed contract is not empty, and it really does
+        # carry the fields whose absence was the defect plus the route receipt.
         assert {"evidence_depth_limited", "detection_method", "source"} <= set(
-            DETECTION_FIELDS
-        ), f"the transparency fields are not in the contract: {DETECTION_FIELDS}"
+            ROUTED_DETECTION_FIELDS
+        ), f"the transparency fields are not in the contract: {ROUTED_DETECTION_FIELDS}"
+        assert "routing" in ROUTED_DETECTION_FIELDS
 
     def test_degraded_defaults_say_nothing_was_measured(self):
         """
@@ -599,9 +771,9 @@ class TestVerdictShapeParity:
             )
         )
         only = list(shapes)[0]
-        assert set(only) == set(DETECTION_FIELDS), (
+        assert set(only) == set(ROUTED_DETECTION_FIELDS), (
             f"paths agree on {sorted(only)} but the declared contract is "
-            f"{sorted(DETECTION_FIELDS)}"
+            f"{sorted(ROUTED_DETECTION_FIELDS)}"
         )
 
         # Positive controls — parity alone would pass if every path returned
