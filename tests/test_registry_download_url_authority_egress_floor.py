@@ -33,6 +33,38 @@ def _class_method_source(path: Path, class_name: str, method_name: str) -> str:
     raise AssertionError(f"{class_name}.{method_name} not found in {path}")
 
 
+def _class_method_assignment_source(
+    path: Path,
+    class_name: str,
+    method_name: str,
+    target_name: str,
+) -> str:
+    source = _source(path)
+    tree = ast.parse(source)
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                if not isinstance(item, (ast.AsyncFunctionDef, ast.FunctionDef)):
+                    continue
+                if item.name != method_name:
+                    continue
+                assignments: list[str] = []
+                for child in ast.walk(item):
+                    if not isinstance(child, ast.Assign):
+                        continue
+                    if any(
+                        isinstance(target, ast.Name) and target.id == target_name
+                        for target in child.targets
+                    ):
+                        assignments.append(ast.get_source_segment(source, child) or "")
+                if assignments:
+                    return "\n".join(assignments)
+                raise AssertionError(
+                    f"{class_name}.{method_name} does not assign {target_name}"
+                )
+    raise AssertionError(f"{class_name}.{method_name} not found in {path}")
+
+
 def test_registry_client_resolves_download_url_through_same_origin_helper_before_auth():
     body = _class_method_source(CLIENT, "RegistryClient", "_download_and_apply")
 
@@ -59,8 +91,24 @@ def test_same_origin_helper_rejects_foreign_authority_and_userinfo():
 
 def test_registry_storage_advertises_downloads_under_configured_base_url():
     body = _class_method_source(STORAGE, "ProfileStorage", "_profile_meta")
+    download_assignment = _class_method_assignment_source(
+        STORAGE,
+        "ProfileStorage",
+        "_profile_meta",
+        "download_url",
+    )
+    advertises_path_route = "/profiles/{model_id}/download" in download_assignment
+    advertises_query_route = (
+        "/profiles/download?" in download_assignment
+        and "urlencode" in download_assignment
+        and "model_id" in download_assignment
+    )
 
-    assert 'download_url = f"{self.base_url}/profiles/{model_id}/download"' in body
+    assert "self.base_url" in download_assignment
+    assert advertises_path_route or advertises_query_route, (
+        "download_url must advertise either the legacy path download route or "
+        "the query route with urlencode(model_id)"
+    )
     assert '"download_url": download_url' in body
     assert "localhost" not in body
 

@@ -26,6 +26,7 @@ EXPECTED_ADMIN_ROUTES = {
     ("GET", "/admin/profiles"),
     ("GET", "/admin/ui"),
 }
+PATH_PARAM = re.compile(r"\{([^}:]+)(?::[^}]+)?\}")
 
 
 class _AdminRoute(NamedTuple):
@@ -61,6 +62,11 @@ def _name(node: ast.AST) -> str:
         base = _name(node.value)
         return f"{base}.{node.attr}" if base else node.attr
     return ""
+
+
+def _canonical_route_path(path: str) -> str:
+    """Compare route identity without pinning FastAPI path-converter spelling."""
+    return PATH_PARAM.sub(r"{\1}", path)
 
 
 def _admin_prefix(tree: ast.Module) -> str:
@@ -158,14 +164,20 @@ def test_compose_service_population_is_discovered_and_non_vacuous():
 def test_admin_route_population_is_discovered_and_runtime_health_stays_public():
     routes = _admin_routes()
     assert routes, "discovered ZERO admin routes; this floor is vacuous"
-    discovered = {(route.method, route.path) for route in routes}
+    discovered = {
+        (route.method, _canonical_route_path(route.path))
+        for route in routes
+    }
     missing = sorted(EXPECTED_ADMIN_ROUTES - discovered)
     assert missing == [], f"admin route population shrank or route parser drifted: {missing}"
     assert len(routes) >= len(EXPECTED_ADMIN_ROUTES), (
         "admin route population is smaller than the known governance baseline"
     )
 
-    by_route = {(route.method, route.path): route for route in routes}
+    by_route = {
+        (route.method, _canonical_route_path(route.path)): route
+        for route in routes
+    }
     runtime = by_route[("GET", "/admin/runtime-health")]
     assert runtime.function == "runtime_health"
     assert runtime.depends_require_auth is False, (
