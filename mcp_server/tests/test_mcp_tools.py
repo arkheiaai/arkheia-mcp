@@ -421,7 +421,14 @@ class TestMemoryTools:
         """memory_retrieve: limit is capped at 50 in server.py."""
         from mcp_server import server as mcp_server_module
 
-        # Just verify it doesn't raise and returns a dict
-        result = await mcp_server_module.memory_retrieve(query="anything", limit=9999)
-        assert "entities" in result
-        assert "total" in result
+        for i in range(55):
+            await mcp_server_module.memory_store(
+                name=f"Node {i:03d}",
+                entity_type="node",
+                observations=[f"obs {i}"],
+            )
+
+        result = await mcp_server_module.memory_retrieve(query="Node", limit=9999)
+
+        assert len(result["entities"]) == 50
+        assert result["total"] == 55

@@ -9,7 +9,10 @@ Schema:
   observations — obs_id, entity_id, content, created_at
   relations    — rel_id, from_entity, relation_type, to_entity, created_at
 
-DB path: MEMORY_DB_PATH env var, default C:/arkheia-mcp/data/memory.db
+DB path: MEMORY_DB_PATH env var, default ~/.arkheia/mcp/memory.db.
+The resolved path must be absolute; a relative graph path silently forks memory
+by the server's current working directory. The DB directory is asserted 0700 and
+the DB file 0600 on every open because this store persists caller-authored text.
 
 Every caller-supplied string field (entity name/type, observation content,
 relation endpoints/type) is passed through proxy.audit.redactor.redact()
@@ -22,13 +25,23 @@ for the pinned regression coverage.
 
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
+import stat
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 from proxy.audit.redactor import redact
+
+logger = logging.getLogger(__name__)
+
+DEFAULT_DB_PATH = "~/.arkheia/mcp/memory.db"
+MAX_RETRIEVE_LIMIT = 50
+_DIR_MODE = 0o700
+_FILE_MODE = 0o600
+_NUL = "\x00"
 
 
 # ---------------------------------------------------------------------------
@@ -36,14 +49,43 @@ from proxy.audit.redactor import redact
 # ---------------------------------------------------------------------------
 
 def _db_path() -> str:
-    return os.environ.get("MEMORY_DB_PATH", "C:/arkheia-mcp/data/memory.db")
+    raw = os.environ.get("MEMORY_DB_PATH") or DEFAULT_DB_PATH
+    if _NUL in raw:
+        raise ValueError("MEMORY_DB_PATH must not contain NUL bytes")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise ValueError(
+            f"MEMORY_DB_PATH must be an absolute path (or start with '~'); got {raw!r}. "
+            "A relative path resolves against the current working directory and "
+            "silently splits the knowledge graph across processes."
+        )
+    return str(path)
+
+
+def _enforce_mode(target: Path, mode: int) -> None:
+    try:
+        current_mode = stat.S_IMODE(target.stat().st_mode)
+        safe_mode = current_mode & mode
+        os.chmod(target, safe_mode)
+    except OSError as exc:
+        logger.warning(
+            "memory: could not set filesystem permissions %o on %s (%s). "
+            "The knowledge graph stores redacted but caller-authored memory on disk; "
+            "on this filesystem the owner-only boundary may not be in effect.",
+            mode,
+            target,
+            exc,
+        )
 
 
 def _get_conn() -> sqlite3.Connection:
     path = _db_path()
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    db_path = Path(path)
+    db_path.parent.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
+    _enforce_mode(db_path.parent, _DIR_MODE)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
+    _enforce_mode(db_path, _FILE_MODE)
     return conn
 
 
@@ -74,6 +116,51 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _like_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _reject_nul(field: str, value: str) -> str:
+    if isinstance(value, str) and _NUL in value:
+        raise ValueError(f"{field} must not contain NUL bytes")
+    return value
+
+
+def _redact_memory_text(field: str, value: str) -> str:
+    _reject_nul(field, value)
+    redacted = redact(value)
+    return _reject_nul(field, redacted)
+
+
+def _safe_sqlite_text(value: object) -> bool:
+    return not isinstance(value, str) or _NUL not in value
+
+
+def _row_has_only_safe_text(row: sqlite3.Row, fields: tuple[str, ...]) -> bool:
+    return all(_safe_sqlite_text(row[field]) for field in fields)
+
+
+def _validate_limit(limit: int) -> int:
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise ValueError(
+            f"memory_retrieve: limit must be an int between 1 and {MAX_RETRIEVE_LIMIT}; "
+            f"got {limit!r} ({type(limit).__name__})"
+        )
+    if limit < 1:
+        raise ValueError(
+            f"memory_retrieve: limit must be >= 1 (max {MAX_RETRIEVE_LIMIT}); got {limit}"
+        )
+    return min(limit, MAX_RETRIEVE_LIMIT)
+
+
+def _entity_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM entities WHERE name = ? LIMIT 1",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
 # ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
@@ -94,8 +181,12 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
     # the repo (proxy/audit/redactor.py), reused rather than re-implemented.
     # Redacting here (not just `observations`) also keeps the entity's lookup
     # key consistent between the SELECT below and the INSERT that follows it.
-    name = redact(name)
-    entity_type = redact(entity_type)
+    name = _redact_memory_text("memory_store: name", name)
+    entity_type = _redact_memory_text("memory_store: entity_type", entity_type)
+    observations = [
+        _redact_memory_text("memory_store: observations[]", raw_content)
+        for raw_content in observations
+    ]
 
     conn = _get_conn()
     try:
@@ -128,8 +219,7 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
         }
 
         added = 0
-        for raw_content in observations:
-            content = redact(raw_content)
+        for content in observations:
             if content not in existing:
                 conn.execute(
                     "INSERT INTO observations (obs_id, entity_id, content, created_at) VALUES (?, ?, ?, ?)",
@@ -171,22 +261,32 @@ async def retrieve_entities(
         entities:  List of matching entity dicts
         total:     Count of matches before limit
     """
+    limit = _validate_limit(limit)
+    query = _redact_memory_text("memory_retrieve: query", query)
+    if entity_type is not None:
+        entity_type = _redact_memory_text("memory_retrieve: entity_type", entity_type)
+
     conn = _get_conn()
     try:
         _init_schema(conn)
-        pattern = f"%{query}%"
+        pattern = f"%{_like_escape(query)}%"
 
         if entity_type:
             rows = conn.execute(
-                "SELECT * FROM entities WHERE name LIKE ? AND entity_type = ?",
+                "SELECT * FROM entities WHERE name LIKE ? ESCAPE '\\' AND entity_type = ?",
                 (pattern, entity_type),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM entities WHERE name LIKE ?",
+                "SELECT * FROM entities WHERE name LIKE ? ESCAPE '\\'",
                 (pattern,),
             ).fetchall()
 
+        rows = [
+            row
+            for row in rows
+            if _row_has_only_safe_text(row, ("entity_id", "name", "entity_type", "created_at"))
+        ]
         total = len(rows)
         rows = rows[:limit]
 
@@ -198,11 +298,21 @@ async def retrieve_entities(
                 "SELECT content, created_at FROM observations WHERE entity_id = ? ORDER BY created_at",
                 (eid,),
             ).fetchall()
+            obs_rows = [
+                row
+                for row in obs_rows
+                if _row_has_only_safe_text(row, ("content", "created_at"))
+            ]
 
             rel_rows = conn.execute(
                 "SELECT relation_type, to_entity FROM relations WHERE from_entity = ? ORDER BY created_at",
                 (row["name"],),
             ).fetchall()
+            rel_rows = [
+                row
+                for row in rel_rows
+                if _row_has_only_safe_text(row, ("relation_type", "to_entity"))
+            ]
 
             entities.append({
                 "entity_id": eid,
@@ -235,13 +345,24 @@ async def store_relation(from_entity: str, relation_type: str, to_entity: str) -
         to_entity:     Target entity name
     """
     # Scrub before the INSERT, same as store_entity above.
-    from_entity = redact(from_entity)
-    relation_type = redact(relation_type)
-    to_entity = redact(to_entity)
+    from_entity = _redact_memory_text("memory_relate: from_entity", from_entity)
+    relation_type = _redact_memory_text("memory_relate: relation_type", relation_type)
+    to_entity = _redact_memory_text("memory_relate: to_entity", to_entity)
 
     conn = _get_conn()
     try:
         _init_schema(conn)
+        if not _entity_exists(conn, from_entity):
+            raise ValueError(
+                "memory_relate: no such entity - "
+                f"from_entity={from_entity!r}. Store both endpoints with memory_store first."
+            )
+        if not _entity_exists(conn, to_entity):
+            raise ValueError(
+                "memory_relate: no such entity - "
+                f"to_entity={to_entity!r}. Store both endpoints with memory_store first."
+            )
+
         rel_id = str(uuid.uuid4())
         now = datetime.utcnow().isoformat()
         conn.execute(

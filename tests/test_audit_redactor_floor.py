@@ -838,13 +838,22 @@ def test_memory_relate_does_not_persist_secrets_unredacted(tmp_path):
     """
     from mcp_server.tools import memory as mem
 
-    content = _drive_memory_write_path(
-        tmp_path,
-        lambda: mem.store_relation(
+    async def _write_relation():
+        await mem.store_entity(
+            f"{MEMORY_SENTINEL} -- service-A",
+            "service",
+            ["relation source"],
+        )
+        await mem.store_entity(_MEM_RELATION_SECRET, "credential", ["relation target"])
+        await mem.store_relation(
             from_entity=f"{MEMORY_SENTINEL} -- service-A",
             relation_type="uses_credential",
             to_entity=_MEM_RELATION_SECRET,
-        ),
+        )
+
+    content = _drive_memory_write_path(
+        tmp_path,
+        _write_relation,
     )
 
     assert MEMORY_SENTINEL.encode() in content, (
@@ -874,6 +883,25 @@ def test_memory_store_functions_call_redact_before_insert():
     """
     src = (ROOT / "mcp_server/tools/memory.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
+    scrubber = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+         and n.name == "_redact_memory_text"),
+        None,
+    )
+    assert scrubber is not None, (
+        "mcp_server.tools.memory._redact_memory_text is missing — the memory "
+        "write scrubber wrapper disappeared and this invariant no longer knows "
+        "which helper gates sqlite writes."
+    )
+    assert any(
+        isinstance(n, ast.Call)
+        and (
+            (isinstance(n.func, ast.Name) and n.func.id == "redact")
+            or (isinstance(n.func, ast.Attribute) and n.func.attr == "redact")
+        )
+        for n in ast.walk(scrubber)
+    ), "_redact_memory_text must call the shared redact() helper."
 
     for fn_name in ("store_entity", "store_relation"):
         fn = next(
@@ -888,19 +916,20 @@ def test_memory_store_functions_call_redact_before_insert():
             f"observes its subject."
         )
 
-        redact_lines, execute_lines = [], []
+        scrub_lines, execute_lines = [], []
         for node in ast.walk(fn):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if name == "redact":
-                redact_lines.append(node.lineno)
+            if name in {"redact", "_redact_memory_text"}:
+                scrub_lines.append(node.lineno)
             elif name == "execute":
                 execute_lines.append(node.lineno)
 
-        assert redact_lines, (
-            f"mcp_server.tools.memory.{fn_name} contains NO call to redact() — "
+        assert scrub_lines, (
+            f"mcp_server.tools.memory.{fn_name} contains NO call to redact() or "
+            f"_redact_memory_text() — "
             f"the memory write path no longer scrubs secrets before writing to "
             f"disk."
         )
@@ -908,8 +937,8 @@ def test_memory_store_functions_call_redact_before_insert():
             f"no conn.execute() call found in {fn_name} — this invariant lost "
             f"its subject and would pass vacuously."
         )
-        assert min(redact_lines) < min(execute_lines), (
-            f"{fn_name}: redact() at line {min(redact_lines)} does not precede "
+        assert min(scrub_lines) < min(execute_lines), (
+            f"{fn_name}: scrubber at line {min(scrub_lines)} does not precede "
             f"the first conn.execute() at line {min(execute_lines)}: a value "
             f"can be written to sqlite before it is scrubbed."
         )

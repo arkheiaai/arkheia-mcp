@@ -87,11 +87,7 @@ DICT_RETURNING_TOOLS = {"run_grok", "run_gemini", "run_together", "run_ollama"}
 
 @pytest.fixture(autouse=True)
 def _isolate_memory_db(tmp_path, monkeypatch):
-    """mcp_server/tools/memory.py defaults MEMORY_DB_PATH to the hard-coded
-    Windows path 'C:/arkheia-mcp/data/memory.db', which on POSIX creates a literal
-    './C:' directory under the CWD. Point it at tmp_path so this suite never
-    writes outside its sandbox. (The hard-coded default is a separate defect,
-    named in the PR body — it belongs to the memory flow, not the gate.)"""
+    """Point memory at tmp_path so this gate suite never writes real state."""
     monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "memory.db"))
 
 
