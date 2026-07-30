@@ -45,6 +45,14 @@ class _RegistryClient:
         return None
 
 
+HEALTHY_AUDIT_CHAIN = {
+    "ok": True,
+    "status": "OK",
+    "detail": None,
+    "startup_blocked": False,
+}
+
+
 @pytest.fixture(autouse=True)
 def auth_floor_env(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "admin-audit-auth-floor-secret-32chars!!")
@@ -59,6 +67,7 @@ def client():
     app.include_router(admin_router)
     app.include_router(audit_router)
     app.state.audit_writer = _Audit()
+    app.state.audit_chain = dict(HEALTHY_AUDIT_CHAIN)
     app.state.registry_client = _RegistryClient()
     return TestClient(app, raise_server_exceptions=False), app
 
