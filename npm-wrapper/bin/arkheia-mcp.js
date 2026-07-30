@@ -464,11 +464,26 @@ function regularFileNoSymlink(filePath) {
   }
 }
 
-function writeMarkerJson(filePath, label, data) {
-  if (fs.existsSync(filePath) && !regularFileNoSymlink(filePath)) {
-    fail(`${label} is not a regular file at ${filePath}`);
+function requireVenvFile(filePath, label) {
+  const resolved = path.resolve(filePath);
+  if (!inside(resolved, VENV_DIR)) {
+    fail(`${label} resolves outside the virtual environment at ${filePath}`);
   }
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", {
+  if (!regularFileNoSymlink(resolved)) {
+    fail(`${label} is not a regular file at ${resolved}`);
+  }
+  return resolved;
+}
+
+function writeMarkerJson(filePath, label, data) {
+  const resolved = path.resolve(filePath);
+  if (!inside(resolved, VENV_DIR)) {
+    fail(`${label} resolves outside the virtual environment at ${filePath}`);
+  }
+  if (fs.existsSync(resolved) && !regularFileNoSymlink(resolved)) {
+    fail(`${label} is not a regular file at ${resolved}`);
+  }
+  fs.writeFileSync(resolved, JSON.stringify(data, null, 2) + "\n", {
     encoding: "utf-8",
     mode: 0o600,
   });
@@ -532,7 +547,8 @@ function depsMarkerMatches(marker, bundle) {
     return false;
   }
   try {
-    const data = JSON.parse(fs.readFileSync(marker, "utf-8"));
+    const markerPath = requireVenvFile(marker, "dependency install marker");
+    const data = JSON.parse(fs.readFileSync(markerPath, "utf-8"));
     return (
       data &&
       data.schema === "arkheia.npm.deps.v1" &&

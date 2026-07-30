@@ -450,7 +450,20 @@ function toPosix(relativePath) {
 }
 
 function sha256File(filePath) {
-  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+  const resolved = path.resolve(filePath);
+  if (!inside(resolved, PACKAGE_ROOT) && !inside(resolved, BUNDLE_ROOT)) {
+    fail(`refusing to hash ${resolved}, which is outside the package bundle`);
+  }
+  let stat;
+  try {
+    stat = fs.lstatSync(resolved);
+  } catch (err) {
+    fail(`cannot hash missing file ${resolved}: ${err.message}`);
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    fail(`refusing to hash non-regular file ${resolved}`);
+  }
+  return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
 }
 
 function requireDirectoryNoSymlink(dirPath, label) {
