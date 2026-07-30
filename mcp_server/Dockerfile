@@ -10,6 +10,7 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY arkheia_common/ /app/arkheia_common/
 COPY mcp_server/ /app/mcp_server/
 
 # mcp_server.tools.memory imports proxy.audit.redactor to scrub caller-supplied

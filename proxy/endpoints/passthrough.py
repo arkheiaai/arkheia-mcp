@@ -39,6 +39,8 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
+from arkheia_common.egress import egress_async_client
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
@@ -258,7 +260,7 @@ async def _forward(
         if k.lower() in _FORWARDED_HEADERS
     }
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with egress_async_client(timeout=60.0) as client:
         upstream_response = await client.request(
             method=request.method,
             url=upstream_url,
