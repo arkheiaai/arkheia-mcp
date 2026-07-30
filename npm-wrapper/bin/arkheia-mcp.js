@@ -428,6 +428,9 @@ function venvMarkerMatches(bundle) {
   if (!fs.existsSync(VENV_MARKER)) {
     return false;
   }
+  if (!regularFileNoSymlink(VENV_MARKER)) {
+    return false;
+  }
   try {
     const data = JSON.parse(fs.readFileSync(VENV_MARKER, "utf-8"));
     return (
@@ -443,20 +446,13 @@ function venvMarkerMatches(bundle) {
 }
 
 function writeVenvMarker(bundle) {
-  fs.writeFileSync(
-    VENV_MARKER,
-    JSON.stringify(
-      {
-        schema: VENV_SCHEMA,
-        package_name: bundle.packageName,
-        package_version: bundle.packageVersion,
-        requirements_sha256: bundle.requirementsSha256,
-        created_at: new Date().toISOString(),
-      },
-      null,
-      2
-    ) + "\n"
-  );
+  writeMarkerJson(VENV_MARKER, "virtual environment marker", {
+    schema: VENV_SCHEMA,
+    package_name: bundle.packageName,
+    package_version: bundle.packageVersion,
+    requirements_sha256: bundle.requirementsSha256,
+    created_at: new Date().toISOString(),
+  });
 }
 
 function regularFileNoSymlink(filePath) {
@@ -466,6 +462,16 @@ function regularFileNoSymlink(filePath) {
   } catch {
     return false;
   }
+}
+
+function writeMarkerJson(filePath, label, data) {
+  if (fs.existsSync(filePath) && !regularFileNoSymlink(filePath)) {
+    fail(`${label} is not a regular file at ${filePath}`);
+  }
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
 }
 
 function usableMarkedVenv(venvPython) {
@@ -522,6 +528,9 @@ function depsMarkerMatches(marker, bundle) {
   if (!fs.existsSync(marker)) {
     return false;
   }
+  if (!regularFileNoSymlink(marker)) {
+    return false;
+  }
   try {
     const data = JSON.parse(fs.readFileSync(marker, "utf-8"));
     return (
@@ -540,6 +549,9 @@ function installDeps(venvPython, bundle) {
   const marker = path.join(VENV_DIR, ".arkheia-deps-installed.json");
   if (depsMarkerMatches(marker, bundle)) {
     return; // Already installed for this verified requirements file
+  }
+  if (fs.existsSync(marker) && !regularFileNoSymlink(marker)) {
+    fail(`dependency install marker is not a regular file at ${marker}`);
   }
 
   process.stderr.write("[arkheia] Installing dependencies from verified bundle requirements...\n");
@@ -566,20 +578,13 @@ function installDeps(venvPython, bundle) {
     }
   );
 
-  fs.writeFileSync(
-    marker,
-    JSON.stringify(
-      {
-        schema: "arkheia.npm.deps.v1",
-        package_name: bundle.packageName,
-        package_version: bundle.packageVersion,
-        requirements_sha256: bundle.requirementsSha256,
-        installed_at: new Date().toISOString(),
-      },
-      null,
-      2
-    ) + "\n"
-  );
+  writeMarkerJson(marker, "dependency install marker", {
+    schema: "arkheia.npm.deps.v1",
+    package_name: bundle.packageName,
+    package_version: bundle.packageVersion,
+    requirements_sha256: bundle.requirementsSha256,
+    installed_at: new Date().toISOString(),
+  });
 }
 
 function main() {

@@ -382,6 +382,48 @@ def test_forged_venv_marker_cannot_select_the_runtime_interpreter(tmp_path):
     assert [e["kind"] for e in events].count("server") == 1
 
 
+def test_symlinked_venv_marker_cannot_select_the_runtime_interpreter(tmp_path):
+    package = _packed_package(tmp_path)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "events.jsonl"
+    _write_fake_python(fakebin)
+
+    home = tmp_path / "home"
+    forged_python = _venv_python_path(home)
+    _write_forged_venv_python(forged_python)
+    (home / ".arkheia" / "venv" / "pyvenv.cfg").write_text(
+        "home = /attacker-controlled-python\ninclude-system-site-packages = false\n",
+        encoding="utf-8",
+    )
+    provenance, req_hash = _provenance_identity(package)
+    marker_payload = {
+        "schema": "arkheia.npm.venv.v1",
+        "package_name": provenance["package"]["name"],
+        "package_version": provenance["package"]["version"],
+        "requirements_sha256": req_hash,
+    }
+    external_marker = tmp_path / "external-venv-marker.json"
+    external_marker.write_text(json.dumps(marker_payload), encoding="utf-8")
+    _symlink_or_skip(
+        external_marker,
+        home / ".arkheia" / "venv" / ".arkheia-venv.json",
+    )
+    deps_payload = {**marker_payload, "schema": "arkheia.npm.deps.v1"}
+    (home / ".arkheia" / "venv" / ".arkheia-deps-installed.json").write_text(
+        json.dumps(deps_payload), encoding="utf-8"
+    )
+
+    result = _run_launcher(package, _base_env(tmp_path, fakebin, log))
+
+    assert result.returncode == 0, result.stderr
+    events = _events(log)
+    assert "forged_venv_executed" not in [e["kind"] for e in events]
+    assert [e["kind"] for e in events].count("create_venv") == 1
+    assert [e["kind"] for e in events].count("pip_install") == 1
+    assert [e["kind"] for e in events].count("server") == 1
+
+
 def test_bytecode_debris_is_not_invisible_to_bundle_provenance(tmp_path):
     package = _packed_package(tmp_path)
     fakebin = tmp_path / "fakebin"
@@ -501,3 +543,32 @@ def test_launcher_recreates_unmarked_existing_venv_before_execution(tmp_path):
     assert create_venv_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
     assert pip_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
     assert server_event["env"]["AWS_SECRET_ACCESS_KEY"] is None
+
+
+def test_symlinked_dependency_marker_is_not_followed_or_overwritten(tmp_path):
+    package = _packed_package(tmp_path)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "events.jsonl"
+    _write_fake_python(fakebin)
+
+    env = _base_env(tmp_path, fakebin, log)
+    first = _run_launcher(package, env)
+    assert first.returncode == 0, first.stderr
+
+    marker = tmp_path / "home" / ".arkheia" / "venv" / ".arkheia-deps-installed.json"
+    victim = tmp_path / "victim.json"
+    victim.write_text("do not overwrite\n", encoding="utf-8")
+    marker.unlink()
+    _symlink_or_skip(victim, marker)
+
+    second = _run_launcher(package, env)
+
+    assert second.returncode != 0
+    assert "dependency install marker is not a regular file" in second.stderr
+    assert victim.read_text(encoding="utf-8") == "do not overwrite\n"
+    events = _events(log)
+    assert [e["kind"] for e in events].count("python_version") == 2
+    assert [e["kind"] for e in events].count("create_venv") == 1
+    assert [e["kind"] for e in events].count("pip_install") == 1
+    assert [e["kind"] for e in events].count("server") == 1
