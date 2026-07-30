@@ -33,19 +33,11 @@ jobs:
 
       - name: Run bandit (source only, skip tests and venv)
         run: |
+          set -euo pipefail
           bandit -r proxy/ mcp_server/ registry_server/ scripts/ \
             --exclude proxy/tests,mcp_server/tests,registry_server/tests \
             --skip B101,B601 \
-            -f json -o bandit-results.json || true
-          bandit -r proxy/ mcp_server/ registry_server/ scripts/ \
-            --exclude proxy/tests,mcp_server/tests,registry_server/tests \
-            --skip B101,B601 \
-            -ll 2>&1 | tee bandit-summary.txt
-          # Fail on HIGH severity only
-          if grep -q "Severity: High" bandit-summary.txt; then
-            echo "HIGH severity findings detected"
-            exit 1
-          fi
+            -lll -f json -o bandit-results.json
 
       - name: Upload results
         if: always()
@@ -55,7 +47,6 @@ jobs:
           name: bandit-results-${{ github.run_number }}
           path: |
             bandit-results.json
-            bandit-summary.txt
           retention-days: 90
 
   dependency-audit:
@@ -76,28 +67,20 @@ jobs:
 
       - name: Audit dependencies
         run: |
-          set -o pipefail
-          pip install -r requirements.txt --dry-run 2>/dev/null || true
-          set +e
+          set -euo pipefail
           pip-audit -r requirements.txt --format json -o pip-audit-results.json
-          audit_json_status=$?
-          pip-audit -r requirements.txt 2>&1 | tee pip-audit-summary.txt
-          audit_summary_status=$?
-          set -e
-          if [ ! -s pip-audit-results.json ]; then
-            echo "pip-audit did not produce a JSON report"
-            exit 1
-          fi
-          # pip-audit 2.10.1 does not expose CVSS scores in JSON and has no
-          # --fail-on-cvss flag, so this gate fails closed on any reported vuln.
           python - <<'PY'
           import json
           import sys
 
           with open("pip-audit-results.json", encoding="utf-8") as f:
               report = json.load(f)
+          dependencies = report.get("dependencies")
+          if not isinstance(dependencies, list) or not dependencies:
+              print("pip-audit produced no dependency records; failing closed")
+              sys.exit(1)
           findings = []
-          for dep in report.get("dependencies", []):
+          for dep in dependencies:
               for vuln in dep.get("vulns", []):
                   aliases = ", ".join(vuln.get("aliases", [])) or "no aliases"
                   findings.append(
@@ -111,10 +94,6 @@ jobs:
               sys.exit(1)
           print("pip-audit reported no vulnerabilities")
           PY
-          if [ "$audit_json_status" -ne 0 ] || [ "$audit_summary_status" -ne 0 ]; then
-            echo "pip-audit exited non-zero without JSON findings; failing closed"
-            exit 1
-          fi
 
       - name: Upload results
         if: always()
@@ -124,7 +103,6 @@ jobs:
           name: pip-audit-results-${{ github.run_number }}
           path: |
             pip-audit-results.json
-            pip-audit-summary.txt
           retention-days: 90
 
   secrets-check:
