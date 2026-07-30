@@ -91,6 +91,16 @@ def _safe_detection_id(clean_record: object) -> str:
     return f"<non-scalar detection_id:{type(value).__name__}>"
 
 
+def _safe_log_detection_id(record: object) -> str:
+    """Return a bounded, redacted id for diagnostics that do not reach disk."""
+    try:
+        clean, _ = _sanitize_for_json(record)
+        clean = redact(clean)
+        return _safe_detection_id(clean)
+    except Exception:
+        return "?"
+
+
 class ChainState(NamedTuple):
     """
     Chain head recovered from disk, plus whether recovering it was clean.
@@ -579,7 +589,7 @@ class AuditWriter:
             self._queue.put_nowait(record)
         except asyncio.QueueFull:
             logger.warning("AuditWriter queue full — dropping detection event %s",
-                           record.get("detection_id", "?"))
+                           _safe_log_detection_id(record))
 
     async def _writer_loop(self) -> None:
         """Background loop: drain queue, redact, chain-hash, write to JSONL."""

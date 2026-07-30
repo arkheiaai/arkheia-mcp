@@ -25,7 +25,9 @@ leaves a hole that verify_chain() must be able to see).
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -112,6 +114,31 @@ async def test_non_serialisable_value_still_reaches_the_read_surface(tmp_path):
         f"the non-serialisable-field record is absent from read_recent() ({served_ids!r}) -- "
         f"the read surface agrees with the loss instead of catching it."
     )
+
+
+async def test_queue_full_warning_redacts_detection_id(tmp_path, caplog):
+    """
+    Queue saturation drops before the writer loop can sanitize/redact the record.
+    The diagnostic path must not reach back to the raw caller record for an id.
+    """
+    writer = _writer(tmp_path)
+    n = 0
+    while True:
+        try:
+            writer._queue.put_nowait({"detection_id": f"filler-{n}"})
+        except asyncio.QueueFull:
+            break
+        n += 1
+    assert n >= 1000, f"queue saturated after only {n} records; wrong premise"
+
+    secret_detection_id = "sk-ant-api03-" + "Qx7Az9Bw2Ck4Dm6Fn8" * 3
+    caplog.set_level(logging.WARNING, logger="proxy.audit.writer")
+
+    await writer.write({"detection_id": secret_detection_id, "event": "detect"})
+
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert secret_detection_id not in logged, logged
+    assert "[REDACTED:" in logged, logged
 
 
 # ---------------------------------------------------------------------------
