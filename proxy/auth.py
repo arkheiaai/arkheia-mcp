@@ -262,11 +262,5 @@ async def require_auth(request: Request) -> str:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session",
         )
-    if not is_email_whitelisted(email):
-        logger.warning("Authenticated email is no longer whitelisted")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session no longer authorized",
-        )
 
     return email
