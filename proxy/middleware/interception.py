@@ -92,6 +92,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from proxy.audit.writer import AUDIT_WRITE_ENQUEUED, AUDIT_WRITE_QUEUE_FULL
+
 logger = logging.getLogger(__name__)
 
 
@@ -248,15 +250,12 @@ GATE_ACTION_BLOCK = "block"
 #: background loop drains, and that loop swallows its own I/O errors, so the
 #: most this flow can honestly support is that the rail accepted it.
 #:
-#: KNOWN GAP, pinned by a test rather than papered over: ``write()`` also
-#: swallows its own ``QueueFull`` and drops the record, so a saturated rail still
-#: reports ``enqueued``. Closing that needs ``AuditWriter.write()`` to report its
-#: own outcome — a change to a rail co-owned with another branch.
 RECEIPT_ENQUEUED = "enqueued"
+RECEIPT_QUEUE_FULL = "queue_full"
 RECEIPT_NO_WRITER = "no_audit_writer"
 RECEIPT_WRITE_FAILED = "write_failed"
 RECEIPT_STATUSES = frozenset({
-    RECEIPT_ENQUEUED, RECEIPT_NO_WRITER, RECEIPT_WRITE_FAILED,
+    RECEIPT_ENQUEUED, RECEIPT_QUEUE_FULL, RECEIPT_NO_WRITER, RECEIPT_WRITE_FAILED,
 })
 
 
@@ -614,6 +613,7 @@ async def _emit(request: Request, record: dict) -> str:
     evidence trail that does not exist:
 
       ``enqueued``        the rail accepted the record
+      ``queue_full``      the rail was saturated and dropped the record
       ``no_audit_writer`` no rail is configured — nothing was enqueued anywhere
       ``write_failed``    the rail raised; nothing landed
 
@@ -629,9 +629,23 @@ async def _emit(request: Request, record: dict) -> str:
         )
         return RECEIPT_NO_WRITER
     try:
-        await audit.write(record)
+        write_status = await audit.write(record)
     except Exception as exc:
         logger.error("Interception audit write failed (decision unaffected): %s", exc)
+        return RECEIPT_WRITE_FAILED
+    if write_status == AUDIT_WRITE_QUEUE_FULL:
+        logger.error(
+            "Interception audit write dropped: audit queue full "
+            "(decision unaffected; the caller is told '%s')",
+            RECEIPT_QUEUE_FULL,
+        )
+        return RECEIPT_QUEUE_FULL
+    if write_status not in (None, AUDIT_WRITE_ENQUEUED):
+        logger.error(
+            "Interception audit write returned unknown status %s "
+            "(decision unaffected)",
+            write_status,
+        )
         return RECEIPT_WRITE_FAILED
     return RECEIPT_ENQUEUED
 
