@@ -125,7 +125,7 @@ class TestInv1SinglePrefixConstant:
 
 
 # ---------------------------------------------------------------------------
-# INV-2 — every AsyncClient passes follow_redirects=False explicitly
+# INV-2 — every forwarding client passes follow_redirects=False explicitly
 # ---------------------------------------------------------------------------
 
 def _async_clients(tree: ast.Module) -> list[ast.Call]:
@@ -134,7 +134,7 @@ def _async_clients(tree: ast.Module) -> list[ast.Call]:
         if isinstance(node, ast.Call):
             f = node.func
             name = getattr(f, "attr", None) or getattr(f, "id", None)
-            if name == "AsyncClient":
+            if name in {"AsyncClient", "egress_async_client"}:
                 out.append(node)
     return out
 
@@ -157,8 +157,9 @@ class TestInv2RedirectsNeverFollowed:
     """
     A followed 302 is a cross-host relay with the caller's credential attached —
     ``Location: http://169.254.169.254/`` and the gate's whole post-condition is
-    bypassed by the origin. Today that is prevented by an ``httpx`` DEFAULT. A
-    third party's default is not a control we own; it can change on a bump.
+    bypassed by the origin. The forwarding client now comes from the shared
+    no-proxy egress factory, but redirect refusal is still a call-site-owned
+    transport control.
     """
 
     def test_every_client_is_explicit(self, tree):
