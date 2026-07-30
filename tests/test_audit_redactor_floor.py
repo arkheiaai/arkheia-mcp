@@ -986,6 +986,10 @@ DISK_SINKS: dict[str, tuple[str, str]] = {
         "NO_CALLER_DATA",
         "registry-supplied profile YAML, checksum- and schema-validated; not an audit record",
     ),
+    "proxy/registry/client.py:_restore_profile": (
+        "NO_CALLER_DATA",
+        "restores prior profile bytes or prior backup bytes after a failed registry apply",
+    ),
     "proxy/endpoints/admin.py:rollback_profile": (
         "NO_CALLER_DATA",
         "validates the live profile and .bak with ProfileValidator before atomically "
