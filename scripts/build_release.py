@@ -121,12 +121,11 @@ def step_generate_manifest(module_dir: Path, output_path: Path | None = None) ->
     ``Manifest written: … (0 modules)``, and the build carried on to exit 0.
 
     That empty file is not a neutral placeholder, it is a FALSE RECEIPT.
-    ``proxy/license/integrity.verify_integrity`` treats a manifest that exists as
-    a manifest to check, iterates its zero entries, logs *"Integrity check
-    passed: 0 modules verified"* and returns success. A release shipped that way
-    reports VERIFIED for an artifact whose integrity was never established — a
-    record of a check that did not happen, which is worse than no record, because
-    downstream it is trusted.
+    Historically, ``proxy/license/integrity.verify_integrity`` treated a manifest
+    that exists as a manifest to check, iterated its zero entries, logged
+    *"Integrity check passed: 0 modules verified"* and returned success. Current
+    ``master`` now rejects that at runtime, but a release build still must not
+    ship an artifact whose integrity record certifies zero modules.
 
     Worse still, the build did not stop: step 4 then DELETED the compiled Python
     sources listed in ``COMPILED_MODULES``, so a no-binaries build destroyed the
@@ -144,15 +143,15 @@ def step_generate_manifest(module_dir: Path, output_path: Path | None = None) ->
 
     if not manifest:
         # Remove the false receipt. Leaving it behind is the defect itself: a
-        # later verify would read it and report a pass.
+        # release build must not ship a manifest that records zero modules.
         if manifest_path.exists():
             manifest_path.unlink()
         raise EmptyManifest(
             f"refusing to write an empty integrity manifest for {module_dir}: "
             f"no {' / '.join(COMPILED_ARTIFACT_GLOBS)} found there, so the "
-            f"manifest would certify ZERO modules and verify_integrity() would "
-            f"report a pass having checked nothing. Run the Cython compile step "
-            f"(drop --skip-compile) or remove {module_dir} from COMPILED_MODULES."
+            f"manifest would certify ZERO modules. Run the Cython compile step "
+            f"(drop --skip-compile) or remove {module_dir} from COMPILED_MODULES; "
+            f"do not rely on startup integrity checks to reject a bad release."
         )
 
     print(f"  Manifest written: {manifest_path} ({len(manifest)} modules)")

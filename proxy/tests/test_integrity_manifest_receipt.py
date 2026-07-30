@@ -15,15 +15,12 @@ end to end: written on the production path, read back off disk, and tied to the
 decision by re-hashing the actual bytes of every file it names.
 
 **D2, at runtime** — *"this artifact matches / does not match its manifest."*
-On ``origin/master`` this decision does not happen at all: ``verify_integrity``
-has ZERO production call sites, so nothing is ever verified and nothing is ever
-recorded. PR #15 supplies the call site and publishes the outcome on
-``app.state.integrity`` / ``/admin/health`` — but that is process-local state, not
-a durable record: restart the proxy and the verdict is gone. **D2 is therefore
-NOT receipted, and this module does not claim it is.** It is not ``n/a`` either:
-a startup that refuses to serve because a detection binary was modified is
-exactly the kind of decision an auditor needs a record of, and the audit rail to
-write it on already exists in the same lifespan. It is FAIL / not-yet.
+Current ``master`` now makes this decision at startup and publishes the outcome
+on ``app.state.integrity`` / ``/admin/health``. That is visible process-local
+state, not a durable record: restart the proxy and the verdict is gone. This
+branch's runtime receipt tests supply the durable D2 proof; this module stays on
+D1, the build-time manifest receipt, while preserving the runtime empty-manifest
+refusal that current ``master`` added.
 
 Phase 2: the defect this found
 ------------------------------
@@ -34,8 +31,8 @@ file is not neutral — ``verify_integrity`` treats a manifest that EXISTS as on
 to check, iterates its zero entries, logs *"Integrity check passed: 0 modules
 verified"* and returns success.
 
-That is a receipt of a check that did not happen: the artifact reports VERIFIED
-having established nothing, and downstream that verdict is trusted. It is DONE.md
+That was a receipt of a check that did not happen: the artifact reported VERIFIED
+having established nothing, and downstream that verdict was trusted. It is DONE.md
 floor invariant 9 in its exact form — a measurement gate that measures nothing
 must not report a pass — and the brief's "an audit row showing a bare verdict for
 something that scored nothing".
@@ -59,11 +56,10 @@ per module and names the ones no record covers — "1 of 2 modules recorded"
 passes every non-zero assertion, which is precisely the case floor invariant
 9(a) exists for.
 
-Left open deliberately, and named rather than hidden: ``verify_integrity``
-ITSELF still reports a pass over a hand-written empty manifest. That fix belongs
-in ``proxy/license/integrity.py``, which PR #15 is actively rewriting; PR #15's
-new ``IntegrityReport`` returns ``VERIFIED`` with ``modules_checked=0`` for this
-input, so the hole survives it. See the PR body.
+Closed on current ``master``, and pinned here rather than hidden:
+``verify_integrity`` itself now raises ``TamperDetected`` over a hand-written
+empty manifest. The build guard below is still load-bearing: release builds must
+not ship a false manifest and then rely on startup to reject the artifact.
 """
 from __future__ import annotations
 
@@ -248,11 +244,12 @@ def test_step_3_refuses_to_ship_a_manifest_that_certifies_nothing(tmp_path):
     for glob in build_release.COMPILED_ARTIFACT_GLOBS:
         assert glob in message, f"refusal does not name the glob {glob!r}: {message}"
 
-    # The false receipt must not survive the refusal — verify_integrity would
-    # read it and report a pass.
+    # The false receipt must not survive the refusal. Runtime now rejects an
+    # empty manifest, but a release build should fail here rather than ship an
+    # artifact that can only die on startup.
     assert not (empty_dir / MANIFEST_FILE).exists(), (
         "an empty manifest was left on disk after the refusal; a later "
-        "verify_integrity() would read it and report VERIFIED over zero modules"
+        "verify_integrity() would treat it as a positive integrity failure"
     )
 
     # Positive control: the same function accepts a directory that HAS artifacts,
