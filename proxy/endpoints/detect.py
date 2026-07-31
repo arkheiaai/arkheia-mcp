@@ -306,11 +306,16 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
         except Exception as e:
             logger.error("Audit write failed (detection result unaffected): %s", e)
 
-    # Push to Arkheia Governance Detection Adapter (fail-open, fire-and-forget)
+    # Push to Arkheia Governance Detection Adapter (fail-open, fire-and-forget).
+    # `audit` is passed so the OUTCOME of the push leaves its own hash-chained
+    # receipt: the detection receipt above records what we decided, this records
+    # whether the governance plane was actually told. They are different facts and
+    # a rail that only records the first cannot tell "delivered" from "dark".
     schedule_push(
         tenant_id=_ADAPTER_TENANT_ID,
         source_id=req.model_id,
         event_type="mcp_detection",
+        audit=audit,
         payload={
             "detection_id": response.detection_id,
             "model_id": response.model_id,
@@ -326,34 +331,19 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
             "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
             "action_taken": action,
         },
-        risk_level=_envelope_risk_band(response.risk_level),
+        # Pass the RAW band. This used to coerce anything unrecognised (i.e.
+        # UNKNOWN -- engine unavailable, engine error, no profile) to "LOW",
+        # which published an evidence-limited non-verdict to the governance plane
+        # as a clean LOW. detection_adapter.build_proxy_event now carries UNKNOWN
+        # through as classification=UNCERTAIN plus context.risk_level_raw, so a
+        # couldn't-assess never reads as an all-clear.
+        risk_level=response.risk_level,
     )
 
     # Surface the governance decision to the caller: policy `action` (mirrors action_taken in
     # the audit) + profile-earned `gate_action`. Keeps HTTP 200; blocking-at-transport stays the
     # job of proxy/middleware/interception.py. Consumers hard-block only when gate_action=="block".
     return _signal(http_response, response, action, getattr(result, "gate_action", "advise"))
-
-
-_ENVELOPE_RISK_BANDS = ("LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN")
-
-
-def _envelope_risk_band(risk_level: str) -> str:
-    """The band recorded on the governance envelope.
-
-    Anything unrecognised becomes UNKNOWN, never LOW. The previous expression was
-    ``risk_level if risk_level in ("LOW","MEDIUM","HIGH","CRITICAL") else "LOW"``, and UNKNOWN is
-    not in that tuple -- so every unassessable verdict was recorded as the QUIETEST possible
-    result. An unscreened response and a measured-clean one became the same governance event,
-    which is precisely the confident-verdict-from-nothing failure detection exists to catch.
-
-    UNKNOWN is not LOW. A response that was never scored has not been found safe; it has not been
-    looked at. _determine_action already treats UNKNOWN as its own band (settings.detection
-    .unknown_action), so the rest of the endpoint already knows the distinction -- only the
-    envelope was collapsing it.
-    """
-    band = (risk_level or "").strip().upper()
-    return band if band in _ENVELOPE_RISK_BANDS else "UNKNOWN"
 
 
 def _determine_action(risk_level: str, settings) -> str:

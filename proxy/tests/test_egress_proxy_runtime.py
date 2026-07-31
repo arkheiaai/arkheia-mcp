@@ -356,9 +356,15 @@ async def test_credentialed_production_egress_ignores_ambient_proxy_capture(
 
     import proxy.detection_adapter as detection_adapter
 
-    monkeypatch.setattr(detection_adapter, "DETECTION_ADAPTER_URL", target_server.url)
-    monkeypatch.setattr(detection_adapter, "DETECTION_ADAPTER_HMAC_SECRET", "adapter-secret")
-    monkeypatch.setattr(detection_adapter, "DETECTION_ADAPTER_KEY_ID", "adapter-key-id")
+    # ENV, not module attributes. `sweep/mcp-governance-adapter-push` replaced the
+    # import-time `DETECTION_ADAPTER_*` constants with `detection_adapter._config()`,
+    # which reads os.environ at CALL time. Setting env drives the same read the
+    # production path takes, so this test still configures the real flow — and it
+    # still proves the point it exists for: the push below must reach
+    # `target_server` directly, never the ambient capture proxy.
+    monkeypatch.setenv("DETECTION_ADAPTER_URL", target_server.url)
+    monkeypatch.setenv("DETECTION_ADAPTER_HMAC_SECRET", "adapter-secret")
+    monkeypatch.setenv("DETECTION_ADAPTER_KEY_ID", "adapter-key-id")
     await detection_adapter.push_event(
         "tenant",
         "source",
