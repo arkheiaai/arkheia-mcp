@@ -358,7 +358,17 @@ class TestTheGovernancePushCanTellSuppressedFromScored:
 
 
 class TestTheGovernanceEnvelopeBandIsPinnedNotFixed:
-    """PINNED CURRENT BEHAVIOUR — NOT A FIX, and NOT this flow's to fix.
+    """FIXED 2026-07-31. The pin below is INVERTED, not deleted — it now asserts the corrected
+    behaviour, so it still fails loudly if the old ``... else "LOW"`` shape ever returns.
+
+    ⚠ ONE DIFFERENCE FROM THE ORIGINAL PLAN, stated plainly. The note below records the intended
+    fix as "pass the raw band and map UNKNOWN -> UNCERTAIN in the adapter, which needs the
+    adapter-side change to go with it". This change does NOT do the adapter-side mapping: it only
+    stops the envelope calling an unassessable verdict LOW, which is the half that is dangerous on
+    its own and needs no cross-repo coordination. If the adapter later wants UNCERTAIN rather than
+    UNKNOWN, that is a rename of a truthful value, not a re-fix of a false one.
+
+    ORIGINAL NOTE, kept for the history:
 
     `detect.py` pushes
         risk_level = response.risk_level if response.risk_level in
@@ -375,14 +385,20 @@ class TestTheGovernanceEnvelopeBandIsPinnedNotFixed:
     branch and this test goes red the moment that branch lands.
     """
 
-    def test_unknown_is_published_to_the_envelope_as_low(self, client, wire):
+    def test_unknown_is_published_to_the_envelope_as_unknown_not_low(self, client, wire):
+        """The caller and the governance record must agree. They did not.
+
+        The envelope used to receive a MORE REASSURING value than the caller: the caller was
+        correctly told UNKNOWN while the governance plane recorded LOW.
+        """
         body = client.post("/detect/verify", json={
             "prompt": "p", "response": "r" * 400, "model_id": "no-such-model-xyz",
         }).json()
         assert body["risk_level"] == "UNKNOWN"
         pushed = wire.await_one()
-        assert pushed["risk_level"] == "LOW", (
-            "sweep/mcp-governance-adapter-push has landed — delete this pin"
+        assert pushed["risk_level"] == "UNKNOWN", (
+            "the envelope recorded an unassessable verdict as "
+            f"{pushed['risk_level']!r}. A response that was never scored has not been found safe."
         )
         assert pushed["payload"]["risk_level"] == "UNKNOWN"
 
