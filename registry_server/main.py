@@ -7,7 +7,8 @@ Endpoints:
   GET /                           -- service info (no auth)
   GET /health                     -- health check (no auth)
   GET /profiles                   -- list available profiles (auth required)
-  GET /profiles/{model_id}/download -- download profile YAML (auth required)
+  GET /profiles/download?model_id= -- download profile YAML (auth required)
+  GET /profiles/{model_id}/download -- legacy download alias (auth required)
 
 Config (env vars):
   ARKHEIA_REGISTRY_PROFILE_DIR   -- profiles directory (default: ../profiles relative to this file)
@@ -76,7 +77,8 @@ async def root():
         "endpoints": {
             "health": "/health",
             "profiles": "/profiles",
-            "download": "/profiles/{model_id}/download",
+            "download": "/profiles/download?model_id={model_id}",
+            "download_legacy": "/profiles/{model_id}/download",
         },
     }
 
@@ -120,12 +122,8 @@ async def list_profiles(
     return {"profiles": profiles, "count": len(profiles)}
 
 
-@app.get("/profiles/{model_id}/download")
-async def download_profile(
-    model_id: str,
-    api_key: str = Depends(require_auth),
-):
-    """Download raw YAML bytes for the given model_id."""
+def _serve_profile(model_id: str) -> Response:
+    """Serve profile bytes through the storage containment chokepoint."""
     storage: ProfileStorage = app.state.storage
     content = storage.get_profile_bytes(model_id)
     if content is None:
@@ -134,3 +132,24 @@ async def download_profile(
             detail=f"Profile not found: {model_id}",
         )
     return Response(content=content, media_type="application/yaml")
+
+
+@app.get("/profiles/download")
+async def download_profile_by_query(
+    model_id: str = Query(
+        ...,
+        description="Registry model id, percent-escaped into the query string.",
+    ),
+    api_key: str = Depends(require_auth),
+):
+    """Download raw YAML bytes for the given model_id from the query string."""
+    return _serve_profile(model_id)
+
+
+@app.get("/profiles/{model_id}/download")
+async def download_profile(
+    model_id: str,
+    api_key: str = Depends(require_auth),
+):
+    """Legacy path-form download route for single-segment model ids."""
+    return _serve_profile(model_id)
