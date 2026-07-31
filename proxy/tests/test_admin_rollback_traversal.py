@@ -11,6 +11,15 @@ These tests call the handler directly (bypassing Starlette's ``[^/]+`` route
 matcher, which would 404 slash-bearing URLs before the handler and mask the
 storage-layer bug — see registry_server test notes), so they GENUINELY exercise
 the write path and are RED on the unpatched handler.
+
+MERGE NOTE (master): the handler this now drives is master's hardened rollback —
+it emits a governance receipt for every outcome, validates BOTH the live and the
+backup profile before swapping, and restores the live file if the reload fails.
+Two adaptations follow from that and NOTHING else was relaxed: the auth
+dependency is bound as ``admin_email`` (not ``_``), and the planted profiles are
+real, schema-valid profile bodies so the validator does not reject them before
+the path guard's behaviour can be observed. Every security assertion below (no
+out-of-root write, no reload, fail-closed status) is unchanged.
 """
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +27,16 @@ from types import SimpleNamespace
 import pytest
 
 from proxy.endpoints.admin import rollback_profile
+
+
+def _profile_bytes(model_id: str, version: str) -> bytes:
+    """A schema-valid profile body (master's rollback validates live AND backup)."""
+    return (
+        f'model: "{model_id}"\n'
+        f'version: "{version}"\n'
+        "detection:\n"
+        "  features: {}\n"
+    ).encode("utf-8")
 
 
 class _FakeRouter:
@@ -33,6 +52,7 @@ def _make_request(profile_dir: str, router: _FakeRouter):
     state = SimpleNamespace(
         settings=SimpleNamespace(detection=SimpleNamespace(profile_dir=str(profile_dir))),
         profile_router=router,
+        audit_writer=None,  # receipts fail soft; rollback must not depend on the rail
     )
     return SimpleNamespace(app=SimpleNamespace(state=state))
 
@@ -44,9 +64,7 @@ def rollback_env(tmp_path):
     outside the root. Returns (profile_dir, outside_dir)."""
     root = tmp_path / "profiles"
     root.mkdir()
-    (root / "claude-opus-4-8.yaml").write_text(
-        "model: claude-opus-4-8\nversion: '1.0'\n", encoding="utf-8"
-    )
+    (root / "claude-opus-4-8.yaml").write_bytes(_profile_bytes("claude-opus-4-8", "1.0"))
     outside = tmp_path / "outside"
     outside.mkdir()
     return root, outside
@@ -80,7 +98,9 @@ async def test_rollback_traversal_never_writes_outside_root(rollback_env, idx):
 
     router = _FakeRouter()
     request = _make_request(str(root), router)
-    result = await rollback_profile(model_id=model_id, request=request, _="test-token")
+    result = await rollback_profile(
+        model_id=model_id, request=request, admin_email="admin@example.com"
+    )
 
     # SECURITY: no file was written outside the profiles root.
     assert not escaped_target.exists(), (
@@ -100,15 +120,16 @@ async def test_rollback_legit_still_works(rollback_env):
     root, _outside = rollback_env
     current = root / "claude-opus-4-8.yaml"
     bak = Path(str(current) + ".bak")
-    bak.write_bytes(b"model: claude-opus-4-8\nversion: '0.9'\n")
+    backup_bytes = _profile_bytes("claude-opus-4-8", "0.9")
+    bak.write_bytes(backup_bytes)
 
     router = _FakeRouter()
     request = _make_request(str(root), router)
     result = await rollback_profile(
-        model_id="claude-opus-4-8", request=request, _="test-token"
+        model_id="claude-opus-4-8", request=request, admin_email="admin@example.com"
     )
 
-    assert current.read_bytes() == b"model: claude-opus-4-8\nversion: '0.9'\n"
+    assert current.read_bytes() == backup_bytes
     assert router.reload_called is True
     # Success returns the plain ok dict (implicit 200), not an error response.
     assert isinstance(result, dict) and result.get("status") == "ok"
@@ -122,7 +143,7 @@ async def test_rollback_missing_backup_is_rejected(rollback_env):
     router = _FakeRouter()
     request = _make_request(str(root), router)
     result = await rollback_profile(
-        model_id="no-such-model", request=request, _="test-token"
+        model_id="no-such-model", request=request, admin_email="admin@example.com"
     )
     assert router.reload_called is False
     assert getattr(result, "status_code", 200) == 404

@@ -10,14 +10,34 @@ Failures surface as UNKNOWN risk with error field set.
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
+
+from arkheia_common.egress import egress_async_client
+from arkheia_common.hosted_authority import (
+    DEFAULT_HOSTED_API_URL,
+    HostedAuthorityError,
+    authorize_hosted_base_url,
+    hosted_key_egress_client,
+)
 
 logger = logging.getLogger(__name__)
 
 # Hosted API defaults
-HOSTED_API_URL = "https://arkheia-proxy-production.up.railway.app"
+HOSTED_API_URL = DEFAULT_HOSTED_API_URL
+
+_LOCAL_TRANSPORT_ERRORS = frozenset({
+    "proxy_unavailable",
+    "proxy_timeout",
+    "proxy_error",
+})
+
+_HOSTED_TRANSIENT_ERRORS = frozenset({
+    "hosted_unavailable",
+    "hosted_timeout",
+    "hosted_error",
+})
 
 
 class ProxyClient:
@@ -48,36 +68,168 @@ class ProxyClient:
         response: str,
         model_id: str,
         session_id: Optional[str] = None,
+        usage: Optional[dict[str, Any]] = None,
+        output_tokens: Any = None,
+        is_function_call: Any = None,
     ) -> dict:
         """
         Detect fabrication in a model response.
 
-        Tries local proxy first. If unavailable, falls back to hosted API.
+        Tries local proxy first. Evidence-backed local verdicts are final; local
+        failures or evidence-limited local verdicts route to hosted when a key is
+        configured. The returned verdict always receipts the attempted route.
         Never raises -- returns UNKNOWN on any error.
         """
+        attempted_sources: list[str] = []
+        route_errors: list[str] = []
+        fallback_reason: Optional[str] = None
+        local_result: Optional[dict] = None
+        local_transport_failed = False
+
         # Try local proxy first (if last attempt didn't fail with ConnectError)
         if self._local_available:
-            result = await self._verify_local(prompt, response, model_id, session_id)
-            if result.get("error") not in ("proxy_unavailable", "proxy_timeout"):
-                return result
-            # Local proxy down -- fall through to hosted
-            self._local_available = False
-            logger.info("Local proxy unavailable, falling back to hosted API at %s", self.hosted_url)
+            attempted_sources.append("local")
+            local_result = await self._verify_local(
+                prompt,
+                response,
+                model_id,
+                session_id,
+                usage=usage,
+                output_tokens=output_tokens,
+                is_function_call=is_function_call,
+            )
+            local_error = local_result.get("error")
+            if local_error:
+                route_errors.append(local_error)
+                local_transport_failed = (
+                    local_error in _LOCAL_TRANSPORT_ERRORS
+                    or local_error.startswith("proxy_http_error_")
+                )
+
+            if local_transport_failed:
+                # Local transport/service failure: try hosted if available.
+                self._local_available = False
+                fallback_reason = local_error
+                logger.info(
+                    "Local proxy failed with %s, falling back to hosted API at %s",
+                    local_error,
+                    self.hosted_url,
+                )
+            elif not local_error and not local_result.get("evidence_depth_limited", True):
+                # Local gave an evidence-backed verdict; trust it and skip hosted.
+                return _with_routing(
+                    local_result,
+                    attempted_sources=attempted_sources,
+                    route_errors=route_errors,
+                    fallback_reason=fallback_reason,
+                )
+            else:
+                # Local returned a limited verdict. Keep it as a fallback, but
+                # prefer hosted telemetry when a key is configured.
+                fallback_reason = local_error or "local_evidence_limited"
+        else:
+            fallback_reason = "local_circuit_open"
+            route_errors.append("local_circuit_open")
 
         # Fallback: hosted API
         if self.api_key:
-            result = await self._verify_hosted(prompt, response, model_id)
-            if result.get("error") not in ("hosted_unavailable",):
-                return result
-            # Hosted also failed -- try local once more in case it came back
-            self._local_available = True
+            attempted_sources.append("hosted")
+            hosted_result = await self._verify_hosted(
+                prompt,
+                response,
+                model_id,
+                usage=usage,
+                output_tokens=output_tokens,
+                is_function_call=is_function_call,
+            )
+            hosted_error = hosted_result.get("error")
+            if hosted_error:
+                route_errors.append(hosted_error)
+                hosted_transient_failed = hosted_error in _HOSTED_TRANSIENT_ERRORS
+                if hosted_error.startswith("hosted_http_error_"):
+                    try:
+                        status = int(hosted_error.removeprefix("hosted_http_error_"))
+                    except ValueError:
+                        hosted_transient_failed = True
+                    else:
+                        hosted_transient_failed = status >= 500
 
-        # No hosted API key and local is down
+                if hosted_transient_failed:
+                    # Hosted transient failures should not permanently suppress
+                    # future local attempts. If local at least produced an
+                    # application-level verdict, return it with the hosted
+                    # failure receipted. If no detector measured anything, emit
+                    # the aggregate fail-safe reason and keep the specifics in
+                    # routing.route_errors.
+                    self._local_available = True
+                    if local_result is not None and not local_transport_failed:
+                        return _with_routing(
+                            local_result,
+                            attempted_sources=attempted_sources,
+                            route_errors=route_errors,
+                            fallback_reason=fallback_reason,
+                        )
+                    if "local" in attempted_sources:
+                        return _unavailable(
+                            "all_detection_paths_failed",
+                            routing={
+                                "attempted_sources": attempted_sources,
+                                "route_errors": route_errors,
+                                "fallback_reason": fallback_reason,
+                            },
+                        )
+                    return _with_routing(
+                        hosted_result,
+                        attempted_sources=attempted_sources,
+                        route_errors=route_errors,
+                        fallback_reason=fallback_reason,
+                    )
+
+            return _with_routing(
+                hosted_result,
+                attempted_sources=attempted_sources,
+                route_errors=route_errors,
+                fallback_reason=fallback_reason,
+            )
+
+        # No hosted API key. Return a local application-level verdict if one
+        # exists; otherwise no detector is available.
+        if local_result is not None and not local_transport_failed:
+            return _with_routing(
+                local_result,
+                attempted_sources=attempted_sources,
+                route_errors=route_errors,
+                fallback_reason=fallback_reason,
+            )
+        if (
+            local_result is not None
+            and local_result.get("error") not in ("proxy_unavailable", "proxy_timeout")
+        ):
+            return _with_routing(
+                local_result,
+                attempted_sources=attempted_sources,
+                route_errors=route_errors,
+                fallback_reason=fallback_reason,
+            )
         if not self.api_key:
             logger.warning("Local proxy unavailable and no ARKHEIA_API_KEY set for hosted fallback")
-            return _unavailable("no_detection_available")
+            return _unavailable(
+                "no_detection_available",
+                routing={
+                    "attempted_sources": attempted_sources,
+                    "route_errors": route_errors,
+                    "fallback_reason": fallback_reason,
+                },
+            )
 
-        return _unavailable("all_detection_paths_failed")
+        return _unavailable(
+            "all_detection_paths_failed",
+            routing={
+                "attempted_sources": attempted_sources,
+                "route_errors": route_errors,
+                "fallback_reason": fallback_reason,
+            },
+        )
 
     async def _verify_local(
         self,
@@ -85,6 +237,9 @@ class ProxyClient:
         response: str,
         model_id: str,
         session_id: Optional[str] = None,
+        usage: Optional[dict[str, Any]] = None,
+        output_tokens: Any = None,
+        is_function_call: Any = None,
     ) -> dict:
         """POST /detect/verify on local Enterprise Proxy."""
         payload = {
@@ -94,9 +249,15 @@ class ProxyClient:
         }
         if session_id:
             payload["session_id"] = session_id
+        if usage is not None:
+            payload["usage"] = usage
+        if output_tokens is not None:
+            payload["output_tokens"] = output_tokens
+        if is_function_call is not None:
+            payload["is_function_call"] = is_function_call
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with egress_async_client(timeout=self.timeout) as client:
                 resp = await client.post(
                     f"{self.base_url}/detect/verify",
                     json=payload,
@@ -118,6 +279,7 @@ class ProxyClient:
                     # evidence depth has not told us it had full evidence.
                     evidence_depth_limited=data.get("evidence_depth_limited", True),
                     source="local",
+                    error=data.get("error"),
                 )
         except httpx.TimeoutException:
             logger.warning("ProxyClient: /detect/verify timed out for model=%s", model_id)
@@ -137,6 +299,9 @@ class ProxyClient:
         prompt: str,
         response: str,
         model_id: str,
+        usage: Optional[dict[str, Any]] = None,
+        output_tokens: Any = None,
+        is_function_call: Any = None,
     ) -> dict:
         """POST /v1/detect on hosted Arkheia API (arkheia-proxy-production.up.railway.app)."""
         payload = {
@@ -144,12 +309,19 @@ class ProxyClient:
             "response": response,
             "prompt": prompt,
         }
-        headers = {"X-Arkheia-Key": self.api_key}
+        if usage is not None:
+            payload["usage"] = usage
+        if output_tokens is not None:
+            payload["output_tokens"] = output_tokens
+        if is_function_call is not None:
+            payload["is_function_call"] = is_function_call
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            authorized = authorize_hosted_base_url(self.hosted_url)
+            headers = {"X-Arkheia-Key": self.api_key}
+            async with hosted_key_egress_client(timeout=self.timeout) as client:
                 resp = await client.post(
-                    f"{self.hosted_url}/v1/detect",
+                    f"{authorized.base_url}/v1/detect",
                     json=payload,
                     headers=headers,
                 )
@@ -164,7 +336,11 @@ class ProxyClient:
                     detection_method=data.get("detection_method"),
                     evidence_depth_limited=data.get("evidence_depth_limited", True),
                     source="hosted",
+                    error=data.get("error"),
                 )
+        except HostedAuthorityError as e:
+            logger.error("ProxyClient: hosted API authority rejected: %s", e)
+            return _unavailable("hosted_authority_rejected")
         except httpx.TimeoutException:
             logger.warning("ProxyClient: hosted /v1/detect timed out for model=%s", model_id)
             return _unavailable("hosted_timeout")
@@ -201,7 +377,7 @@ class ProxyClient:
             params["session_id"] = session_id
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with egress_async_client(timeout=self.timeout) as client:
                 resp = await client.get(
                     f"{self.base_url}/audit/log",
                     params=params,
@@ -251,6 +427,8 @@ DETECTION_FIELDS = (
     "error",
 )
 
+ROUTED_DETECTION_FIELDS = (*DETECTION_FIELDS, "routing")
+
 
 def _detection_response(
     *,
@@ -262,6 +440,7 @@ def _detection_response(
     detection_method: Optional[str] = None,
     evidence_depth_limited: bool = True,
     error: Optional[str] = None,
+    routing: Optional[dict] = None,
 ) -> dict:
     """
     Build a detection verdict. The ONLY place a verdict dict is constructed.
@@ -272,7 +451,7 @@ def _detection_response(
     state that explicitly. The inverse defaulting (assume full evidence) is what
     lets an unmeasured verdict pass as a measured one.
     """
-    return {
+    verdict = {
         "risk_level": risk_level,
         "confidence": confidence,
         "features_triggered": list(features_triggered or []),
@@ -282,9 +461,16 @@ def _detection_response(
         "source": source,
         "error": error,
     }
+    if routing is not None:
+        verdict["routing"] = {
+            "attempted_sources": list(routing.get("attempted_sources") or []),
+            "route_errors": list(routing.get("route_errors") or []),
+            "fallback_reason": routing.get("fallback_reason"),
+        }
+    return verdict
 
 
-def _unavailable(error: str) -> dict:
+def _unavailable(error: str, routing: Optional[dict] = None) -> dict:
     """
     Standard UNKNOWN verdict when detection is unreachable.
 
@@ -292,7 +478,32 @@ def _unavailable(error: str) -> dict:
     attempted backend here would read as "local/hosted scored it". Which path
     failed is carried by `error` (`proxy_timeout` vs `hosted_timeout`, ...).
     """
-    return _detection_response(source="unavailable", error=error)
+    return _detection_response(source="unavailable", error=error, routing=routing)
+
+
+def _with_routing(
+    result: dict,
+    *,
+    attempted_sources: list[str],
+    route_errors: list[str],
+    fallback_reason: Optional[str],
+) -> dict:
+    """Return an existing verdict with the route receipt made explicit."""
+    return _detection_response(
+        risk_level=result.get("risk_level", "UNKNOWN"),
+        confidence=result.get("confidence", 0.0),
+        features_triggered=result.get("features_triggered") or [],
+        detection_id=result.get("detection_id"),
+        detection_method=result.get("detection_method"),
+        evidence_depth_limited=result.get("evidence_depth_limited", True),
+        source=result.get("source", "unavailable"),
+        error=result.get("error"),
+        routing={
+            "attempted_sources": attempted_sources,
+            "route_errors": route_errors,
+            "fallback_reason": fallback_reason,
+        },
+    )
 
 
 def _empty_log(error: str) -> dict:

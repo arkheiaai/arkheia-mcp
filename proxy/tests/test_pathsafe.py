@@ -182,10 +182,10 @@ def test_write_path_symlinked_root_still_contained(tmp_path):
 
 # --- client-side sibling: RegistryClient._download_and_apply ----------------
 
-_VALID_PROFILE_YAML = yaml.dump(
-    {
-        "model": "llama-3-70b",
-        "version": "2.0",
+def _valid_profile(model_id: str = "llama-3-70b", version: str = "2.0") -> dict:
+    return {
+        "model": model_id,
+        "version": version,
         "detection": {
             "strategy": "ensemble",
             "min_required_features": 1,
@@ -200,12 +200,28 @@ _VALID_PROFILE_YAML = yaml.dump(
             },
         },
     }
-).encode("utf-8")
 
 
-def _make_client(root: Path):
+def _valid_profile_yaml(model_id: str = "llama-3-70b", version: str = "2.0") -> bytes:
+    return yaml.dump(_valid_profile(model_id, version)).encode("utf-8")
+
+
+_VALID_PROFILE_YAML = _valid_profile_yaml()
+
+
+def _make_client(root: Path, active_profile: dict | None = None):
+    """RegistryClient over `root`.
+
+    MERGE NOTE (master): `_download_and_apply` now (a) requires the downloaded
+    body's own `model:`/`version:` to match the registry metadata and (b) asserts
+    through `router.get(model_id)` that the exact profile went live. The fake
+    router therefore has to answer `get` with the profile that was applied —
+    otherwise the apply is (correctly) rolled back. Nothing about the path guard
+    under test is relaxed by this.
+    """
     router = AsyncMock()
     router.reload = AsyncMock()
+    router.get = MagicMock(return_value=active_profile or _valid_profile())
     client = RegistryClient(
         base_url="https://registry.arkheia.ai",
         api_key=SecretStr("test-api-key"),
@@ -259,7 +275,7 @@ async def test_client_download_caches_separator_id_top_level(tmp_path, mid):
     root = tmp_path / "profiles"
     root.mkdir()
 
-    client, router = _make_client(root)
+    client, router = _make_client(root, active_profile=_valid_profile(mid))
     meta = {
         "model_id": mid,
         "checksum": "",  # skip checksum gate
@@ -271,7 +287,7 @@ async def test_client_download_caches_separator_id_top_level(tmp_path, mid):
         mock_client = AsyncMock()
         mock_client_cls.return_value.__aenter__.return_value = mock_client
         download_resp = MagicMock()
-        download_resp.content = _VALID_PROFILE_YAML
+        download_resp.content = _valid_profile_yaml(mid)
         download_resp.raise_for_status = MagicMock()
         mock_client.get.side_effect = [download_resp]
 

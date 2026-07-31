@@ -11,15 +11,18 @@ On failure: retain current profiles, log error, continue serving.
 """
 
 import asyncio
+import inspect
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import httpx
 from pydantic import SecretStr
 
-from proxy.pathsafe import safe_profile_write_path
+from arkheia_common.egress import egress_async_client
+from proxy.pathsafe import encode_model_id, is_safe_model_id, safe_profile_write_path
 from proxy.registry.validator import ProfileValidator
 
 logger = logging.getLogger(__name__)
@@ -70,7 +73,7 @@ class RegistryClient:
         errors = []
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with egress_async_client(timeout=30.0) as client:
                 resp = await client.get(
                     f"{self.base_url}/profiles",
                     params=params,
@@ -116,12 +119,12 @@ class RegistryClient:
         Returns True if applied, False if skipped (already up to date).
         Raises on validation failure -- caller retains old profile.
         """
-        model_id = meta["model_id"]
+        model_id = self._validate_registry_profile_id(meta.get("model_id"))
         checksum = meta.get("checksum", "")
         download_url = meta["download_url"]
         key_value = self.api_key.get_secret_value()
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with egress_async_client(timeout=30.0) as client:
             resp = await client.get(
                 download_url,
                 headers={"Authorization": f"Bearer {key_value}"},
@@ -135,35 +138,206 @@ class RegistryClient:
 
         # 2. Validate schema + smoke test
         profile_data = self.validator.validate(content)
+        content_model_id = self._profile_model_id(profile_data)
+        if content_model_id != model_id:
+            raise ValueError(
+                "Profile identity mismatch: "
+                f"registry metadata model_id={model_id!r} "
+                f"but profile content model_id={content_model_id!r}"
+            )
 
-        # 3. Write to profile dir (keep .bak for rollback)
-        # Path-traversal hardening (F23, WRITE side): the registry-supplied
-        # model_id must pass the shared allow-list + realpath containment before
-        # it builds a write path, so a malicious/compromised registry cannot
-        # write a profile outside the profiles root. safe_profile_write_path also
-        # ENCODES the id to a single top-level component, so a slash id
-        # (deepseek-ai/DeepSeek-V3.1) is cached as ONE top-level file
-        # (deepseek-ai%2FDeepSeek-V3.1.yaml) the router's top-level glob loads —
-        # never a subdir that would be written-but-never-loaded. Fail-closed:
-        # raise so the caller retains the current profile (same contract as other
-        # validation failures above).
-        path = safe_profile_write_path(self.profile_dir, model_id)
-        if path is None:
-            raise ValueError(f"Unsafe model_id rejected (path traversal): {model_id!r}")
-        if path.exists():
-            bak_path = Path(str(path) + ".bak")
-            bak_path.write_bytes(path.read_bytes())
+        content_version = self._profile_version(profile_data)
+        metadata_version = meta.get("version")
+        if metadata_version is not None and str(metadata_version) != content_version:
+            raise ValueError(
+                "Profile version mismatch: "
+                f"registry metadata version={metadata_version!r} "
+                f"but profile content version={content_version!r}"
+            )
 
-        # path.parent is always the (encoded, single-component) profiles root now;
-        # ensure it exists on the first pull.
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
+        # 3. Write to profile dir via a temp file in the same directory.
+        profile_dir, path, temp_path, bak_path = self._profile_paths(model_id)
+        profile_dir.mkdir(parents=True, exist_ok=True)
 
-        # 4. Atomic swap in router
-        await self.router.reload()
+        old_content = path.read_bytes() if path.exists() else None
+        bak_existed = bak_path.exists()
+        old_bak_content = bak_path.read_bytes() if bak_existed else None
 
-        logger.info("Applied profile update: %s v%s", model_id, meta.get("version", "?"))
+        try:
+            temp_path.write_bytes(content)
+            if old_content is not None:
+                bak_path.write_bytes(old_content)
+            temp_path.replace(path)
+
+            # 4. Atomic swap in router, then assert the exact profile became active.
+            await self.router.reload()
+            await self._assert_active_profile(model_id, content_version)
+        except Exception:
+            await self._restore_profile(
+                path=path,
+                bak_path=bak_path,
+                old_content=old_content,
+                bak_existed=bak_existed,
+                old_bak_content=old_bak_content,
+            )
+            raise
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning("Failed to remove temporary profile file: %s", temp_path)
+
+        logger.info("Applied profile update: %s v%s", model_id, content_version)
         return True
+
+    @staticmethod
+    def _validate_registry_profile_id(raw_model_id: object) -> str:
+        """Validate a registry-supplied profile id before it reaches the disk.
+
+        A registry profile id is a REGISTRY identifier, not a filesystem stem: real
+        ids legitimately contain ``:`` and ``/`` (ollama ``qwen3:8b``, HF
+        ``deepseek-ai/DeepSeek-V3.1``). Those are NOT rejected here — they are
+        percent-ENCODED into a single on-disk component by :meth:`_profile_paths`,
+        so the cache file stays a direct child of the profiles root (a subdir would
+        be written-but-never-loaded by the router's top-level glob).
+
+        What is still rejected, fail-closed and unchanged: a non-string id, an id
+        with leading/trailing whitespace, an empty/oversized id, and any id
+        carrying a ``..`` traversal token, a NUL byte or a backslash
+        (``proxy.pathsafe.is_safe_model_id``). Realpath containment in
+        :meth:`_profile_paths` is the backstop that actually confines the write.
+        """
+        if not isinstance(raw_model_id, str):
+            raise ValueError(
+                f"invalid registry profile id {raw_model_id!r}: must be a string"
+            )
+
+        model_id = raw_model_id.strip()
+        if model_id != raw_model_id or not model_id:
+            raise ValueError(
+                f"invalid registry profile id {raw_model_id!r}: must be non-empty "
+                "with no leading or trailing whitespace"
+            )
+        if model_id == "." or not is_safe_model_id(model_id):
+            raise ValueError(
+                f"invalid registry profile id {model_id!r}: unsafe model_id "
+                "rejected (path traversal)"
+            )
+        return model_id
+
+    @staticmethod
+    def _profile_model_id(profile_data: dict) -> str:
+        model_id = (
+            profile_data.get("model")
+            or profile_data.get("metadata", {}).get("model_id")
+            or ""
+        )
+        return str(model_id)
+
+    @staticmethod
+    def _profile_version(profile_data: dict) -> str:
+        version = (
+            profile_data.get("version")
+            or profile_data.get("metadata", {}).get("version")
+            or ""
+        )
+        return str(version)
+
+    def _profile_paths(self, model_id: str) -> tuple[Path, Path, Path, Path]:
+        """Derive the live/temp/backup cache paths for ``model_id``.
+
+        Path-traversal hardening (F23, WRITE side). Two layers, both fail-closed:
+
+        1. ``safe_profile_write_path`` — syntactic pre-filter, realpath containment
+           on the RAW id (an absolute or escaping id is REJECTED, never silently
+           encoded into a contained name), then percent-ENCODING to a SINGLE
+           top-level component so a slash id (``deepseek-ai/DeepSeek-V3.1``) is
+           cached as ONE top-level file (``deepseek-ai%2FDeepSeek-V3.1.yaml``) the
+           router's top-level ``*.yaml`` glob actually loads — never a subdir that
+           would be written-but-never-loaded.
+        2. the pre-existing ``relative_to`` + ``parent == profile_dir`` assertions
+           below, applied to the live, temp AND backup paths (unchanged).
+        """
+        profile_dir = Path(self.profile_dir).expanduser().resolve()
+        path = safe_profile_write_path(profile_dir, model_id)
+        if path is None:
+            raise ValueError(
+                f"invalid registry profile id {model_id!r}: unsafe model_id "
+                "rejected (path traversal)"
+            )
+        # The encoded stem carries no path separator, so temp/backup siblings
+        # derived from it stay single-component too.
+        stem = encode_model_id(model_id)
+        temp_path = (profile_dir / f".{stem}.{uuid4().hex}.tmp").resolve(strict=False)
+        bak_path = (profile_dir / f"{stem}.yaml.bak").resolve(strict=False)
+        for candidate in (path, temp_path, bak_path):
+            self._assert_path_under_profile_dir(candidate, profile_dir)
+            if candidate.parent != profile_dir:
+                raise ValueError(f"profile path escaped profile_dir: {candidate}")
+        return profile_dir, path, temp_path, bak_path
+
+    @staticmethod
+    def _assert_path_under_profile_dir(path: Path, profile_dir: Path) -> None:
+        try:
+            path.relative_to(profile_dir)
+        except ValueError:
+            raise ValueError(f"profile path escaped profile_dir: {path}")
+
+    async def _assert_active_profile(self, model_id: str, expected_version: str) -> None:
+        get_profile = getattr(self.router, "get", None)
+        if not callable(get_profile):
+            raise ValueError(
+                "Profile router does not expose get(); cannot verify applied profile"
+            )
+
+        active = get_profile(model_id)
+        if inspect.isawaitable(active):
+            active = await active
+        if not isinstance(active, dict):
+            raise ValueError(f"Applied profile {model_id!r} did not activate")
+
+        active_model_id = self._profile_model_id(active)
+        active_version = self._profile_version(active)
+        if active_model_id != model_id:
+            raise ValueError(
+                f"Applied profile {model_id!r} did not activate; "
+                f"router returned {active_model_id!r}"
+            )
+        if active_version != expected_version:
+            raise ValueError(
+                f"Applied profile {model_id!r} activated version {active_version!r}, "
+                f"expected {expected_version!r}"
+            )
+
+    async def _restore_profile(
+        self,
+        path: Path,
+        bak_path: Path,
+        old_content: bytes | None,
+        bak_existed: bool,
+        old_bak_content: bytes | None,
+    ) -> None:
+        try:
+            if old_content is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(old_content)
+
+            if bak_existed:
+                bak_path.write_bytes(old_bak_content or b"")
+            else:
+                bak_path.unlink(missing_ok=True)
+        except Exception as restore_error:
+            logger.error("Profile rollback disk restore failed: %s", restore_error)
+            return
+
+        try:
+            await self.router.reload()
+        except Exception as restore_error:
+            logger.error(
+                "Profile rollback reload failed after registry apply error: %s",
+                restore_error,
+            )
 
     async def start_scheduled_pull(self, interval_hours: int) -> None:
         """
