@@ -17,6 +17,8 @@ Passing criteria:
 import os
 import hashlib
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 import yaml
@@ -24,7 +26,7 @@ from fastapi.testclient import TestClient
 
 from registry_server.auth import generate_key
 from registry_server.main import app
-from registry_server.storage import ProfileStorage
+from registry_server.storage import ProfileStorage, _is_safe_model_id
 
 
 # ---------------------------------------------------------------------------
@@ -278,3 +280,191 @@ def test_profiles_since_invalid_format_returns_422(client):
         headers={"Authorization": f"Bearer {VALID_KEY}"},
     )
     assert resp.status_code == 422
+
+
+ESCAPING_MODEL_IDS = [
+    "../SECRET_outside",
+    "../../SECRET_outside",
+    "../../../../../../etc/passwd",
+    "/etc/passwd",
+    "/tmp/anything",
+    "..",
+    "..\\SECRET_outside",
+    "foo/../../SECRET_outside",
+    "..%2fSECRET_outside",
+    "a\x00b",
+    "",
+]
+
+CONTAINED_NONEXISTENT_MODEL_IDS = [
+    "%2e%2e%2fSECRET_outside",
+    ".hidden",
+    "-rf",
+    "sub/child",
+    ".",
+]
+
+
+@pytest.fixture()
+def storage_with_secret(tmp_path):
+    """Profile root with a real profile and planted out-of-root YAML secrets."""
+    root = tmp_path / "profiles"
+    root.mkdir()
+    (root / "claude-opus-4-8.yaml").write_text(
+        "model: claude-opus-4-8\nversion: '1.0'\n", encoding="utf-8"
+    )
+    (tmp_path / "SECRET_outside.yaml").write_text(
+        "api_key: SUPER_SECRET\n", encoding="utf-8"
+    )
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "creds.yaml").write_text("db_password: SUPER_SECRET\n", encoding="utf-8")
+    return ProfileStorage(profile_dir=str(root), base_url="http://x"), tmp_path, vault
+
+
+def test_storage_all_shipped_profile_ids_downloadable():
+    """Every model_id emitted by list_profiles can be downloaded by that id."""
+    profiles_dir = Path(__file__).resolve().parents[2] / "profiles"
+    storage = ProfileStorage(profile_dir=str(profiles_dir), base_url="http://x")
+    metas = storage.list_profiles()
+    assert metas, "expected shipped profiles to be present"
+    undownloadable = [
+        meta["model_id"]
+        for meta in metas
+        if storage.get_profile_bytes(meta["model_id"]) is None
+    ]
+    assert undownloadable == []
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "qwen3:8b",
+        "deepseek-ai/DeepSeek-V3.1",
+        "zoecohn4/Ouro:latest",
+        "claude-opus-4-8",
+        "gpt-5.2-codex",
+    ],
+)
+def test_is_safe_model_id_accepts_registry_ids(model_id):
+    """Registry ids may contain ':' or '/'; containment handles filesystem safety."""
+    assert _is_safe_model_id(model_id) is True
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    ["../x", "..", "a/../../b", "..%2fx", "x\x00y", "back\\slash", ""],
+)
+def test_is_safe_model_id_rejects_dangerous_tokens(model_id):
+    assert _is_safe_model_id(model_id) is False
+
+
+@pytest.mark.parametrize("model_id", ESCAPING_MODEL_IDS + CONTAINED_NONEXISTENT_MODEL_IDS)
+def test_storage_traversal_returns_none(storage_with_secret, model_id):
+    storage, _root, _vault = storage_with_secret
+    assert storage.get_profile_bytes(model_id) is None
+
+
+def test_storage_absolute_path_returns_none(storage_with_secret):
+    storage, _root, vault = storage_with_secret
+    assert storage.get_profile_bytes(str(vault / "creds")) is None
+
+
+def test_storage_symlink_escape_returns_none(storage_with_secret):
+    storage, tmp_path, _vault = storage_with_secret
+    secret = tmp_path / "SECRET_outside.yaml"
+    link = Path(storage.profile_dir) / "evillink.yaml"
+    link.symlink_to(secret)
+
+    assert _is_safe_model_id("evillink") is True
+    assert storage.get_profile_bytes("evillink") is None
+    listed = {profile["model_id"] for profile in storage.list_profiles()}
+    assert listed == {"claude-opus-4-8"}
+
+
+def test_storage_legit_still_served(storage_with_secret):
+    storage, _root, _vault = storage_with_secret
+    content = storage.get_profile_bytes("claude-opus-4-8")
+    assert content is not None
+    assert yaml.safe_load(content)["model"] == "claude-opus-4-8"
+
+
+@pytest.fixture()
+def client_ext_secret(monkeypatch, tmp_path):
+    root = tmp_path / "profiles"
+    root.mkdir()
+    (root / "claude-opus-4-8.yaml").write_text(
+        "model: claude-opus-4-8\nversion: '1.0'\n", encoding="utf-8"
+    )
+    (tmp_path / "SECRET_outside.yaml").write_text(
+        "api_key: SUPER_SECRET\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("ARKHEIA_REGISTRY_KEYS", VALID_KEY)
+    monkeypatch.setenv("ARKHEIA_REGISTRY_PROFILE_DIR", str(root))
+    monkeypatch.setenv("ARKHEIA_REGISTRY_BASE_URL", "http://testserver")
+
+    with TestClient(app) as c:
+        yield c
+
+
+@pytest.mark.parametrize("model_id", ESCAPING_MODEL_IDS + CONTAINED_NONEXISTENT_MODEL_IDS)
+def test_download_query_route_rejects_traversal(client_ext_secret, model_id):
+    resp = client_ext_secret.get(
+        "/profiles/download",
+        params={"model_id": model_id},
+        headers={"Authorization": f"Bearer {VALID_KEY}"},
+    )
+    assert resp.status_code != 200
+    assert "SUPER_SECRET" not in resp.text
+    assert "root:" not in resp.text
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "plain-model",
+        "model#frag",
+        "model?q=1",
+        "model%23",
+        "deepseek-ai/DeepSeek-V3.1",
+        "qwen3:8b",
+        "model+plus",
+        "model with space",
+    ],
+)
+def test_advertised_download_url_round_trips_query_ids(monkeypatch, tmp_path, model_id):
+    root = tmp_path / "profiles"
+    root.mkdir()
+    body = yaml.safe_dump(
+        {"metadata": {"model_id": model_id, "version": "1"}, "probe": model_id},
+        sort_keys=False,
+    )
+    expected = body.encode("utf-8")
+    (root / "probe.yaml").write_text(body, encoding="utf-8")
+
+    monkeypatch.setenv("ARKHEIA_REGISTRY_KEYS", VALID_KEY)
+    monkeypatch.setenv("ARKHEIA_REGISTRY_PROFILE_DIR", str(root))
+    monkeypatch.setenv("ARKHEIA_REGISTRY_BASE_URL", "http://testserver")
+
+    with TestClient(app) as c:
+        listing = c.get(
+            "/profiles",
+            headers={"Authorization": f"Bearer {VALID_KEY}"},
+        )
+        assert listing.status_code == 200
+        row = listing.json()["profiles"][0]
+        url = row["download_url"]
+
+        parts = urlsplit(url)
+        assert parts.path == "/profiles/download"
+        assert "%" not in parts.path
+        assert parts.fragment == ""
+        assert dict(parse_qsl(parts.query, keep_blank_values=True)) == {
+            "model_id": model_id
+        }
+
+        resp = c.get(url, headers={"Authorization": f"Bearer {VALID_KEY}"})
+
+    assert resp.status_code == 200, f"advertised {url!r} -> {resp.status_code}"
+    assert resp.content == expected
+    assert hashlib.sha256(resp.content).hexdigest() == row["checksum"]

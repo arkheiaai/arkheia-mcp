@@ -104,11 +104,14 @@ logger = logging.getLogger(__name__)
 EVENT_KEY_LOAD = "profile_key.load"
 #: D2 — the per-profile authentication decision.
 EVENT_PROFILE_AUTH = "profile.authentication"
+#: Admin-triggered rollback from a live profile to its .bak copy.
+EVENT_PROFILE_ROLLBACK = "profile.rollback"
 #: Decisions the journal could not hold. Its own bucket, never silence.
 EVENT_JOURNAL_OVERFLOW = "profile.decision_journal_overflow"
 
 EVENT_TYPES = frozenset({
-    EVENT_KEY_LOAD, EVENT_PROFILE_AUTH, EVENT_JOURNAL_OVERFLOW,
+    EVENT_KEY_LOAD, EVENT_PROFILE_AUTH, EVENT_PROFILE_ROLLBACK,
+    EVENT_JOURNAL_OVERFLOW,
 })
 
 #: Where the key came from. ``none`` is a real answer, not an absence.
@@ -161,6 +164,27 @@ PROFILE_AUTH_OUTCOMES = frozenset({
     PROFILE_AUTH_AUTHENTICATED, PROFILE_AUTH_FAILED, PROFILE_AUTH_MALFORMED,
     PROFILE_AUTH_NOT_YAML, PROFILE_AUTH_EMPTY, PROFILE_AUTH_LICENSE_REJECTED,
     PROFILE_AUTH_NO_MODEL_ID, PROFILE_AUTH_SKIPPED_NO_KEY,
+})
+
+#: What an admin profile rollback concluded.
+PROFILE_ROLLBACK_APPLIED = "rolled_back"
+PROFILE_ROLLBACK_SERVER_NOT_READY = "server_not_ready"
+PROFILE_ROLLBACK_INVALID_MODEL_ID = "invalid_model_id"
+PROFILE_ROLLBACK_NO_LIVE = "no_live_profile"
+PROFILE_ROLLBACK_NO_BACKUP = "no_backup"
+PROFILE_ROLLBACK_IO_ERROR = "io_error"
+PROFILE_ROLLBACK_LIVE_VALIDATION_FAILED = "live_validation_failed"
+PROFILE_ROLLBACK_BACKUP_VALIDATION_FAILED = "backup_validation_failed"
+PROFILE_ROLLBACK_MODEL_MISMATCH = "model_mismatch"
+PROFILE_ROLLBACK_RELOAD_FAILED = "reload_failed"
+
+PROFILE_ROLLBACK_OUTCOMES = frozenset({
+    PROFILE_ROLLBACK_APPLIED, PROFILE_ROLLBACK_SERVER_NOT_READY,
+    PROFILE_ROLLBACK_INVALID_MODEL_ID, PROFILE_ROLLBACK_NO_LIVE,
+    PROFILE_ROLLBACK_NO_BACKUP, PROFILE_ROLLBACK_IO_ERROR,
+    PROFILE_ROLLBACK_LIVE_VALIDATION_FAILED,
+    PROFILE_ROLLBACK_BACKUP_VALIDATION_FAILED,
+    PROFILE_ROLLBACK_MODEL_MISMATCH, PROFILE_ROLLBACK_RELOAD_FAILED,
 })
 
 #: risk_level carried by these rows. Deliberately NOT one of LOW/MEDIUM/HIGH/
@@ -421,7 +445,10 @@ async def emit(writer: Any, record: dict) -> str:
     # the record — see _label()/_uuid_label(). A record can carry a key-derived
     # field, so nothing read from it goes to a log sink unresolved.
     event_label = _label(out.get("event_type"), EVENT_TYPES)
-    outcome_label = _label(out.get("outcome"), KEY_LOAD_OUTCOMES | PROFILE_AUTH_OUTCOMES)
+    outcome_label = _label(
+        out.get("outcome"),
+        KEY_LOAD_OUTCOMES | PROFILE_AUTH_OUTCOMES | PROFILE_ROLLBACK_OUTCOMES,
+    )
     id_label = _uuid_label(out.get("decision_id"))
 
     if writer is None:
@@ -518,6 +545,42 @@ def build_profile_auth_record(
         "error_type": error_type,
         "skipped_profile_names": sorted(skipped_profile_names) if skipped_profile_names else None,
         "skipped_count": len(skipped_profile_names) if skipped_profile_names else 0,
+    }
+
+
+def build_profile_rollback_record(
+    *,
+    outcome: str,
+    model_id: str,
+    admin_email: Optional[str] = None,
+    live_model_id: Optional[str] = None,
+    backup_model_id: Optional[str] = None,
+    live_version: Optional[str] = None,
+    backup_version: Optional[str] = None,
+    error_type: Optional[str] = None,
+) -> dict:
+    """
+    D3 — the record for an admin-triggered profile rollback.
+
+    The rollback path rewrites a profile file and reloads routing. That is a
+    governed decision even when it refuses to proceed, because the refusal decides
+    which profile remains live. The record carries labels and versions only: no
+    profile YAML, no file paths, no backup bytes.
+    """
+    if outcome not in PROFILE_ROLLBACK_OUTCOMES:
+        raise ValueError(f"profile-rollback outcome {outcome!r} is outside the closed taxonomy")
+    return {
+        "event_type": EVENT_PROFILE_ROLLBACK,
+        "risk_level": RISK_LEVEL,
+        "source": "admin_profile_rollback",
+        "outcome": outcome,
+        "model_id": model_id,
+        "admin_email": admin_email,
+        "live_model_id": live_model_id,
+        "backup_model_id": backup_model_id,
+        "live_version": live_version,
+        "backup_version": backup_version,
+        "error_type": error_type,
     }
 
 
