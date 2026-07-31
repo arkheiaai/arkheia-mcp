@@ -31,7 +31,14 @@ def test_default_memory_db_path_is_posix_absolute_and_not_cwd_c_drive(
 
     db_path = Path(memory._db_path())
     assert db_path.is_absolute()
-    assert db_path == home / ".arkheia-mcp" / "data" / "memory.db"
+    # Merge note: this branch proposed ~/.arkheia-mcp/data/memory.db as the
+    # POSIX default. Master landed the same fix first with ~/.arkheia/mcp/
+    # memory.db and pins that exact location in
+    # tests/test_memory_db_path_floor.py::test_store_from_one_cwd_is_visible_
+    # from_another, so the literal is realigned to master's canonical default.
+    # Every defect assertion below is unchanged: absolute, real file, and no
+    # literal './C:' left in the cwd.
+    assert db_path == home / ".arkheia" / "mcp" / "memory.db"
     assert db_path.is_file()
     assert not (cwd / "C:").exists(), (
         "default MEMORY_DB_PATH must not create a literal ./C: directory on POSIX"

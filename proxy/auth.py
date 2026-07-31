@@ -240,8 +240,8 @@ async def require_auth(request: Request) -> str:
     """FastAPI dependency that enforces authentication.
 
     Checks the session cookie first, then the Authorization header.
-    Returns the authenticated email address.
-    Raises 401 if not authenticated.
+    Returns the authenticated, whitelisted admin email address.
+    Raises 401 if not authenticated and 403 if the token subject is not an admin.
     """
     # 1. Cookie
     token = request.cookies.get(COOKIE_NAME)
@@ -263,6 +263,13 @@ async def require_auth(request: Request) -> str:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session",
+        )
+
+    if not is_email_whitelisted(email):
+        logger.warning("Rejected authenticated session for non-whitelisted admin email")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
         )
 
     return email

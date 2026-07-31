@@ -1,208 +1,251 @@
 """
 FLOOR TIER -- MCP outbound HTTP custody.
 
-These checks are static and dependency-light: they discover every MCP/proxy
-egress site that can carry provider, proxy, or Arkheia API credentials and
-require those sites to use the shared no-ambient-proxy client factories.
+Production code may construct ``httpx.AsyncClient`` only in the shared egress
+factory. The floor scans from the repo root so adding, deleting, or moving a
+package root cannot silently move credentialed egress out of custody.
 """
 from __future__ import annotations
 
 import ast
+import importlib.util
+import sys
+import types
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-EGRESS_FACTORY_NAMES = {"egress_async_client", "hosted_key_egress_client"}
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+EGRESS_FACTORY = "arkheia_common/egress.py"
+KNOWN_EGRESS_SURFACE_FILES = frozenset({
+    EGRESS_FACTORY,
+    "arkheia_common/hosted_authority.py",
+    "mcp_server/proxy_client.py",
+    "mcp_server/tools/providers.py",
+    "proxy/crypto/profile_crypto.py",
+    "proxy/detection_adapter.py",
+    "proxy/endpoints/passthrough.py",
+    "proxy/middleware/interception.py",
+    "proxy/registry/client.py",
+})
+EXCLUDED_DIRS = frozenset({
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+})
 
 
-def _first_party_sources() -> list[Path]:
-    return sorted(
-        path
-        for root in (REPO_ROOT / "mcp_server", REPO_ROOT / "proxy")
-        for path in root.rglob("*.py")
-        if "tests" not in path.relative_to(REPO_ROOT).parts
+def _prod_python_files(root: Path = ROOT) -> tuple[Path, ...]:
+    files: list[Path] = []
+    for path in root.rglob("*.py"):
+        rel = path.relative_to(root)
+        if any(part in EXCLUDED_DIRS for part in rel.parts):
+            continue
+        if "tests" in rel.parts or path.name.startswith("test_") or path.name == "conftest.py":
+            continue
+        files.append(path)
+    return tuple(sorted(files))
+
+
+def _call_name(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = _call_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    return None
+
+
+def _raw_async_client_calls_from_tree(tree: ast.AST) -> list[int]:
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _call_name(node.func)
+        if name in {"AsyncClient", "httpx.AsyncClient"} or (
+            name and name.endswith(".AsyncClient")
+        ):
+            lines.append(node.lineno)
+    return lines
+
+
+def _raw_async_client_calls(path: Path) -> list[int]:
+    return _raw_async_client_calls_from_tree(
+        ast.parse(path.read_text(encoding="utf-8"), str(path))
     )
 
 
-def _httpx_bindings(tree: ast.AST) -> tuple[set[str], set[str]]:
-    module_aliases = {"httpx"}
-    async_client_names: set[str] = set()
+def _ambient_client_imports_from_tree(tree: ast.AST) -> list[str]:
+    bad: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                if alias.name == "httpx":
-                    module_aliases.add(alias.asname or alias.name)
-        elif isinstance(node, ast.ImportFrom) and node.module == "httpx":
-            for alias in node.names:
-                if alias.name == "AsyncClient":
-                    async_client_names.add(alias.asname or alias.name)
-    return module_aliases, async_client_names
-
-
-def _is_httpx_async_client(
-    call: ast.Call,
-    module_aliases: set[str],
-    async_client_names: set[str],
-) -> bool:
-    func = call.func
-    if isinstance(func, ast.Attribute):
-        return (
-            func.attr == "AsyncClient"
-            and isinstance(func.value, ast.Name)
-            and func.value.id in module_aliases
-        )
-    return isinstance(func, ast.Name) and func.id in async_client_names
-
-
-def _async_clients_without_trust_env_false(source: str) -> list[int]:
-    tree = ast.parse(source)
-    module_aliases, async_client_names = _httpx_bindings(tree)
-    bad = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or not _is_httpx_async_client(
-            node, module_aliases, async_client_names
-        ):
-            continue
-        explicit_false = any(
-            kw.arg == "trust_env"
-            and isinstance(kw.value, ast.Constant)
-            and kw.value.value is False
-            for kw in node.keywords
-        )
-        if not explicit_false:
-            bad.append(node.lineno)
-    return bad
-
-
-def _ambient_client_imports(source: str) -> list[str]:
-    tree = ast.parse(source)
-    bad = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name == "requests" or alias.name == "urllib.request":
+                if alias.name.split(".", 1)[0] == "requests":
+                    bad.append(f"{alias.name} at line {node.lineno}")
+                elif alias.name == "urllib.request" or alias.name.startswith(
+                    "urllib.request."
+                ):
                     bad.append(f"{alias.name} at line {node.lineno}")
         elif isinstance(node, ast.ImportFrom):
-            if node.module == "requests":
-                bad.append(f"from requests at line {node.lineno}")
-            if node.module == "urllib.request" and any(
-                alias.name == "urlopen" for alias in node.names
-            ):
-                bad.append(f"urllib.request.urlopen at line {node.lineno}")
+            module = node.module or ""
+            if module == "requests" or module.startswith("requests."):
+                bad.append(f"from {module} at line {node.lineno}")
+            elif module == "urllib" and any(alias.name == "request" for alias in node.names):
+                bad.append(f"from urllib import request at line {node.lineno}")
+            elif module == "urllib.request":
+                names = ", ".join(alias.name for alias in node.names)
+                bad.append(f"from urllib.request import {names} at line {node.lineno}")
     return bad
 
 
-def _egress_factory_bindings(tree: ast.AST) -> set[str]:
-    names = set(EGRESS_FACTORY_NAMES)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.ImportFrom):
-            continue
-        if node.module not in {"arkheia_common.egress", "arkheia_common.hosted_authority"}:
-            continue
-        for alias in node.names:
-            if alias.name in EGRESS_FACTORY_NAMES:
-                names.add(alias.asname or alias.name)
-    return names
-
-
-def _is_egress_factory_call(call: ast.Call, factory_names: set[str]) -> bool:
-    if isinstance(call.func, ast.Name):
-        return call.func.id in factory_names
-    return (
-        isinstance(call.func, ast.Attribute)
-        and call.func.attr in EGRESS_FACTORY_NAMES
+def _ambient_client_imports(path: Path) -> list[str]:
+    return _ambient_client_imports_from_tree(
+        ast.parse(path.read_text(encoding="utf-8"), str(path))
     )
 
 
-def _egress_factory_call_lines(source: str) -> list[int]:
-    tree = ast.parse(source)
-    factory_names = _egress_factory_bindings(tree)
-    return [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and _is_egress_factory_call(node, factory_names)
-    ]
+class _FakeHttpx(types.ModuleType):
+    class AsyncClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
 
 
-def test_all_mcp_outbound_http_uses_shared_no_proxy_custody_factories():
-    factory_sites = []
-    violations = []
-    source_files = _first_party_sources()
-    assert source_files, "no mcp_server source files discovered"
-    for path in source_files:
-        source = path.read_text(encoding="utf-8")
-        for line in _egress_factory_call_lines(source):
-            factory_sites.append(f"{path.relative_to(REPO_ROOT)}:{line}")
-        for line in _async_clients_without_trust_env_false(source):
-            violations.append(f"{path.relative_to(REPO_ROOT)}:{line}")
+def _load_egress_with_fake_httpx():
+    module_path = ROOT / EGRESS_FACTORY
+    spec = importlib.util.spec_from_file_location("_floor_egress_factory", module_path)
+    assert spec and spec.loader, "could not load egress factory module"
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get("httpx")
+    sys.modules["httpx"] = _FakeHttpx("httpx")
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is None:
+            sys.modules.pop("httpx", None)
+        else:
+            sys.modules["httpx"] = previous
+    return module
 
-    assert len(factory_sites) >= 12, (
-        f"discovered only {len(factory_sites)} shared egress factory sites; "
-        "the census likely missed a target module or directory."
+
+def test_prod_census_is_repo_rooted_and_covers_known_egress_surfaces():
+    rels = {path.relative_to(ROOT).as_posix() for path in _prod_python_files()}
+
+    missing = sorted(KNOWN_EGRESS_SURFACE_FILES - rels)
+    assert not missing, (
+        "egress custody census missed known runtime files; root-wide discovery is "
+        "broken or an owned egress surface moved without updating this floor:\n  "
+        + "\n  ".join(missing)
     )
-    assert violations == [], (
-        "MCP/proxy outbound HTTP must use arkheia_common egress factories so "
-        "HTTP_PROXY and HTTPS_PROXY cannot capture provider/proxy credentials "
-        "by default; raw clients found at:\n"
-        + "\n".join(f"  {v}" for v in violations)
+
+
+def test_raw_async_clients_are_confined_to_the_shared_egress_factory():
+    calls = {
+        path.relative_to(ROOT).as_posix(): _raw_async_client_calls(path)
+        for path in _prod_python_files()
+    }
+    calls = {rel: lines for rel, lines in calls.items() if lines}
+
+    assert calls, "raw AsyncClient census found nothing; the floor is not observing code"
+    assert set(calls) == {EGRESS_FACTORY}, (
+        "raw httpx.AsyncClient construction must stay inside the shared egress "
+        "factory so credentialed provider/proxy calls cannot opt back into "
+        "ambient HTTP(S)_PROXY custody:\n  "
+        + "\n  ".join(f"{rel}: {lines}" for rel, lines in sorted(calls.items()))
     )
+    assert len(calls[EGRESS_FACTORY]) == 1
 
 
 def test_no_unowned_requests_or_urlopen_clients_enter_custody_surface():
-    violations = []
-    for path in _first_party_sources():
-        for marker in _ambient_client_imports(path.read_text(encoding="utf-8")):
-            violations.append(f"{path.relative_to(REPO_ROOT)}: {marker}")
+    violations = {
+        path.relative_to(ROOT).as_posix(): _ambient_client_imports(path)
+        for path in _prod_python_files()
+    }
+    violations = {rel: markers for rel, markers in violations.items() if markers}
 
-    assert violations == [], (
+    assert violations == {}, (
         "MCP/proxy credentialed egress must not introduce ambient-proxy-capable "
-        "requests or urllib.request.urlopen clients outside the owned custody helper:\n"
-        + "\n".join(f"  {v}" for v in violations)
+        "requests or urllib.request clients outside the owned custody helper:\n  "
+        + "\n  ".join(
+            f"{rel}: {', '.join(markers)}"
+            for rel, markers in sorted(violations.items())
+        )
     )
 
 
-def test_negative_self_test_prefix_client_is_flagged():
-    pre_fix = "async with httpx.AsyncClient(timeout=10.0) as client:\n    pass\n"
-    assert _async_clients_without_trust_env_false(pre_fix) == [1]
+def test_shared_egress_factory_forces_trust_env_false_and_rejects_true():
+    egress = _load_egress_with_fake_httpx()
+
+    client = egress.egress_async_client(timeout=12.5)
+    assert client.kwargs["trust_env"] is False
+    assert client.kwargs["timeout"] == 12.5
+
+    with pytest.raises(ValueError, match="trust_env"):
+        egress.egress_async_client(timeout=12.5, trust_env=True)
 
 
-def test_negative_self_test_httpx_aliases_are_flagged():
-    assert _async_clients_without_trust_env_false(
-        "import httpx as hx\nasync with hx.AsyncClient(timeout=10.0) as client:\n    pass\n"
-    ) == [2]
-    assert _async_clients_without_trust_env_false(
-        "from httpx import AsyncClient\nasync with AsyncClient(timeout=10.0) as client:\n    pass\n"
-    ) == [2]
+def test_raw_async_client_census_negative_controls_cover_common_bypass_shapes():
+    modules = {
+        "direct.py": "import httpx\nhttpx.AsyncClient()\n",
+        "aliased_module.py": "import httpx as hx\nhx.AsyncClient(timeout=1)\n",
+        "bare_import.py": "from httpx import AsyncClient\nAsyncClient(timeout=1)\n",
+        "nested.py": (
+            "import httpx\n"
+            "def factory():\n"
+            "    return httpx.AsyncClient(timeout=1, trust_env=False)\n"
+        ),
+        "async_with.py": (
+            "import httpx\n"
+            "async def send():\n"
+            "    async with httpx.AsyncClient(timeout=1) as client:\n"
+            "        return client\n"
+        ),
+        "module_chain.py": (
+            "import vendor.httpx as owned\n"
+            "client = owned.AsyncClient(timeout=1)\n"
+        ),
+    }
+
+    observed = {
+        rel: _raw_async_client_calls_from_tree(ast.parse(source, rel))
+        for rel, source in modules.items()
+    }
+
+    assert observed == {
+        "direct.py": [2],
+        "aliased_module.py": [2],
+        "bare_import.py": [2],
+        "nested.py": [3],
+        "async_with.py": [3],
+        "module_chain.py": [2],
+    }
 
 
-def test_negative_self_test_ambient_requests_and_urlopen_are_flagged():
+def test_ambient_client_import_negative_controls_cover_common_bypass_shapes():
     bad = "\n".join([
         "import requests",
+        "import requests.sessions",
+        "from requests import Session",
+        "from requests.sessions import Session",
         "import urllib.request as ureq",
+        "from urllib import request",
         "from urllib.request import urlopen",
+        "from urllib.request import urlretrieve",
     ])
-    assert _ambient_client_imports(bad) == [
+
+    assert _ambient_client_imports_from_tree(ast.parse(bad, "bad.py")) == [
         "requests at line 1",
-        "urllib.request at line 2",
-        "urllib.request.urlopen at line 3",
+        "requests.sessions at line 2",
+        "from requests at line 3",
+        "from requests.sessions at line 4",
+        "urllib.request at line 5",
+        "from urllib import request at line 6",
+        "from urllib.request import urlopen at line 7",
+        "from urllib.request import urlretrieve at line 8",
     ]
-
-
-def test_control_client_with_trust_env_false_is_not_flagged():
-    good = (
-        "async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:\n"
-        "    pass\n"
-    )
-    assert _async_clients_without_trust_env_false(good) == []
-
-
-def test_control_shared_factory_sites_are_counted():
-    source = "\n".join([
-        "from arkheia_common.egress import egress_async_client as owned_client",
-        "from arkheia_common.hosted_authority import hosted_key_egress_client",
-        "async def send():",
-        "    async with owned_client(timeout=1.0):",
-        "        pass",
-        "    async with hosted_key_egress_client(timeout=1.0):",
-        "        pass",
-    ])
-    assert _egress_factory_call_lines(source) == [4, 6]

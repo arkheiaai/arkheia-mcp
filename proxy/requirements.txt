@@ -11,8 +11,9 @@ pydantic-settings>=2.0.0
 pyyaml>=6.0
 aiofiles>=23.0
 
-# Loads .env before proxy.* imports (proxy/main.py) -- imported unconditionally
-# at the entrypoint, but was ABSENT here (latent deploy crash on every startup).
+# `pydantic-settings` can bring in dotenv support. Production modules must not
+# call `load_dotenv` or search cwd `.env` files; this direct pin keeps the CVE
+# floor explicit rather than leaving it to a transitive dependency.
 python-dotenv>=1.2.2  # CVE-2026-28684 (symlink attack in set_key/unset_key) fix
 
 # AES-256-GCM encrypt/decrypt for profiles (proxy/crypto/profile_crypto.py) --
