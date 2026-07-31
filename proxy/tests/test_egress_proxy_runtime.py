@@ -344,7 +344,15 @@ async def test_credentialed_production_egress_ignores_ambient_proxy_capture(
         profile_dir=str(tmp_path),
         router=SimpleNamespace(reload=lambda: None),
     )
-    assert await registry.pull() == {"updated": [], "skipped": [], "errors": []}
+    # Exact-equality pin retained; this branch adds a `receipts` key to the pull
+    # summary, so the expected value grows a key rather than the assertion being
+    # loosened to a subset check.
+    assert await registry.pull() == {
+        "updated": [],
+        "skipped": [],
+        "errors": [],
+        "receipts": [],
+    }
 
     import proxy.detection_adapter as detection_adapter
 
