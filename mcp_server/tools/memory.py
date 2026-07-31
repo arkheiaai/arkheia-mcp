@@ -48,10 +48,29 @@ _NUL = "\x00"
 # DB setup
 # ---------------------------------------------------------------------------
 
+def _reject_windows_drive_path_on_posix(path: str) -> None:
+    """Name the Windows-drive case before the generic absolute-path refusal.
+
+    'C:/arkheia-mcp/data/memory.db' is *relative* to POSIX pathlib, so the
+    absolute-path check below already refuses it -- but it refuses it with a
+    message that reads as "you passed a relative path", which is exactly the
+    confusion that let the old hard-coded default create a literal './C:'
+    directory. Merged in from the branch side of this PR: the check is a
+    strictly-narrower, better-named refusal in front of the master check, and
+    it does not relax it.
+    """
+    if os.name != "nt" and len(path) >= 2 and path[1] == ":" and path[0].isalpha():
+        raise ValueError(
+            "MEMORY_DB_PATH uses a Windows drive path on this POSIX host: "
+            f"{path!r}"
+        )
+
+
 def _db_path() -> str:
     raw = os.environ.get("MEMORY_DB_PATH") or DEFAULT_DB_PATH
     if _NUL in raw:
         raise ValueError("MEMORY_DB_PATH must not contain NUL bytes")
+    _reject_windows_drive_path_on_posix(raw)
     path = Path(raw).expanduser()
     if not path.is_absolute():
         raise ValueError(
