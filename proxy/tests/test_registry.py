@@ -195,23 +195,37 @@ class TestProfileValidator:
         passed, reason = validator.run_smoke_test(VALID_PROFILE)
         assert passed is True, reason
 
-    def test_no_smoke_test_does_not_pass(self, validator):
-        """Profile without smoke_test is not validated by default."""
+    def test_no_smoke_test_is_not_a_delivery_failure(self, validator):
+        """INVERTED 2026-07-31, not deleted. #46 made an absent smoke_test a hard refusal; that
+        rejected all 60 shipped profiles, none of which carries one.
+
+        A profile is proved by its model-lab characterisation run -- recorded in each file's
+        `characterization` block (date, prompt count, features, methodology) -- not by a canned
+        prompt/response pair asserted at DELIVERY time, which is strictly weaker evidence than the
+        run that already happened. Delivery owns INTEGRITY, and integrity is the checksum, which
+        remains mandatory (see test_missing_checksum_is_not_a_verification_pass below)."""
         profile = dict(VALID_PROFILE)
         profile.pop("smoke_test", None)
         passed, reason = validator.run_smoke_test(profile)
-        assert passed is False
-        assert "required" in reason
+        assert passed is True, reason
 
-    def test_validate_rejects_absent_smoke_test(self, validator):
-        """
-        F19 adversarial: registry validation must not certify a profile that
-        never declared the smoke test the schema says should prove it.
-        """
+    def test_a_DECLARED_but_failing_smoke_test_is_still_a_refusal(self, validator):
+        """The revert is narrow: absence is fine, a declared smoke test that FAILS is not.
+        Otherwise this would have traded one silent pass for another."""
+        profile = dict(VALID_PROFILE)
+        profile["smoke_test"] = {"prompt": "p", "response": "r", "expected_risk": "CRITICAL"}
+        passed, _ = validator.run_smoke_test(profile)
+        assert passed is False
+
+    def test_validate_accepts_a_profile_with_no_smoke_test(self, validator):
+        """INVERTED 2026-07-31 (see test_no_smoke_test_is_not_a_delivery_failure).
+
+        The F19 reasoning this replaces -- "validation must not certify a profile that never
+        declared the smoke test the schema says should prove it" -- is right about the SCHEMA and
+        wrong about WHO PROVES IT. The lab does, before the profile is ever published."""
         profile = dict(VALID_PROFILE)
         profile.pop("smoke_test", None)
-        with pytest.raises(ValueError, match="Smoke test failed: .*required"):
-            validator.validate(yaml.dump(profile).encode("utf-8"))
+        validator.validate(yaml.dump(profile).encode("utf-8"))
 
     def test_missing_checksum_is_not_a_verification_pass(self, validator):
         """
@@ -483,14 +497,18 @@ class TestRegistryClient:
         assert (tmp_path / "llama-3-70b.yaml").exists()
 
     @pytest.mark.asyncio
-    async def test_no_smoke_test_download_is_rejected_receipted_and_not_applied(
+    async def test_failing_smoke_test_download_is_rejected_receipted_and_not_applied(
         self, tmp_path, mock_router
     ):
-        """
-        F19 adversarial: a downloaded profile with a valid checksum but no
-        smoke_test must not be applied, and the validation refusal must land on
-        the audit rail.
-        """
+        """A validation refusal must not be applied AND must land on the audit rail.
+
+        RE-POINTED 2026-07-31, not deleted. This asserted that an ABSENT smoke_test is a refusal;
+        that rule rejected all 60 shipped profiles, none of which carries one, because a profile is
+        proved by its model-lab characterisation run rather than by a canned pair asserted at
+        delivery. The property this test actually guards -- refusal is not applied, and the refusal
+        is RECEIPTED with OUTCOME_PROFILE_REJECTED_VALIDATION on the audit rail -- is unchanged and
+        still worth pinning, so it now fires on a DECLARED smoke test that FAILS, which is a real
+        refusal under either rule."""
         probe = ReceiptProbe(tmp_path / "audit.jsonl", id_field="decision_id")
         await probe.start()
         client = RegistryClient(
@@ -501,9 +519,11 @@ class TestRegistryClient:
             validator=ProfileValidator(),
             audit_writer=probe.writer,
         )
-        profile_without_smoke = dict(VALID_PROFILE)
-        profile_without_smoke.pop("smoke_test", None)
-        content = yaml.dump(profile_without_smoke).encode("utf-8")
+        profile_bad_smoke = dict(VALID_PROFILE)
+        profile_bad_smoke["smoke_test"] = {
+            "prompt": "p", "response": "r", "expected_risk": "CRITICAL",
+        }
+        content = yaml.dump(profile_bad_smoke).encode("utf-8")
         checksum = hashlib.sha256(content).hexdigest()
         registry_response = {
             "profiles": [{

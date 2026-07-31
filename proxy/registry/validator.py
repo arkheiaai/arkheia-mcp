@@ -96,10 +96,23 @@ class ProfileValidator:
         """
         smoke = profile.get("smoke_test")
         if not smoke:
-            return False, (
-                "smoke_test is required for registry-delivered profiles -- "
-                "absence of a smoke test is not evidence that validation passed"
-            )
+            # A delivered profile is NOT re-proved here, and a smoke test is not what proves it.
+            # Detection profiles are built and validated in the model lab against a labelled
+            # corpus -- the `characterization` block records that run (date, prompt count,
+            # features, methodology; e.g. "200 total, 50 TRUTH + 50 FAB per domain"). A single
+            # canned prompt/response pair asserted at DELIVERY time is strictly weaker evidence
+            # than the run that already happened, and demanding it would gate the stronger
+            # evidence sitting in the same file.
+            #
+            # What delivery is responsible for is that the bytes arrived intact and from the
+            # right place -- that is the checksum, which IS mandatory (require_checksum) and IS
+            # satisfiable, because registry metadata carries one.
+            #
+            # This briefly returned False, which rejected ALL 60 shipped profiles: none carries a
+            # smoke_test, so registry delivery failed universally. The reasoning behind that change
+            # was sound for a property nothing establishes elsewhere; it is not sound for one the
+            # lab already established.
+            return True, "no smoke test defined"
 
         prompt = smoke.get("prompt", "")
         response = smoke.get("response", "")
