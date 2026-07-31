@@ -6,6 +6,14 @@ name: Floor Invariants
 # of this repo. Collection is restricted to test_*_floor.py / test_floor_*.py.
 
 on:
+  # merge_group ADDED 2026-07-30 — `master` has `strict: true` (branches must be up to date before
+  # merging), so every merge voids every other open PR and the green count cannot advance. A GitHub
+  # merge queue fixes that, but the queue dispatches CI on the `merge_group` event against a
+  # `gh-readonly-queue/master/**` branch, and `push` below is filtered to `branches: [master]`. Without
+  # this trigger the REQUIRED context would never post on a queued PR: it would sit at
+  # "Expected — waiting" until GitHub's status-check timeout evicted it.
+  merge_group:
+    branches: [master]
   push:
     branches: [master]
   pull_request:
@@ -21,6 +29,12 @@ jobs:
     steps:
       # Pin: actions/checkout v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          # Aikido LOW: a checkout that keeps the token in .git/config leaves it
+          # readable by every later step, including the real `npm pack` this job
+          # runs, which executes repo-authored build scripts. This job never
+          # pushes, so the credential has no purpose here.
+          persist-credentials: false
 
       - name: Set up Python
         # Pin: actions/setup-python v5.3.0
@@ -32,6 +46,27 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pytest
+
+      # `tests/test_packed_artifact_floor.py` produces the REAL published artifact
+      # (`npm pack`) and reads the tarball, because the defect it was earned by was
+      # invisible to every check that read the build script instead. That needs npm.
+      # Pinned rather than relying on whatever the runner image happens to ship, and
+      # >=18 to match npm-wrapper/package.json `engines.node`. If npm is missing the
+      # floor FAILS rather than skips — a skipped artifact check is indistinguishable
+      # from a passing one.
+      - name: Set up Node (the packed-artifact floor runs a real `npm pack`)
+        # Pin: actions/setup-node v4.1.0
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af  # v4.1.0
+        with:
+          node-version: '20'
+
+      - name: Confirm the artifact toolchain is present
+        # Names the units of work before the floor runs. A floor tier that lost npm
+        # would otherwise fail with a confusing import-time error rather than a
+        # legible "the toolchain is missing" line.
+        run: |
+          node --version
+          npm --version
 
       - name: Run floor invariants
         # Override python_files so ONLY floor tests are collected; a bare pytest

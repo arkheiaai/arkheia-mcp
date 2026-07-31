@@ -26,11 +26,20 @@ Transport: stdio (default — Claude Code / Claude Desktop)
 
 import os
 import logging
+from typing import Any
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from mcp_server.proxy_client import ProxyClient
-from mcp_server.tool_registry import check, PolicyViolation
+from mcp_server.tool_registry import (
+    GateDecision,
+    REGISTRY,
+    assert_registry_covers,
+    check,
+    check_receipted,
+    PolicyViolation,
+)
 from mcp_server.tools.providers import call_grok, call_gemini, call_ollama, call_together
 from mcp_server.tools.memory import store_entity, retrieve_entities, store_relation
 
@@ -41,12 +50,67 @@ ARKHEIA_PROXY_URL = os.environ.get("ARKHEIA_PROXY_URL", "http://localhost:8098")
 ARKHEIA_HOSTED_URL = os.environ.get("ARKHEIA_HOSTED_URL", "https://arkheia-proxy-production.up.railway.app")
 ARKHEIA_API_KEY = os.environ.get("ARKHEIA_API_KEY")
 
-mcp   = FastMCP("arkheia-trust")
+TOOL_GATE_RECEIPT_META_KEY = "arkheia_tool_gate_receipt"
+
+
+def _attach_tool_gate_receipt(result: Any, decision: GateDecision) -> Any:
+    receipt = {
+        "receipt_id": decision.receipt_id,
+        "receipt_status": decision.receipt_status,
+    }
+    if isinstance(result, dict):
+        return {**result, TOOL_GATE_RECEIPT_META_KEY: receipt}
+
+    for item in result if isinstance(result, (list, tuple)) else ():
+        meta = getattr(item, "meta", None)
+        if meta is None:
+            meta = {}
+        elif isinstance(meta, dict):
+            meta = dict(meta)
+        else:
+            continue
+        meta[TOOL_GATE_RECEIPT_META_KEY] = receipt
+        setattr(item, "meta", meta)
+    return result
+
+
+class GatedFastMCP(FastMCP):
+    """FastMCP with the policy gate at the orchestrator dispatch boundary."""
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]):
+        decision = await check_receipted(
+            name,
+            call_site="dispatch",
+            argument_keys=list(arguments) if isinstance(arguments, dict) else None,
+        )
+        result = await super().call_tool(name, arguments)
+        return _attach_tool_gate_receipt(result, decision)
+
+    async def list_tools_ungated(self):
+        return await FastMCP.list_tools(self)
+
+    async def list_tools(self):
+        advertised = await FastMCP.list_tools(self)
+        governed = [tool for tool in advertised if tool.name in REGISTRY]
+        ungoverned = sorted(tool.name for tool in advertised if tool.name not in REGISTRY)
+        if ungoverned:
+            logger.error(
+                "withholding ungoverned MCP tools from tools/list: %s",
+                ungoverned,
+            )
+        return governed
+
+
+mcp   = GatedFastMCP("arkheia-trust")
 proxy = ProxyClient(
     base_url=ARKHEIA_PROXY_URL,
     hosted_url=ARKHEIA_HOSTED_URL,
     api_key=ARKHEIA_API_KEY,
 )
+
+
+def _present_metadata(**metadata: Any) -> dict[str, Any]:
+    return {key: value for key, value in metadata.items() if value is not None}
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +124,14 @@ proxy = ProxyClient(
     idempotentHint=True,
     openWorldHint=False,
 ))
-async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
+async def arkheia_verify(
+    prompt: str,
+    response: str,
+    model: str,
+    usage: dict[str, Any] | None = None,
+    output_tokens: Any = None,
+    is_function_call: Any = None,
+) -> dict:
     """
     Verify whether an AI response shows signs of fabrication.
 
@@ -72,6 +143,9 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
         response: The model's response to evaluate
         model:    The model identifier (e.g. 'gpt-4o', 'llama-3-70b',
                   'claude-sonnet-4-6')
+        usage: Optional provider usage metadata.
+        output_tokens: Optional provider output token count.
+        is_function_call: Optional provider tool/function-call flag.
 
     Returns:
         risk_level:          LOW / MEDIUM / HIGH / UNKNOWN
@@ -87,7 +161,16 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
         LOW     -- surface normally
     """
     check("arkheia_verify")
-    result = await proxy.verify(prompt=prompt, response=response, model_id=model)
+    result = await proxy.verify(
+        prompt=prompt,
+        response=response,
+        model_id=model,
+        **_present_metadata(
+            usage=usage,
+            output_tokens=output_tokens,
+            is_function_call=is_function_call,
+        ),
+    )
     logger.debug(
         "arkheia_verify: model=%s risk=%s confidence=%.2f",
         model,
@@ -171,6 +254,7 @@ async def run_grok(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        **_present_metadata(usage=provider_result.get("usage")),
     )
     logger.info(
         "run_grok: model=%s risk=%s confidence=%.2f",
@@ -217,6 +301,7 @@ async def run_gemini(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        **_present_metadata(usage=provider_result.get("usage")),
     )
     logger.info(
         "run_gemini: model=%s risk=%s confidence=%.2f",
@@ -266,6 +351,7 @@ async def run_ollama(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        **_present_metadata(output_tokens=provider_result.get("eval_count")),
     )
     logger.info(
         "run_ollama: model=%s risk=%s confidence=%.2f",
@@ -317,6 +403,7 @@ async def run_together(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        **_present_metadata(usage=provider_result.get("usage")),
     )
     logger.info(
         "run_together: model=%s risk=%s confidence=%.2f",
@@ -383,7 +470,6 @@ async def memory_retrieve(query: str, entity_type: str | None = None, limit: int
         total:     Total count of matches (before limit)
     """
     check("memory_retrieve")
-    limit = min(limit, 50)
     return await retrieve_entities(query=query, entity_type=entity_type, limit=limit)
 
 
@@ -416,5 +502,30 @@ async def memory_relate(from_entity: str, relation_type: str, to_entity: str) ->
     return await store_relation(from_entity=from_entity, relation_type=relation_type, to_entity=to_entity)
 
 
+def startup_policy_selfcheck() -> None:
+    """
+    Fail closed at startup unless every advertised tool is covered by REGISTRY.
+
+    REGISTRY is a *shadow* allowlist: FastMCP's decorator registry is what decides
+    which names are advertised via ``tools/list`` and which ``call_tool`` will
+    dispatch — an unknown name is refused by FastMCP's own ``ToolError`` and never
+    reaches ``check()``. So a tool decorated here but missing from REGISTRY is
+    reachable by every orchestrator with no policy covering it. Refusing to start
+    is the only fail-closed answer.
+
+    ``tests/test_tool_gate_floor.py`` INV-2 catches the same drift statically in
+    CI; this is the runtime backstop, and it is the check that still holds once
+    REGISTRY is loaded from a signed/remote policy store (the documented
+    enterprise upgrade hook), where a static parse cannot see the contents.
+    """
+    advertised = [t.name for t in anyio.run(mcp.list_tools_ungated)]
+    assert_registry_covers(advertised)
+    logger.info(
+        "tool-registry policy self-check OK: %d advertised tools, all covered",
+        len(advertised),
+    )
+
+
 if __name__ == "__main__":
+    startup_policy_selfcheck()
     mcp.run()
