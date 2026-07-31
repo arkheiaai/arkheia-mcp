@@ -326,13 +326,34 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
             "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
             "action_taken": action,
         },
-        risk_level=response.risk_level if response.risk_level in ("LOW", "MEDIUM", "HIGH", "CRITICAL") else "LOW",
+        risk_level=_envelope_risk_band(response.risk_level),
     )
 
     # Surface the governance decision to the caller: policy `action` (mirrors action_taken in
     # the audit) + profile-earned `gate_action`. Keeps HTTP 200; blocking-at-transport stays the
     # job of proxy/middleware/interception.py. Consumers hard-block only when gate_action=="block".
     return _signal(http_response, response, action, getattr(result, "gate_action", "advise"))
+
+
+_ENVELOPE_RISK_BANDS = ("LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN")
+
+
+def _envelope_risk_band(risk_level: str) -> str:
+    """The band recorded on the governance envelope.
+
+    Anything unrecognised becomes UNKNOWN, never LOW. The previous expression was
+    ``risk_level if risk_level in ("LOW","MEDIUM","HIGH","CRITICAL") else "LOW"``, and UNKNOWN is
+    not in that tuple -- so every unassessable verdict was recorded as the QUIETEST possible
+    result. An unscreened response and a measured-clean one became the same governance event,
+    which is precisely the confident-verdict-from-nothing failure detection exists to catch.
+
+    UNKNOWN is not LOW. A response that was never scored has not been found safe; it has not been
+    looked at. _determine_action already treats UNKNOWN as its own band (settings.detection
+    .unknown_action), so the rest of the endpoint already knows the distinction -- only the
+    envelope was collapsing it.
+    """
+    band = (risk_level or "").strip().upper()
+    return band if band in _ENVELOPE_RISK_BANDS else "UNKNOWN"
 
 
 def _determine_action(risk_level: str, settings) -> str:
