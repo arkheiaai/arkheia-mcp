@@ -23,12 +23,28 @@ _REQUIRED_SPEC_FORMAT = {"metadata", "thresholds", "features"}
 
 class ProfileValidator:
 
+    def require_checksum(self, expected_sha256: str) -> str:
+        """
+        Return a normalised SHA-256 checksum or raise ValueError.
+
+        Registry-delivered profiles must be content-addressed. Treating an
+        absent checksum as "nothing to verify, so pass" is the same vacuous
+        success shape as an empty manifest or absent smoke test.
+        """
+        if not isinstance(expected_sha256, str) or not expected_sha256.strip():
+            raise ValueError("checksum is required for registry-delivered profiles")
+        normalised = expected_sha256.strip().lower()
+        if len(normalised) != 64 or any(c not in "0123456789abcdef" for c in normalised):
+            raise ValueError("checksum must be a 64-character SHA-256 hex digest")
+        return normalised
+
     def verify_checksum(self, content: bytes, expected_sha256: str) -> bool:
         """Return True if sha256(content) matches expected."""
+        expected = self.require_checksum(expected_sha256)
         actual = hashlib.sha256(content).hexdigest()
-        if actual != expected_sha256:
+        if actual != expected:
             logger.error(
-                "Checksum mismatch: expected=%s actual=%s", expected_sha256, actual
+                "Checksum mismatch: expected=%s actual=%s", expected, actual
             )
             return False
         return True
@@ -80,8 +96,10 @@ class ProfileValidator:
         """
         smoke = profile.get("smoke_test")
         if not smoke:
-            # No smoke test defined -- pass by default
-            return True, "no smoke test defined"
+            return False, (
+                "smoke_test is required for registry-delivered profiles -- "
+                "absence of a smoke test is not evidence that validation passed"
+            )
 
         prompt = smoke.get("prompt", "")
         response = smoke.get("response", "")

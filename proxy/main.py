@@ -420,6 +420,7 @@ async def lifespan(app: FastAPI):
         profile_dir=settings.detection.profile_dir,
         router=profile_router,
         validator=ProfileValidator(),
+        audit_writer=audit_writer,
     )
 
     # Store on app state -- endpoints access via request.app.state
