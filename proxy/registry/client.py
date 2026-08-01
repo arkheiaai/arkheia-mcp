@@ -22,6 +22,7 @@ import httpx
 from pydantic import SecretStr
 
 from arkheia_common.egress import egress_async_client
+from proxy.pathsafe import encode_model_id, is_safe_model_id, safe_profile_write_path
 from proxy.registry.receipts import (
     OUTCOME_PROFILE_APPLIED,
     OUTCOME_PROFILE_APPLY_FAILED,
@@ -313,7 +314,21 @@ class RegistryClient:
 
     @staticmethod
     def _validate_registry_profile_id(raw_model_id: object) -> str:
-        """Registry profile IDs are used as filenames and must be one segment."""
+        """Validate a registry-supplied profile id before it reaches the disk.
+
+        A registry profile id is a REGISTRY identifier, not a filesystem stem: real
+        ids legitimately contain ``:`` and ``/`` (ollama ``qwen3:8b``, HF
+        ``deepseek-ai/DeepSeek-V3.1``). Those are NOT rejected here — they are
+        percent-ENCODED into a single on-disk component by :meth:`_profile_paths`,
+        so the cache file stays a direct child of the profiles root (a subdir would
+        be written-but-never-loaded by the router's top-level glob).
+
+        What is still rejected, fail-closed and unchanged: a non-string id, an id
+        with leading/trailing whitespace, an empty/oversized id, and any id
+        carrying a ``..`` traversal token, a NUL byte or a backslash
+        (``proxy.pathsafe.is_safe_model_id``). Realpath containment in
+        :meth:`_profile_paths` is the backstop that actually confines the write.
+        """
         if not isinstance(raw_model_id, str):
             raise ValueError(
                 f"invalid registry profile id {raw_model_id!r}: must be a string"
@@ -325,14 +340,10 @@ class RegistryClient:
                 f"invalid registry profile id {raw_model_id!r}: must be non-empty "
                 "with no leading or trailing whitespace"
             )
-        if (
-            model_id in {".", ".."}
-            or "/" in model_id
-            or "\\" in model_id
-            or "\x00" in model_id
-        ):
+        if model_id == "." or not is_safe_model_id(model_id):
             raise ValueError(
-                f"invalid registry profile id {model_id!r}: must be a single filename segment"
+                f"invalid registry profile id {model_id!r}: unsafe model_id "
+                "rejected (path traversal)"
             )
         return model_id
 
@@ -355,10 +366,32 @@ class RegistryClient:
         return str(version)
 
     def _profile_paths(self, model_id: str) -> tuple[Path, Path, Path, Path]:
+        """Derive the live/temp/backup cache paths for ``model_id``.
+
+        Path-traversal hardening (F23, WRITE side). Two layers, both fail-closed:
+
+        1. ``safe_profile_write_path`` — syntactic pre-filter, realpath containment
+           on the RAW id (an absolute or escaping id is REJECTED, never silently
+           encoded into a contained name), then percent-ENCODING to a SINGLE
+           top-level component so a slash id (``deepseek-ai/DeepSeek-V3.1``) is
+           cached as ONE top-level file (``deepseek-ai%2FDeepSeek-V3.1.yaml``) the
+           router's top-level ``*.yaml`` glob actually loads — never a subdir that
+           would be written-but-never-loaded.
+        2. the pre-existing ``relative_to`` + ``parent == profile_dir`` assertions
+           below, applied to the live, temp AND backup paths (unchanged).
+        """
         profile_dir = Path(self.profile_dir).expanduser().resolve()
-        path = (profile_dir / f"{model_id}.yaml").resolve(strict=False)
-        temp_path = (profile_dir / f".{model_id}.{uuid4().hex}.tmp").resolve(strict=False)
-        bak_path = (profile_dir / f"{model_id}.yaml.bak").resolve(strict=False)
+        path = safe_profile_write_path(profile_dir, model_id)
+        if path is None:
+            raise ValueError(
+                f"invalid registry profile id {model_id!r}: unsafe model_id "
+                "rejected (path traversal)"
+            )
+        # The encoded stem carries no path separator, so temp/backup siblings
+        # derived from it stay single-component too.
+        stem = encode_model_id(model_id)
+        temp_path = (profile_dir / f".{stem}.{uuid4().hex}.tmp").resolve(strict=False)
+        bak_path = (profile_dir / f"{stem}.yaml.bak").resolve(strict=False)
         for candidate in (path, temp_path, bak_path):
             self._assert_path_under_profile_dir(candidate, profile_dir)
             if candidate.parent != profile_dir:
