@@ -21,6 +21,7 @@ both. The client-side sibling (`RegistryClient._download_and_apply`) is covered 
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import hashlib
 import pytest
 import yaml
 from pydantic import SecretStr
@@ -244,7 +245,10 @@ async def test_client_download_rejects_traversal_model_id(tmp_path):
     client, router = _make_client(root)
     meta = {
         "model_id": "../pwned",
-        "checksum": "",  # skip checksum gate; exercise the write-path guard
+        # A REAL checksum, deliberately: this test's subject is the TRAVERSAL guard, so the refusal
+        # must come from the path check and NOT from the checksum gate. An empty checksum would make
+        # it pass for the wrong reason under master's mandatory-checksum rule.
+        "checksum": hashlib.sha256(_valid_profile_yaml("../pwned")).hexdigest(),
         "download_url": "https://registry.arkheia.ai/profiles/x.yaml",
         "version": "2.0",
     }
@@ -278,7 +282,8 @@ async def test_client_download_caches_separator_id_top_level(tmp_path, mid):
     client, router = _make_client(root, active_profile=_valid_profile(mid))
     meta = {
         "model_id": mid,
-        "checksum": "",  # skip checksum gate
+        # A REAL checksum — see the note above; master requires one.
+        "checksum": hashlib.sha256(_valid_profile_yaml(mid)).hexdigest(),
         "download_url": f"https://registry.arkheia.ai/profiles/{mid}/download",
         "version": "2.0",
     }

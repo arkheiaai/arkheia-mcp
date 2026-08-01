@@ -804,6 +804,9 @@ async def manual_registry_pull(request: Request, _: str = Depends(require_auth))
         updated = list(summary.get("updated") or [])
         skipped = list(summary.get("skipped") or [])
         errors = list(summary.get("errors") or [])
+        # Receipts are the caller-visible proof of the pull decision. Returning
+        # only a summary leaves every refusal unreachable from the HTTP surface.
+        receipts = list(summary.get("receipts") or [])
 
         if errors:
             status = "partial" if updated or skipped else "error"
@@ -818,11 +821,13 @@ async def manual_registry_pull(request: Request, _: str = Depends(require_auth))
             "updated": updated,
             "skipped": skipped,
             "errors": errors,
+            "receipts": receipts,
             "summary": {
                 **summary,
                 "updated": updated,
                 "skipped": skipped,
                 "errors": errors,
+                "receipts": receipts,
             },
         }
     except Exception as e:
