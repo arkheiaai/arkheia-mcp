@@ -37,7 +37,7 @@ from pathlib import Path
 
 import pytest
 
-from mcp_server import receipts
+from mcp_server import memory_receipts as receipts
 from mcp_server.tools import memory as memory_mod
 from mcp_server.tools.memory import retrieve_entities, store_entity, store_relation
 from proxy.audit.writer import _compute_hash

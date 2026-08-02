@@ -23,12 +23,28 @@ _REQUIRED_SPEC_FORMAT = {"metadata", "thresholds", "features"}
 
 class ProfileValidator:
 
+    def require_checksum(self, expected_sha256: str) -> str:
+        """
+        Return a normalised SHA-256 checksum or raise ValueError.
+
+        Registry-delivered profiles must be content-addressed. Treating an
+        absent checksum as "nothing to verify, so pass" is the same vacuous
+        success shape as an empty manifest or absent smoke test.
+        """
+        if not isinstance(expected_sha256, str) or not expected_sha256.strip():
+            raise ValueError("checksum is required for registry-delivered profiles")
+        normalised = expected_sha256.strip().lower()
+        if len(normalised) != 64 or any(c not in "0123456789abcdef" for c in normalised):
+            raise ValueError("checksum must be a 64-character SHA-256 hex digest")
+        return normalised
+
     def verify_checksum(self, content: bytes, expected_sha256: str) -> bool:
         """Return True if sha256(content) matches expected."""
+        expected = self.require_checksum(expected_sha256)
         actual = hashlib.sha256(content).hexdigest()
-        if actual != expected_sha256:
+        if actual != expected:
             logger.error(
-                "Checksum mismatch: expected=%s actual=%s", expected_sha256, actual
+                "Checksum mismatch: expected=%s actual=%s", expected, actual
             )
             return False
         return True
@@ -80,7 +96,22 @@ class ProfileValidator:
         """
         smoke = profile.get("smoke_test")
         if not smoke:
-            # No smoke test defined -- pass by default
+            # A delivered profile is NOT re-proved here, and a smoke test is not what proves it.
+            # Detection profiles are built and validated in the model lab against a labelled
+            # corpus -- the `characterization` block records that run (date, prompt count,
+            # features, methodology; e.g. "200 total, 50 TRUTH + 50 FAB per domain"). A single
+            # canned prompt/response pair asserted at DELIVERY time is strictly weaker evidence
+            # than the run that already happened, and demanding it would gate the stronger
+            # evidence sitting in the same file.
+            #
+            # What delivery is responsible for is that the bytes arrived intact and from the
+            # right place -- that is the checksum, which IS mandatory (require_checksum) and IS
+            # satisfiable, because registry metadata carries one.
+            #
+            # This briefly returned False, which rejected ALL 60 shipped profiles: none carries a
+            # smoke_test, so registry delivery failed universally. The reasoning behind that change
+            # was sound for a property nothing establishes elsewhere; it is not sound for one the
+            # lab already established.
             return True, "no smoke test defined"
 
         prompt = smoke.get("prompt", "")

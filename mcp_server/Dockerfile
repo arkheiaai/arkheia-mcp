@@ -10,6 +10,7 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
+COPY arkheia_common/ /app/arkheia_common/
 COPY mcp_server/ /app/mcp_server/
 # mcp_server.receipts drives the SAME audit rail as the proxy and the registry
 # (proxy.audit.writer: JSONL + secrets redaction + tamper-evident hash chain)

@@ -35,7 +35,18 @@
   ],
   "_not_required_but_triggers_on_master": {
     "smoke-test.yml / MCP server end-to-end smoke test": "runs pytest tests/test_smoke_e2e.py and DOES trigger on push+pull_request to master since 6c3ec67, but it is NOT in required_checks. It therefore credits NOTHING in INV-3. This is the entry that made Codex's probe pass.",
-    "security_scan.yml / bandit, dependency-audit, secrets-check": "also triggers on master, also not required, also credits nothing."
+    "security_scan.yml / bandit, dependency-audit, secrets-check": "also triggers on master, also not required, also credits nothing as direct branch-protection contexts.",
+    "unit-tests.yml / unit-tests": "IS in required_checks and now aggregates the blocking Bandit, pip-audit, and TruffleHog scans so those scanner failures can block under an existing required context even though the standalone security_scan.yml job contexts are not required."
+  },
+  "_security_scan_required_context_limitation": {
+    "direct_security_scan_contexts_not_required": [
+      "Bandit static analysis",
+      "Dependency vulnerability audit",
+      "Check for committed secrets"
+    ],
+    "existing_required_context_used_for_aggregate": "unit-tests",
+    "why_not_changed_in_code": "GitHub branch protection is a mutable remote setting, not a repository file. Making Bandit static analysis, Dependency vulnerability audit, or Check for committed secrets directly required needs the refresh_command-class GitHub API operation with admin-scoped credentials; this PR cannot safely or honestly claim to change that setting offline.",
+    "offline_floor_boundary": "The floor can prove the fixture is fresh and coherent with workflow job names, and can prove that unit-tests contains the aggregate scanner steps. It still assumes this fixture matches live branch protection until a human or privileged drift job refreshes it."
   },
   "_caveats_not_waived": {
     "enforce_admins_false": "An admin can push straight to master and bypass all five contexts. INV-3/INV-5 certify what gates an ORDINARY PR; they do not certify that master cannot be written past.",

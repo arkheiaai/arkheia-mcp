@@ -315,9 +315,9 @@ MUTANTS = [
      ["test_content_round_trips_byte_identical"]),
 
     ("M25-redactor-imported-into-memory", MEM,
-     'from pathlib import Path\n\nfrom mcp_server import receipts\n\nlogger = logging.getLogger',
+     'from pathlib import Path\n\nfrom mcp_server import memory_receipts as receipts\n\nlogger = logging.getLogger',
      'from pathlib import Path\nfrom proxy.audit.redactor import redact  # noqa: F401\n\n'
-     'from mcp_server import receipts\n\nlogger = logging.getLogger',
+     'from mcp_server import memory_receipts as receipts\n\nlogger = logging.getLogger',
      "the ACCESS-CONTROL ruling is quietly reversed by importing the audit redactor. The pin "
      "exists so that decision cannot drift without a test going red and the ledger being revisited.",
      ["test_no_redactor_is_imported_by_the_memory_module"]),

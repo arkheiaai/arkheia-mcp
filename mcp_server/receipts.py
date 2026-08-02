@@ -1,138 +1,49 @@
-"""
-Decision receipts for MCP server tools — same rail as the proxy and the registry.
-
-WHY
----
-`memory_store` and `memory_relate` MUTATE persistent state that outlives the session,
-and `memory_retrieve` reads it back; every one of them is gated by the tool registry,
-so each is a governed action. Before this module none of them left any record at all.
-The knowledge graph could be added to, related across, and read from, and afterwards
-there was no way to answer "what changed, when, and which graph" from anything but the
-graph itself — which is the artifact under question. A store that can only be audited
-by reading its own current contents has no evidence; it has state.
-
-The refusals matter as much as the writes, for the same reason they do on the registry
-auth gate. `memory_relate` refuses an unknown endpoint and refuses an ambiguous one —
-those refusals ARE the control that stops dangling and mis-attributed edges. A refusal
-nobody can see later is indistinguishable from a call that was never made, so "the
-agent's memory is wrong" and "the agent tried to record it and was refused" look the
-same from outside.
-
-ONE RAIL, NOT A SECOND ONE
---------------------------
-Records go through `proxy.audit.writer.AuditWriter`: JSONL, secrets redaction, and a
-tamper-evident hash chain (seq / prev_hash / this_hash). That is the same rail the proxy
-uses for detection events and `registry_server.receipts` uses for auth decisions. Both
-files it needs are stdlib-only, which is why this import does not drag a dependency into
-the floor tier or into the npm bundle.
-
-THREE DELIBERATE DIVERGENCES FROM `registry_server/receipts.py`
----------------------------------------------------------------
-1. **The log path is supplied by the caller, not defaulted here.** The registry defaults
-   to a package-relative path — the repo root. For this flow that is the exact defect
-   this branch just fixed: under the npm install the package tree is inside a shared,
-   world-readable `node_modules`, and the memory store's local confidentiality boundary
-   includes the filesystem. Caller-supplied fields are also redacted before sqlite writes.
-   A receipt about a private graph must be at least as protected as the graph, so
-   `mcp_server.tools.memory` resolves the path next to the DB, inside the same 0700
-   directory, and chmods the file 0600. Path policy lives with the store that owns it;
-   this module stays a rail.
-
-2. **The write is drained before `emit` returns.** The registry is a long-lived HTTP
-   server whose lifespan flushes the queue on shutdown, so fire-and-forget is safe there.
-   This is a stdio server that an MCP client starts and kills at will, and the mutation
-   has already been committed to sqlite by the time we get here. A receipt still sitting
-   in an in-memory queue when the process is killed is the "writing a record is not the
-   same as the record landing" failure with the state change already made permanent. So
-   the writer is started, written, and stopped (which drains) per emit, and the record is
-   then READ BACK BY ITS ID off disk before this returns success. `emit` reports what it
-   observed, not what it attempted. (Durability is process-level — the writer closes the
-   file handle, so the bytes survive a kill; it does not fsync, so it does not survive a
-   power cut. Stated rather than implied.)
-
-3. **No module-level writer singleton.** There is no lifespan hook to start or stop one,
-   and a cached `AuditWriter` binds a queue and a background task to one event loop —
-   which is wrong in a stdio process that may outlive several, and wrong in a test suite
-   that builds a fresh loop per test. Starting per emit also re-reads the chain tail each
-   time, so the chain continues correctly across processes sharing one graph.
-
-FAILURE POSTURE
----------------
-Fail-open on the RECEIPT, never on the DECISION; and never fail-silent. `emit` catches
-everything and returns False. It cannot turn a stored entity into an error, and it cannot
-turn a refusal into a 500 — the standing ruling is that a receipt failure must not block
-the halt. But an unwritten receipt is logged at error level AND surfaced to the caller
-(`receipt: "unrecorded"`), because "no record" and "no call" must not look the same to
-the operator either.
-
-WHAT IS RECORDED, AND WHAT IS NOT
----------------------------------
-Identifiers, structure and counts — never authored free text. The record carries the
-store's own primary keys (entity_id, rel_id), the caller-supplied *structural* fields
-(entity_type, relation_type), counts, and a `sha256:`-prefixed 12-hex fingerprint of each
-piece of free text (entity name, observation content, search query).
-
-Two reasons, both load-bearing:
-
-* The graph write path already applies `proxy.audit.redactor.redact` to caller-supplied
-  fields before sqlite writes. The receipt must not re-copy the pre-redaction text into
-  an audit log with a different lifecycle. Fingerprints are immune to the redactor by
-  construction and tie the receipt to the stored value without making the receipt a second
-  content store.
-* A receipt log that contained the observations would be a second copy of the knowledge
-  graph, with a different retention (`AuditWriter.purge_old_records`) and a different
-  lifecycle from the DB it describes. The receipt's job is to evidence the change, not to
-  duplicate it.
-
-Attribution does not suffer: the record carries the entity_id/rel_id, which is the exact
-primary key of the affected row. Someone with legitimate access to the graph can resolve
-it to a name; someone without learns nothing. That is strictly stronger than logging the
-name, which is neither unique (two entities may share one) nor resolvable to a row.
-"""
+"""Durable decision receipts for MCP tool-gate decisions."""
 
 from __future__ import annotations
 
-import hashlib
+import asyncio
 import json
 import logging
+import os
+import tempfile
+import threading
 import uuid
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
-from proxy.audit.writer import AuditWriter
+from proxy.audit.redactor import redact, redact_in_credential_context
+from proxy.audit.writer import _compute_hash
 
 logger = logging.getLogger(__name__)
 
-#: The two decisions any governed tool call ends in. A refusal is a decision.
-DECISION_RECORDED = "recorded"
-DECISION_REFUSED = "refused"
+DECISION_ALLOWED = "allowed"
+DECISION_DENIED = "denied"
+DECISION_UNREPRESENTABLE = "unrepresentable"
 
-_DECISIONS = (DECISION_RECORDED, DECISION_REFUSED)
-
-#: Surfaced to the caller alongside the receipt id, so an unwritten receipt is visible in
-#: the tool result and not only in a log line the agent never sees.
 STATUS_RECORDED = "recorded"
 STATUS_UNRECORDED = "unrecorded"
 
+_DECISIONS = {DECISION_ALLOWED, DECISION_DENIED, DECISION_UNREPRESENTABLE}
+_RECEIPT_FILE_MODE = 0o600
+_LOCKS_GUARD = threading.Lock()
+_PATH_LOCKS: dict[tuple[str, int], asyncio.Lock] = {}
+_CONTEXTUAL_RECEIPT_FIELDS = frozenset(
+    {"tool", "argument_keys", "argument_values", "call_site"}
+)
+_DEFAULT_RECEIPT_DIR = Path("~/.arkheia/mcp").expanduser()
+
+try:  # pragma: no cover - exercised on POSIX CI, imported conditionally for Windows.
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback keeps the in-process lock.
+    fcntl = None  # type: ignore[assignment]
+
 
 def new_receipt_id() -> str:
-    """A fresh id per governed call, derived from nothing about its inputs."""
+    """Return a fresh opaque id for one gate decision."""
     return uuid.uuid4().hex
-
-
-def fingerprint(text: Optional[str]) -> Optional[str]:
-    """
-    Stable, non-reversible identifier for a piece of free text.
-
-    Enough to correlate ("these six receipts all touched the same entity name", "this
-    observation was stored twice"), not enough to recover the text. `None` in, `None`
-    out, so an absent optional field is recorded as absent rather than as the
-    fingerprint of the empty string — those are different facts.
-    """
-    if text is None:
-        return None
-    return "sha256:" + hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()[:12]
 
 
 def build_record(
@@ -140,19 +51,14 @@ def build_record(
     receipt_id: str,
     tool: str,
     decision: str,
+    event_type: str,
     **fields: Any,
-) -> dict:
-    """
-    The decision record. Pure — no I/O — so it can be asserted on directly.
-
-    `decision` is validated rather than accepted: a typo'd decision would silently create
-    a class of record that no query for "refused" would ever find, which is the receipt
-    equivalent of an unregistered event type.
-    """
+) -> dict[str, Any]:
+    """Build one audit record for a tool-gate decision."""
     if decision not in _DECISIONS:
-        raise ValueError(f"unknown decision {decision!r}; expected one of {_DECISIONS}")
+        raise ValueError(f"unknown tool-gate decision {decision!r}")
     return {
-        "event_type": f"mcp.{tool}",
+        "event_type": event_type,
         "receipt_id": receipt_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "tool": tool,
@@ -161,12 +67,12 @@ def build_record(
     }
 
 
-def read_rows(log_path: str | Path) -> list[dict]:
-    """Every record on disk, parsed, in write order. Missing file reads as no rows."""
-    path = Path(log_path)
+def read_rows(log_path: str | Path) -> list[dict[str, Any]]:
+    """Read every parseable JSONL row from the receipt log."""
+    path = _validate_receipt_log_path(log_path)
     if not path.exists():
         return []
-    rows: list[dict] = []
+    rows: list[dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
         if not line:
@@ -178,55 +84,188 @@ def read_rows(log_path: str | Path) -> list[dict]:
     return rows
 
 
-def find_receipt(log_path: str | Path, receipt_id: str) -> Optional[dict]:
-    """
-    The row carrying `receipt_id`, or None.
-
-    Looking a record up BY THE ID THE CALLER WAS HANDED is what makes the evidence
-    attributable: a read-back that returns "the last row" would pass even when the id in
-    the tool result has nothing to do with the row that landed.
-    """
+def find_receipt(log_path: str | Path, receipt_id: str) -> dict[str, Any] | None:
+    """Return the row carrying receipt_id, or None if it did not land."""
     for row in read_rows(log_path):
         if row.get("receipt_id") == receipt_id:
             return row
     return None
 
 
-async def emit(log_path: str | Path, record: dict) -> bool:
-    """
-    Write one decision record and confirm it landed. Returns True only if it did.
-
-    NEVER RAISES. The caller is past the point of decision — the entity is stored, or the
-    refusal is about to be raised — and a receipt failure may not change that outcome.
-    NEVER SILENT: every failure path logs at error level naming the receipt id, so an
-    unrecorded decision is visible to an operator reading logs and not just absent from a
-    file nobody is watching.
-    """
-    receipt_id = record.get("receipt_id")
-    writer = AuditWriter(str(log_path))
+def _path_inside(path: Path, base: Path) -> bool:
     try:
-        await writer.start()
+        path.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_receipt_log_path(log_path: str | Path) -> Path:
+    """Return a confined absolute path for MCP tool-gate receipt logs."""
+    raw = os.fspath(log_path)
+    if "\0" in raw:
+        raise ValueError("receipt log path contains a NUL byte")
+    path = Path(log_path).expanduser()
+    if not path.is_absolute():
+        raise ValueError("receipt log path must be absolute")
+    resolved = path.resolve(strict=False)
+    if resolved.name.startswith("."):
+        raise ValueError("receipt log filename must not be hidden")
+    if resolved.suffix != ".jsonl":
+        raise ValueError("receipt log path must end in .jsonl")
+    allowed_roots = (
+        _DEFAULT_RECEIPT_DIR.resolve(strict=False),
+        Path(tempfile.gettempdir()).resolve(strict=False),
+        Path("/private/tmp").resolve(strict=False),
+    )
+    if not any(_path_inside(resolved, root) for root in allowed_roots):
+        raise ValueError(
+            "receipt log path must be under ~/.arkheia/mcp or the OS temp directory"
+        )
+    return resolved
+
+
+def validate_receipt_log_path(log_path: str | Path) -> Path:
+    """Public wrapper for callers that need to fail before emitting."""
+    return _validate_receipt_log_path(log_path)
+
+
+def _load_receipt_chain_state(log_path: Path) -> tuple[str, int]:
+    """Recover the last parseable receipt row without assuming rows fit in a small tail."""
+    log_path = _validate_receipt_log_path(log_path)
+    genesis = ("0" * 64, 0)
+    if not log_path.exists():
+        return genesis
+    last: dict[str, Any] | None = None
+    try:
+        for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                last = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+    except OSError as exc:
+        logger.warning(
+            "MCP receipt rail: could not recover chain state from %s: %s",
+            log_path,
+            exc,
+        )
+        return genesis
+    if last is None:
+        return genesis
+    return str(last.get("this_hash") or "0" * 64), int(last.get("seq") or 0)
+
+
+def _path_lock(path: Path) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    key = (str(_validate_receipt_log_path(path)), id(loop))
+    with _LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _PATH_LOCKS[key] = lock
+        return lock
+
+
+@contextmanager
+def _exclusive_file_lock(path: Path):
+    lock_path = path.with_name(f".{path.name}.lock")
+    with open(lock_path, "a", encoding="utf-8") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
-            await writer.write(record)
+            yield
         finally:
-            # stop() drains the queue (bounded wait) and cancels the loop task. Run it in
-            # a finally so a failed write cannot leak the background task.
-            await writer.stop()
-    except Exception as exc:  # pragma: no cover — defensive; the paths above are guarded
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _ensure_receipt_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        os.chmod(path, _RECEIPT_FILE_MODE)
+        return
+    with suppress(FileExistsError):
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, _RECEIPT_FILE_MODE)
+        os.close(fd)
+
+
+def _redact_receipt_record(record: dict[str, Any]) -> dict[str, Any]:
+    clean = redact(record)
+    for field in _CONTEXTUAL_RECEIPT_FIELDS:
+        if field in clean:
+            clean[field] = redact_in_credential_context(clean[field])
+    return clean
+
+
+def log_safe_value(value: Any) -> Any:
+    """Return a receipt subject value safe for diagnostic logging."""
+    return redact_in_credential_context(value)
+
+
+def _append_record_and_confirm(path: Path, record: dict[str, Any], receipt_id: object) -> bool:
+    path = _validate_receipt_log_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _exclusive_file_lock(path):
+        _ensure_receipt_file(path)
+        last_hash, last_seq = _load_receipt_chain_state(path)
+        clean = _redact_receipt_record(record)
+        clean["seq"] = last_seq + 1
+        clean["prev_hash"] = last_hash
+        clean["this_hash"] = _compute_hash(clean, last_hash)
+
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(clean) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+
+        return bool(receipt_id) and find_receipt(path, str(receipt_id)) is not None
+
+
+async def emit(log_path: str | Path, record: dict[str, Any]) -> bool:
+    """
+    Write one receipt and confirm it landed. Never raises.
+
+    Tool-gate receipts are synchronous evidence for a policy decision. Each write
+    therefore allocates seq/hash state inside a per-log critical section and then
+    reads back by receipt_id before reporting ``recorded``.
+    """
+    path = _validate_receipt_log_path(log_path)
+    receipt_id = record.get("receipt_id")
+    lock = _path_lock(path)
+    try:
+        async with lock:
+            ok = await asyncio.to_thread(
+                _append_record_and_confirm, path, record, receipt_id
+            )
+    except Exception as exc:  # pragma: no cover - defensive
         logger.error(
-            "MCP receipt FAILED to write (%s): tool=%s decision=%s receipt_id=%s "
-            "— this decision is UNRECORDED",
-            exc, record.get("tool"), record.get("decision"), receipt_id,
+            "MCP receipt failed to write (%s): tool=%s decision=%s receipt_id=%s",
+            exc,
+            log_safe_value(record.get("tool")),
+            record.get("decision"),
+            receipt_id,
+            exc_info=True,
         )
         return False
 
-    # The writer's loop swallows its own write errors and marks the queue item done, so a
-    # drained queue does NOT prove a row landed. Read it back by id, which does.
-    if find_receipt(log_path, receipt_id) is None:
+    if not ok:
         logger.error(
-            "MCP receipt was enqueued but is NOT on disk at %s: tool=%s decision=%s "
-            "receipt_id=%s — this decision is UNRECORDED",
-            log_path, record.get("tool"), record.get("decision"), receipt_id,
+            "MCP receipt write was not confirmed on disk: tool=%s decision=%s "
+            "receipt_id=%s path=%s",
+            log_safe_value(record.get("tool")),
+            record.get("decision"),
+            receipt_id,
+            path,
         )
         return False
     return True
+
+
+def default_tool_gate_log_path() -> Path:
+    """Resolve the default tool-gate receipt path."""
+    raw = os.environ.get("ARKHEIA_TOOL_GATE_RECEIPT_LOG")
+    path = Path(raw).expanduser() if raw else _DEFAULT_RECEIPT_DIR / "tool-gate-receipts.jsonl"
+    return _validate_receipt_log_path(path)

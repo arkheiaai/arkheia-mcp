@@ -10,6 +10,9 @@ Schema:
   relations    — rel_id, from_entity, relation_type, to_entity, created_at
 
 DB path: MEMORY_DB_PATH env var, default ~/.arkheia/mcp/memory.db (per-user, absolute).
+The resolved path must be absolute; a relative graph path silently forks memory
+by the server's current working directory. The DB directory is asserted 0700 and
+the DB file 0600 on every open because this store persists caller-authored text.
 
 WHY THE DEFAULT MUST BE ABSOLUTE AND USER-PRIVATE — do not "simplify" this back.
 The previous default was the literal string "C:/arkheia-mcp/data/memory.db". On Windows that is
@@ -45,7 +48,7 @@ not with redaction, which would not help there either.
 RECEIPTS — every call leaves a durable record, beside the graph it describes.
 All three tools are governed actions: two of them MUTATE state that outlives the session, and the
 third discloses it. Each one now emits a decision receipt through the estate's audit rail
-(`mcp_server.receipts` -> `proxy.audit.writer`: JSONL, redaction, tamper-evident hash chain), and
+(`mcp_server.memory_receipts` -> `proxy.audit.writer`: JSONL, redaction, tamper-evident hash chain), and
 returns the `receipt_id` to the caller so the tool result, the log row and the DB row form one
 chain. The REFUSALS are receipted too — an unknown or ambiguous relation endpoint is the control
 that stops dangling and mis-attributed edges, and a refusal nobody can see later is
@@ -65,11 +68,14 @@ from __future__ import annotations
 import logging
 import os
 import sqlite3
+import stat
 import uuid
 from datetime import datetime
 from pathlib import Path
 
-from mcp_server import receipts
+# The MEMORY receipt rail. mcp_server/receipts.py is the TOOL-GATE rail (different
+# decision vocabulary, and it confines receipt paths); see memory_receipts.py.
+from mcp_server import memory_receipts as receipts
 from proxy.audit.redactor import redact
 
 logger = logging.getLogger(__name__)
@@ -79,6 +85,26 @@ _DIR_MODE = 0o700
 _FILE_MODE = 0o600
 
 DEFAULT_DB_PATH = "~/.arkheia/mcp/memory.db"
+MAX_RETRIEVE_LIMIT = 50
+_NUL = "\x00"
+
+
+def _reject_windows_drive_path_on_posix(path: str) -> None:
+    """Name the Windows-drive case before the generic absolute-path refusal.
+
+    'C:/arkheia-mcp/data/memory.db' is *relative* to POSIX pathlib, so the
+    absolute-path check below already refuses it -- but it refuses it with a
+    message that reads as "you passed a relative path", which is exactly the
+    confusion that let the old hard-coded default create a literal './C:'
+    directory. Merged in from the branch side of this PR: the check is a
+    strictly-narrower, better-named refusal in front of the master check, and
+    it does not relax it.
+    """
+    if os.name != "nt" and len(path) >= 2 and path[1] == ":" and path[0].isalpha():
+        raise ValueError(
+            "MEMORY_DB_PATH uses a Windows drive path on this POSIX host: "
+            f"{path!r}"
+        )
 
 
 def _db_path() -> str:
@@ -89,9 +115,13 @@ def _db_path() -> str:
     function never returns one. `~` is expanded; a relative MEMORY_DB_PATH is
     REFUSED LOUDLY rather than silently resolved against whatever cwd the server
     happened to be spawned in — a silent fork is the defect being fixed, and a
-    caller who supplies one would inherit it.
+    caller who supplies one would inherit it. A NUL byte and a Windows drive path
+    are refused first, by their own names, so neither is reported as "relative".
     """
     raw = os.environ.get("MEMORY_DB_PATH") or DEFAULT_DB_PATH
+    if _NUL in raw:
+        raise ValueError("MEMORY_DB_PATH must not contain NUL bytes")
+    _reject_windows_drive_path_on_posix(raw)
     path = Path(raw).expanduser()
     if not path.is_absolute():
         raise ValueError(
@@ -221,9 +251,16 @@ def _enforce_mode(target: Path, mode: int) -> None:
     control for unscrubbed observation text, so a control that could not be applied
     has to be visible. Silently passing here would be exactly the "guard wired but
     switched off" defect — the operator would believe in a boundary that was never set.
+
+    `mode` is a CEILING, not an assignment: the new mode is `current & mode`, so this
+    only ever REMOVES bits. A bare `chmod(target, mode)` would widen an already-tighter
+    path — 0o400 becoming 0o700 — which is a privilege-granting side effect from a
+    function whose entire job is to take privilege away. Pinned by
+    tests/test_memory_db_path_floor.py.
     """
     try:
-        os.chmod(target, mode)
+        current_mode = stat.S_IMODE(target.stat().st_mode)
+        os.chmod(target, current_mode & mode)
     except OSError as exc:
         logger.warning(
             "memory: could not set mode %o on %s (%s). The knowledge graph relies on "
@@ -244,9 +281,6 @@ def _like_escape(value: str) -> str:
     an explicit ESCAPE '\\' clause at every call site.
     """
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
-
-MAX_RETRIEVE_LIMIT = 50
 
 
 def _refusal(message: str, *, reason: str, **fields) -> ValueError:
@@ -476,6 +510,34 @@ def _resolve_endpoint(
     return ids[0]
 
 
+def _reject_nul(field: str, value: str) -> str:
+    if isinstance(value, str) and _NUL in value:
+        raise ValueError(f"{field} must not contain NUL bytes")
+    return value
+
+
+def _redact_memory_text(field: str, value: str) -> str:
+    _reject_nul(field, value)
+    redacted = redact(value)
+    return _reject_nul(field, redacted)
+
+
+def _safe_sqlite_text(value: object) -> bool:
+    return not isinstance(value, str) or _NUL not in value
+
+
+def _row_has_only_safe_text(row: sqlite3.Row, fields: tuple[str, ...]) -> bool:
+    return all(_safe_sqlite_text(row[field]) for field in fields)
+
+
+# NOTE: master's `_entity_exists(conn, name)` was deliberately NOT carried over. It
+# answered "does SOME entity have this name?", which is the weaker half of what
+# `_resolve_endpoint` now does: resolve the name to ONE entity_id, refusing both the
+# unknown endpoint (same guarantee master had) and the AMBIGUOUS one (two namesakes),
+# and returning the id the edge is actually keyed by. Keeping a name-only existence
+# check alongside it would re-offer the namesake bug this branch fixed.
+
+
 # ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
@@ -498,8 +560,12 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
     # the repo (proxy/audit/redactor.py), reused rather than re-implemented.
     # Redacting here (not just `observations`) also keeps the entity's lookup
     # key consistent between the SELECT below and the INSERT that follows it.
-    name = redact(name)
-    entity_type = redact(entity_type)
+    name = _redact_memory_text("memory_store: name", name)
+    entity_type = _redact_memory_text("memory_store: entity_type", entity_type)
+    observations = [
+        _redact_memory_text("memory_store: observations[]", raw_content)
+        for raw_content in observations
+    ]
 
     conn = _get_conn()
     try:
@@ -535,8 +601,9 @@ async def store_entity(name: str, entity_type: str, observations: list[str]) -> 
 
         added = 0
         added_fingerprints: list[str] = []
-        for raw_content in observations:
-            content = redact(raw_content)
+        # Already scrubbed above, before the connection was opened, so a NUL-bearing
+        # observation is refused without the graph being created at all.
+        for content in observations:
             if content not in existing:
                 conn.execute(
                     "INSERT INTO observations (obs_id, entity_id, content, created_at) VALUES (?, ?, ?, ?)",
@@ -607,6 +674,11 @@ async def retrieve_entities(
     try:
         limit = _validate_limit(limit)
         query = _validate_retrieve_query(query)
+        # Scrubbed as well as validated: the query and the type filter are
+        # caller-authored text that reaches the receipt and the LIKE pattern.
+        query = _redact_memory_text("memory_retrieve: query", query)
+        if entity_type is not None:
+            entity_type = _redact_memory_text("memory_retrieve: entity_type", entity_type)
     except ValueError as exc:
         # A refused read is a decision this tool made and must be evidenced, not just
         # raised. Without it, "the agent never searched" and "the agent searched and was
@@ -630,6 +702,11 @@ async def retrieve_entities(
                 (pattern,),
             ).fetchall()
 
+        rows = [
+            row
+            for row in rows
+            if _row_has_only_safe_text(row, ("entity_id", "name", "entity_type", "created_at"))
+        ]
         total = len(rows)
         rows = rows[:limit]
 
@@ -641,6 +718,11 @@ async def retrieve_entities(
                 "SELECT content, created_at FROM observations WHERE entity_id = ? ORDER BY created_at",
                 (eid,),
             ).fetchall()
+            obs_rows = [
+                row
+                for row in obs_rows
+                if _row_has_only_safe_text(row, ("content", "created_at"))
+            ]
 
             # Join on IDENTITY, not on the display name. Joining on row["name"] gave
             # every namesake the same edges (see store_relation).
@@ -648,6 +730,11 @@ async def retrieve_entities(
                 "SELECT relation_type, to_entity FROM relations WHERE from_entity_id = ? ORDER BY created_at",
                 (eid,),
             ).fetchall()
+            rel_rows = [
+                row
+                for row in rel_rows
+                if _row_has_only_safe_text(row, ("relation_type", "to_entity"))
+            ]
 
             entities.append({
                 "entity_id": eid,
@@ -729,13 +816,15 @@ async def store_relation(
         receipt     — "recorded" | "unrecorded", whether that receipt reached disk
     """
     # Scrub before the INSERT, same as store_entity above.
-    from_entity = redact(from_entity)
-    relation_type = redact(relation_type)
-    to_entity = redact(to_entity)
+    from_entity = _redact_memory_text("memory_relate: from_entity", from_entity)
+    relation_type = _redact_memory_text("memory_relate: relation_type", relation_type)
+    to_entity = _redact_memory_text("memory_relate: to_entity", to_entity)
+    # The two disambiguators are caller-supplied too, and they are matched against
+    # stored entity_type values that were scrubbed on the way in.
     if from_entity_type is not None:
-        from_entity_type = redact(from_entity_type)
+        from_entity_type = _redact_memory_text("memory_relate: from_entity_type", from_entity_type)
     if to_entity_type is not None:
-        to_entity_type = redact(to_entity_type)
+        to_entity_type = _redact_memory_text("memory_relate: to_entity_type", to_entity_type)
 
     conn = _get_conn()
     refusal: ValueError | None = None
