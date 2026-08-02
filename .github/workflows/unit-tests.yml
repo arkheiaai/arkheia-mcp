@@ -6,6 +6,14 @@ name: Unit Tests
 # and these suites never executed in CI. This job makes them a real gate.
 
 on:
+  # merge_group ADDED 2026-07-30 — `master` has `strict: true` (branches must be up to date before
+  # merging), so every merge voids every other open PR and the green count cannot advance. A GitHub
+  # merge queue fixes that, but the queue dispatches CI on the `merge_group` event against a
+  # `gh-readonly-queue/master/**` branch, and `push` below is filtered to `branches: [master]`. Without
+  # this trigger the REQUIRED context would never post on a queued PR: it would sit at
+  # "Expected — waiting" until GitHub's status-check timeout evicted it.
+  merge_group:
+    branches: [master]
   push:
     branches: [master]
   pull_request:
@@ -103,8 +111,6 @@ jobs:
         uses: trufflesecurity/trufflehog@34339eaf08bf5c2a27dbd969812127721f3743ed  # v3.88.22
         with:
           path: ./
-          base: ${{ github.event.repository.default_branch }}
-          head: HEAD
           extra_args: --only-verified
 
       - name: Upload required security scan aggregate results

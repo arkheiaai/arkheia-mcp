@@ -1009,6 +1009,17 @@ DISK_SINKS: dict[str, tuple[str, str]] = {
         "test_memory_relate_does_not_persist_secrets_unredacted and "
         "test_memory_store_functions_call_redact_before_insert",
     ),
+    "mcp_server/receipts.py:_append_record_and_confirm": (
+        "REDACTED",
+        "the tool-gate receipt record passes through the shared redact() before "
+        "json.dumps/open(..., 'a') writes it; emit() confirms the redacted row by "
+        "receipt_id before reporting recorded",
+    ),
+    "mcp_server/receipts.py:_exclusive_file_lock": (
+        "NO_CALLER_DATA",
+        "creates/appends only the sidecar flock file used for serialization; no "
+        "caller/model payload is written to that file",
+    ),
 }
 
 # The ratchet bound on UNREDACTED_GAP. Reduce it when a gap is closed; it must
