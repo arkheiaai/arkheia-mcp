@@ -770,13 +770,20 @@ def _security_gate_job_failures(job_id: str, job: WorkflowJob) -> list[str]:
         failures.extend(_scanner_target_failures(job_id, line_no, line, kinds))
 
     if "trufflehog" in scanner_kinds and re.search(
-        r"^-?\s*uses:\s*trufflesecurity/trufflehog@", job.text, re.M | re.I
+        r"^\s*-?\s*uses:\s*trufflesecurity/trufflehog@", job.text, re.M | re.I
     ):
         if not re.search(r"^\s*path:\s*\S+", job.text, re.M):
             failures.append(
                 f"{job_id} runs the TruffleHog action without `with.path`; this "
                 "gate must name the tree it scans."
             )
+        for key in ("base", "head"):
+            if re.search(rf"^\s*{key}:\s*\S+", job.text, re.M):
+                failures.append(
+                    f"{job_id} pins TruffleHog `with.{key}`. On push events the "
+                    "pinned action can collapse to BASE == HEAD and fail before "
+                    "scanning; let the action derive the event range."
+                )
     if "codeql" in scanner_kinds:
         has_init = re.search(r"github/codeql-action/init@", job.text, re.I)
         has_analyze = re.search(r"github/codeql-action/analyze@", job.text, re.I)
@@ -1245,6 +1252,12 @@ def orphaned_test_files(
     ]
 
 
+REQUIRED_CUSTODY_FLOOR_FILES = frozenset({
+    "tests/test_mcp_httpx_custody_floor.py",
+    "tests/test_mcp_hosted_authority_floor.py",
+})
+
+
 def test_every_test_file_is_collectable_by_a_required_context() -> None:
     test_files = _repo_test_files()
     assert test_files, (
@@ -1286,6 +1299,40 @@ def test_every_test_file_is_collectable_by_a_required_context() -> None:
         + "\n\nNOT credited (ran pytest but is not a required gate):\n  - "
         + ("\n  - ".join(rejected) if rejected else "(none)")
         + "\n\n" + TRUST_STATEMENT
+    )
+
+
+def test_custody_floor_files_are_present_and_collected_by_required_floor_context() -> None:
+    test_files = set(_repo_test_files())
+    missing = sorted(REQUIRED_CUSTODY_FLOOR_FILES - test_files)
+    assert not missing, (
+        "custody floor file(s) disappeared from the tree; this is not a global "
+        "collection-count check, it anchors the named custody invariants:\n  - "
+        + "\n  - ".join(missing)
+    )
+
+    required, problems = required_contexts()
+    assert not problems, (
+        "custody floor collection not observed because required contexts could "
+        "not be read:\n  - " + "\n  - ".join(problems)
+    )
+    credited, rejected = credited_invocations(workflow_texts(), required)
+    floor_invocations = [
+        inv for _wf, ctx, inv in credited
+        if ctx == "floor-invariants"
+    ]
+    assert floor_invocations, (
+        "no required floor-invariants pytest invocation was credited; rejected:\n  - "
+        + ("\n  - ".join(rejected) if rejected else "(none)")
+    )
+
+    uncollected = sorted(
+        rel for rel in REQUIRED_CUSTODY_FLOOR_FILES
+        if not any(inv.collects(rel) for inv in floor_invocations)
+    )
+    assert not uncollected, (
+        "custody floor file(s) exist but are not collected by required "
+        "floor-invariants:\n  - " + "\n  - ".join(uncollected)
     )
 
 
@@ -1724,6 +1771,30 @@ def test_inv6_fail_closed_positive_controls() -> None:
     assert any("without a concrete `-r` target" in f for f in bandit_failures), (
         bandit_failures
     )
+
+    pinned_trufflehog = (
+        "jobs:\n"
+        "  secrets-check:\n"
+        "    name: Check for committed secrets\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - uses: trufflesecurity/trufflehog@34339eaf08bf5c2a27dbd969812127721f3743ed\n"
+        "        with:\n"
+        "          path: ./\n"
+        "          base: ${{ github.event.repository.default_branch }}\n"
+        "          head: HEAD\n"
+        "          extra_args: --only-verified\n"
+    )
+    trufflehog_failures = _security_scan_gate_failures(
+        {".github/workflows/security_scan.yml": pinned_trufflehog},
+        classified={
+            ".github/workflows/security_scan.yml:secrets-check": (
+                "Check for committed secrets",
+            )
+        },
+    )
+    assert any("with.base" in f for f in trufflehog_failures), trufflehog_failures
+    assert any("with.head" in f for f in trufflehog_failures), trufflehog_failures
 
 
 def test_inv6_discovers_new_security_jobs_and_classification_shrink() -> None:

@@ -26,14 +26,18 @@ Transport: stdio (default — Claude Code / Claude Desktop)
 
 import os
 import logging
+from typing import Any
 
 import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from mcp_server.proxy_client import ProxyClient
 from mcp_server.tool_registry import (
+    GateDecision,
+    REGISTRY,
     assert_registry_covers,
     check,
+    check_receipted,
     PolicyViolation,
 )
 from mcp_server.tools.providers import call_grok, call_gemini, call_ollama, call_together
@@ -46,12 +50,67 @@ ARKHEIA_PROXY_URL = os.environ.get("ARKHEIA_PROXY_URL", "http://localhost:8098")
 ARKHEIA_HOSTED_URL = os.environ.get("ARKHEIA_HOSTED_URL", "https://arkheia-proxy-production.up.railway.app")
 ARKHEIA_API_KEY = os.environ.get("ARKHEIA_API_KEY")
 
-mcp   = FastMCP("arkheia-trust")
+TOOL_GATE_RECEIPT_META_KEY = "arkheia_tool_gate_receipt"
+
+
+def _attach_tool_gate_receipt(result: Any, decision: GateDecision) -> Any:
+    receipt = {
+        "receipt_id": decision.receipt_id,
+        "receipt_status": decision.receipt_status,
+    }
+    if isinstance(result, dict):
+        return {**result, TOOL_GATE_RECEIPT_META_KEY: receipt}
+
+    for item in result if isinstance(result, (list, tuple)) else ():
+        meta = getattr(item, "meta", None)
+        if meta is None:
+            meta = {}
+        elif isinstance(meta, dict):
+            meta = dict(meta)
+        else:
+            continue
+        meta[TOOL_GATE_RECEIPT_META_KEY] = receipt
+        setattr(item, "meta", meta)
+    return result
+
+
+class GatedFastMCP(FastMCP):
+    """FastMCP with the policy gate at the orchestrator dispatch boundary."""
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]):
+        decision = await check_receipted(
+            name,
+            call_site="dispatch",
+            argument_keys=list(arguments) if isinstance(arguments, dict) else None,
+        )
+        result = await super().call_tool(name, arguments)
+        return _attach_tool_gate_receipt(result, decision)
+
+    async def list_tools_ungated(self):
+        return await FastMCP.list_tools(self)
+
+    async def list_tools(self):
+        advertised = await FastMCP.list_tools(self)
+        governed = [tool for tool in advertised if tool.name in REGISTRY]
+        ungoverned = sorted(tool.name for tool in advertised if tool.name not in REGISTRY)
+        if ungoverned:
+            logger.error(
+                "withholding ungoverned MCP tools from tools/list: %s",
+                ungoverned,
+            )
+        return governed
+
+
+mcp   = GatedFastMCP("arkheia-trust")
 proxy = ProxyClient(
     base_url=ARKHEIA_PROXY_URL,
     hosted_url=ARKHEIA_HOSTED_URL,
     api_key=ARKHEIA_API_KEY,
 )
+
+
+def _present_metadata(**metadata: Any) -> dict[str, Any]:
+    return {key: value for key, value in metadata.items() if value is not None}
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +124,14 @@ proxy = ProxyClient(
     idempotentHint=True,
     openWorldHint=False,
 ))
-async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
+async def arkheia_verify(
+    prompt: str,
+    response: str,
+    model: str,
+    usage: dict[str, Any] | None = None,
+    output_tokens: Any = None,
+    is_function_call: Any = None,
+) -> dict:
     """
     Verify whether an AI response shows signs of fabrication.
 
@@ -77,6 +143,9 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
         response: The model's response to evaluate
         model:    The model identifier (e.g. 'gpt-4o', 'llama-3-70b',
                   'claude-sonnet-4-6')
+        usage: Optional provider usage metadata.
+        output_tokens: Optional provider output token count.
+        is_function_call: Optional provider tool/function-call flag.
 
     Returns:
         risk_level:          LOW / MEDIUM / HIGH / UNKNOWN
@@ -92,7 +161,16 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
         LOW     -- surface normally
     """
     check("arkheia_verify")
-    result = await proxy.verify(prompt=prompt, response=response, model_id=model)
+    result = await proxy.verify(
+        prompt=prompt,
+        response=response,
+        model_id=model,
+        **_present_metadata(
+            usage=usage,
+            output_tokens=output_tokens,
+            is_function_call=is_function_call,
+        ),
+    )
     logger.debug(
         "arkheia_verify: model=%s risk=%s confidence=%.2f",
         model,
@@ -176,6 +254,7 @@ async def run_grok(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        **_present_metadata(usage=provider_result.get("usage")),
     )
     logger.info(
         "run_grok: model=%s risk=%s confidence=%.2f",
@@ -222,6 +301,7 @@ async def run_gemini(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        **_present_metadata(usage=provider_result.get("usage")),
     )
     logger.info(
         "run_gemini: model=%s risk=%s confidence=%.2f",
@@ -271,6 +351,7 @@ async def run_ollama(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        **_present_metadata(output_tokens=provider_result.get("eval_count")),
     )
     logger.info(
         "run_ollama: model=%s risk=%s confidence=%.2f",
@@ -322,6 +403,7 @@ async def run_together(
         prompt=prompt,
         response=provider_result["response"],
         model_id=model,
+        **_present_metadata(usage=provider_result.get("usage")),
     )
     logger.info(
         "run_together: model=%s risk=%s confidence=%.2f",
@@ -356,6 +438,11 @@ async def memory_store(name: str, entity_type: str, observations: list[str]) -> 
         entity_type:         Entity type
         observations_added:  Number of new observations added this call
         total_observations:  Total observations stored for this entity
+        receipt_id:          Id of the decision receipt recording this change
+        receipt:             "recorded" — the receipt is on disk and can be quoted; or
+                             "unrecorded" — the change was made but could NOT be
+                             evidenced. The store never fails over a receipt, so this
+                             field is the only way to tell the two apart.
     """
     check("memory_store")
     return await store_entity(name=name, entity_type=entity_type, observations=observations)
@@ -378,16 +465,24 @@ async def memory_retrieve(query: str, entity_type: str | None = None, limit: int
     Args:
         query:        Search string — matches entity names (case-insensitive LIKE)
         entity_type:  Optional filter — only return entities of this type
-        limit:        Max entities to return (default 10, max 50)
+        limit:        Max entities to return (default 10, max 50). Must be >= 1;
+                      a limit below 1 raises ValueError rather than being coerced.
 
     Returns:
         entities:  List of matching entities, each with:
                      entity_id, name, entity_type, created_at,
                      observations: [{"content": ..., "created_at": ...}],
                      relations: [{"relation_type": ..., "to_entity": ...}]
-        total:     Total count of matches (before limit)
+        total:      Total count of matches (before limit)
+        receipt_id: Id of the decision receipt recording this retrieval
+        receipt:    "recorded" | "unrecorded" — see memory_store
     """
     check("memory_retrieve")
+    # The bound is enforced ONCE, in retrieve_entities (_validate_limit), because that is
+    # where the slicing happens. `min(limit, 50)` here was a one-sided bound: it clamped
+    # the top and passed negatives straight through to rows[:limit], where rows[:-1]
+    # returned 59 of 60 rows against a documented cap of 50. Clamping in the wrapper only
+    # would also have left the defect reachable from any other import site.
     return await retrieve_entities(query=query, entity_type=entity_type, limit=limit)
 
 
@@ -398,26 +493,59 @@ async def memory_retrieve(query: str, entity_type: str | None = None, limit: int
     idempotentHint=True,
     openWorldHint=False,
 ))
-async def memory_relate(from_entity: str, relation_type: str, to_entity: str) -> dict:
+async def memory_relate(
+    from_entity: str,
+    relation_type: str,
+    to_entity: str,
+    from_entity_type: str | None = None,
+    to_entity_type: str | None = None,
+) -> dict:
     """
     Store a named relationship between two entities in the knowledge graph.
 
-    Both entities must already exist (use memory_store first).
+    Both entities must already exist (use memory_store first) — this is ENFORCED:
+    an unknown endpoint raises ValueError naming which side was not found. It used
+    to be advisory, so a mistyped name stored a dangling edge that memory_retrieve
+    then reported back as a real relation.
     Relations are directional: from_entity --[relation_type]--> to_entity
 
+    Endpoints are named for convenience but the edge is keyed by ENTITY ID. Because
+    two entities may share a name (a person and a project both called "Mercury"), a
+    name that matches more than one entity is AMBIGUOUS and is refused — pass
+    from_entity_type / to_entity_type to say which one you meant. Previously the name
+    itself was the key, so one stored edge was reported as a fact about every namesake.
+
     Args:
-        from_entity:   Name of the source entity
-        relation_type: Relationship label (e.g. "reports_to", "blocks", "owns", "assigned_to")
-        to_entity:     Name of the target entity
+        from_entity:      Name of the source entity
+        relation_type:    Relationship label (e.g. "reports_to", "blocks", "owns")
+        to_entity:        Name of the target entity
+        from_entity_type: Optional — entity_type disambiguating a non-unique from_entity
+        to_entity_type:   Optional — entity_type disambiguating a non-unique to_entity
+
+    Raises:
+        ValueError: if an endpoint names no stored entity, or names more than one and
+                    no corresponding *_entity_type was given to disambiguate it. The
+                    refusal is itself receipted, and the message ends with
+                    "[receipt <id>: recorded|unrecorded]" so it can be quoted.
 
     Returns:
-        rel_id:        UUID of the stored relation
-        from_entity:   Source entity name
-        relation_type: Relation type
-        to_entity:     Target entity name
+        rel_id:         UUID of the stored relation
+        from_entity:    Source entity name
+        relation_type:  Relation type
+        to_entity:      Target entity name
+        from_entity_id: Resolved source entity_id — the key the edge is stored under
+        to_entity_id:   Resolved target entity_id
+        receipt_id:     Id of the decision receipt recording this relation
+        receipt:        "recorded" | "unrecorded" — see memory_store
     """
     check("memory_relate")
-    return await store_relation(from_entity=from_entity, relation_type=relation_type, to_entity=to_entity)
+    return await store_relation(
+        from_entity=from_entity,
+        relation_type=relation_type,
+        to_entity=to_entity,
+        from_entity_type=from_entity_type,
+        to_entity_type=to_entity_type,
+    )
 
 
 def startup_policy_selfcheck() -> None:
@@ -436,7 +564,7 @@ def startup_policy_selfcheck() -> None:
     REGISTRY is loaded from a signed/remote policy store (the documented
     enterprise upgrade hook), where a static parse cannot see the contents.
     """
-    advertised = [t.name for t in anyio.run(mcp.list_tools)]
+    advertised = [t.name for t in anyio.run(mcp.list_tools_ungated)]
     assert_registry_covers(advertised)
     logger.info(
         "tool-registry policy self-check OK: %d advertised tools, all covered",
