@@ -91,11 +91,18 @@ jobs:
         # value as the guard's own error message instructs; the guard is unchanged
         # and still fails loudly on any future drift:
         # 310 collected.
+        #
+        # Re-measured on #63 when master was merged in: 310 -> 330. The +20 are master's own
+        # floor tests arriving through the merge, not new tests from this branch. Measured with
+        # a bare pytest-only interpreter using this job's exact command, and with the venv OUTSIDE
+        # the repo -- a venv created INSIDE it makes the scanners walk site-packages and report
+        # pip's vendored code as a violation, which briefly looked like two real floor failures.
+        # Merged tree: 330 collected, 330 passed. The guard is unchanged and still fails on drift.
         run: |
           COUNT="$(pytest tests \
             -o python_files="test_*_floor.py test_floor_*.py" \
             -p no:cacheprovider --collect-only -q 2>/dev/null | grep -c '::' || true)"
-          EXPECTED=310
+          EXPECTED=330
           if [ "$COUNT" -ne "$EXPECTED" ]; then
             echo "::error::floor discovery count changed (collected $COUNT, expected $EXPECTED). If intentional, update EXPECTED in this workflow in the same commit."
             exit 1
