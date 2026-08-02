@@ -65,7 +65,7 @@ class _Validator:
 
     def validate(self, content: bytes) -> dict[str, Any]:
         assert content == b"profile: runtime-proof\n"
-        return {"model_id": "gpt-4o"}
+        return {"model": "gpt-4o"}
 
 
 class _Router:
