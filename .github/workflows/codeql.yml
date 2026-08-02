@@ -1,5 +1,13 @@
 name: CodeQL Security Scan
 on:
+  # merge_group ADDED 2026-07-30 — `master` has `strict: true` (branches must be up to date before
+  # merging), so every merge voids every other open PR and the green count cannot advance. A GitHub
+  # merge queue fixes that, but the queue dispatches CI on the `merge_group` event against a
+  # `gh-readonly-queue/master/**` branch, and `push` below is filtered to `branches: [master]`. Without
+  # this trigger the REQUIRED context would never post on a queued PR: it would sit at
+  # "Expected — waiting" until GitHub's status-check timeout evicted it.
+  merge_group:
+    branches: [master]
   push:
     branches: [master]
     paths-ignore:

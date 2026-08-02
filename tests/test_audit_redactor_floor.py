@@ -838,7 +838,9 @@ def test_memory_relate_does_not_persist_secrets_unredacted(tmp_path):
     """
     from mcp_server.tools import memory as mem
 
-    async def _write_relation():
+    async def relate_after_creating_endpoints():
+        # Both endpoints must exist BEFORE the relate: store_relation resolves each side
+        # to an entity id and refuses an unknown one.
         await mem.store_entity(
             f"{MEMORY_SENTINEL} -- service-A",
             "service",
@@ -853,7 +855,7 @@ def test_memory_relate_does_not_persist_secrets_unredacted(tmp_path):
 
     content = _drive_memory_write_path(
         tmp_path,
-        _write_relation,
+        relate_after_creating_endpoints,
     )
 
     assert MEMORY_SENTINEL.encode() in content, (
@@ -1008,6 +1010,17 @@ DISK_SINKS: dict[str, tuple[str, str]] = {
         "test_memory_store_does_not_persist_secrets_unredacted, "
         "test_memory_relate_does_not_persist_secrets_unredacted and "
         "test_memory_store_functions_call_redact_before_insert",
+    ),
+    "mcp_server/receipts.py:_append_record_and_confirm": (
+        "REDACTED",
+        "the tool-gate receipt record passes through the shared redact() before "
+        "json.dumps/open(..., 'a') writes it; emit() confirms the redacted row by "
+        "receipt_id before reporting recorded",
+    ),
+    "mcp_server/receipts.py:_exclusive_file_lock": (
+        "NO_CALLER_DATA",
+        "creates/appends only the sidecar flock file used for serialization; no "
+        "caller/model payload is written to that file",
     ),
 }
 
