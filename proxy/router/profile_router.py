@@ -90,9 +90,7 @@ def _verify_profile_license(
         if allow_unsigned_license is None else allow_unsigned_license
     )
 
-    block = profile.get("license")
-
-    if not block:
+    if "license" not in profile:
         if require_license:
             logger.warning(
                 "Profile %s has no license block and ARKHEIA_REQUIRE_LICENSE=true — skipping",
@@ -101,6 +99,7 @@ def _verify_profile_license(
             return False
         return True
 
+    block = profile.get("license")
     if not isinstance(block, dict):
         logger.error("Profile %s license block is not an object — skipping", filename)
         return False

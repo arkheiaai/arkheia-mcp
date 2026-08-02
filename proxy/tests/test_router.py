@@ -184,6 +184,23 @@ class TestProfileRouterLicenseTrust:
         assert router.loaded_count == 0
         assert router.get("licensed-model") is None
 
+    @pytest.mark.parametrize("license_block", [{}, [], "", 0, False, None])
+    def test_present_but_unusable_license_block_is_rejected(
+        self, tmp_path, license_block
+    ):
+        profile = {
+            "model": "licensed-model",
+            "version": "1.0",
+            "detection": {"features": {}},
+            "license": license_block,
+        }
+        (tmp_path / "licensed.yaml").write_text(yaml.dump(profile))
+
+        router = ProfileRouter(str(tmp_path), license_key="")
+
+        assert router.loaded_count == 0
+        assert router.get("licensed-model") is None
+
     def test_bad_license_signature_is_rejected(self, tmp_path):
         profile = _licensed_profile()
         profile["license"]["signature"] = "bad"
