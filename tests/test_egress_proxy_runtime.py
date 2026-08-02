@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.server
+import hashlib
 import threading
 from typing import Any
 
@@ -10,6 +11,9 @@ from pydantic import SecretStr
 
 from arkheia_common import egress
 from proxy.registry.client import RegistryClient
+
+
+PROFILE_BYTES = b"profile: runtime-proof\n"
 
 
 class _RecordingServer:
@@ -60,11 +64,16 @@ class _RecordingServer:
 
 
 class _Validator:
+    def require_checksum(self, checksum: str) -> str:
+        if not checksum:
+            raise ValueError("checksum required")
+        return checksum
+
     def verify_checksum(self, content: bytes, checksum: str) -> bool:
-        return True
+        return hashlib.sha256(content).hexdigest() == checksum
 
     def validate(self, content: bytes) -> dict[str, Any]:
-        assert content == b"profile: runtime-proof\n"
+        assert content == PROFILE_BYTES
         return {"model": "gpt-4o"}
 
 
@@ -74,6 +83,11 @@ class _Router:
 
     async def reload(self) -> None:
         self.reloads += 1
+
+    def get(self, model_id: str) -> dict[str, str] | None:
+        if self.reloads == 0:
+            return None
+        return {"model": model_id}
 
 
 def test_egress_factories_force_trust_env_false(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,7 +123,7 @@ async def test_registry_download_does_not_use_ambient_proxy_with_bearer_key(
     secret = "ak_live_runtime_proxy_capture_key"
 
     with (
-        _RecordingServer(body=b"profile: runtime-proof\n") as target,
+        _RecordingServer(body=PROFILE_BYTES) as target,
         _RecordingServer(body=b"proxied") as proxy,
     ):
         for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
@@ -145,13 +159,13 @@ async def test_registry_download_does_not_use_ambient_proxy_with_bearer_key(
 
         applied = await client._download_and_apply({
             "model_id": "gpt-4o",
-            "checksum": "",
+            "checksum": hashlib.sha256(PROFILE_BYTES).hexdigest(),
             "download_url": f"{target.url}/profiles/gpt-4o.yaml",
         })
 
     assert applied is True
     assert router.reloads == 1
-    assert (tmp_path / "gpt-4o.yaml").read_bytes() == b"profile: runtime-proof\n"
+    assert (tmp_path / "gpt-4o.yaml").read_bytes() == PROFILE_BYTES
     assert proxy.records == [], (
         "ambient proxy captured the credentialed registry profile download"
     )
