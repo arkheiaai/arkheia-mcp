@@ -79,11 +79,13 @@ now names what a provider API needs and drops everything else, so an unknown
 header — including one that does not exist yet — is not forwarded.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import httpx
@@ -244,16 +246,11 @@ ACTION_TAKEN_VALUES = frozenset({
 #: that is the direction an unvalidated profile arrives from.
 GATE_ACTION_BLOCK = "block"
 
-#: What the caller is told about the evidence trail, DERIVED from what happened
-#: at the emission site — never asserted. ``enqueued`` is deliberately weaker
-#: than ``recorded``: ``AuditWriter.write()`` hands the record to a queue that a
-#: background loop drains, and that loop swallows its own I/O errors, so the
-#: most this flow can honestly support is that the rail accepted it.
-#:
-#: KNOWN GAP, pinned by a test rather than papered over: ``write()`` also
-#: swallows its own ``QueueFull`` and drops the record, so a saturated rail still
-#: reports ``enqueued``. Closing that needs ``AuditWriter.write()`` to report its
-#: own outcome — a change to a rail co-owned with another branch.
+#: What the caller is told about the evidence trail, DERIVED from read-back, not
+#: from the enqueue call. ``AuditWriter.write()`` hands the record to a queue and
+#: both ``write()`` and the background loop swallow loss conditions, so this
+#: middleware waits for the queued work to drain and then looks the surfaced
+#: ``detection_id`` up in the writer's actual log before saying ``enqueued``.
 RECEIPT_ENQUEUED = "enqueued"
 RECEIPT_NO_WRITER = "no_audit_writer"
 RECEIPT_WRITE_FAILED = "write_failed"
@@ -511,7 +508,8 @@ def _build_response(
 def _signal_headers(risk_level: str, action: Optional[str] = None,
                     detection_id: Optional[str] = None,
                     gate_action: Optional[str] = None,
-                    policy_action: Optional[str] = None) -> dict:
+                    policy_action: Optional[str] = None,
+                    receipt: Optional[str] = None) -> dict:
     """
     Header-only signalling. The body is never mutated: prepending a banner to a
     JSON completion produces bytes no parser accepts, and
@@ -530,6 +528,10 @@ def _signal_headers(risk_level: str, action: Optional[str] = None,
       X-Arkheia-Policy-Action the customer's configured INTENT
                               (``high_risk_action``). Records what policy
                               wanted, which authorises nothing.
+      X-Arkheia-Receipt       what the audit emission site says happened, using
+                              the same closed vocabulary as the block/refusal
+                              bodies. Emitted only when this path attempted a
+                              receipt.
 
     Surfacing all three is what makes a DOWNGRADED block legible: policy=block,
     gate=advise, action=warn says, without touching the body, that the operator
@@ -542,6 +544,7 @@ def _signal_headers(risk_level: str, action: Optional[str] = None,
         "X-Arkheia-Detection-Id": detection_id,
         "X-Arkheia-Gate-Action": gate_action,
         "X-Arkheia-Policy-Action": policy_action,
+        "X-Arkheia-Receipt": receipt,
     }
 
 
@@ -605,9 +608,101 @@ def _audit_record(
     }
 
 
+def _record_is_findable(audit, detection_id: str) -> bool:
+    """
+    Read the writer's actual JSONL file and find the surfaced detection id.
+
+    This intentionally duplicates only the small read-back predicate production
+    needs; tests use ``ReceiptProbe`` for louder diagnostics and chain checks.
+    """
+    raw_path = getattr(audit, "log_path", None)
+    if raw_path is None:
+        logger.error(
+            "Interception audit write cannot be verified: writer has no log_path "
+            "(decision unaffected; the caller is told '%s')",
+            RECEIPT_WRITE_FAILED,
+        )
+        return False
+
+    path = Path(raw_path)
+    if not path.is_file():
+        logger.error(
+            "Interception audit write did not create a readable receipt log "
+            "at %s (decision unaffected; the caller is told '%s')",
+            path,
+            RECEIPT_WRITE_FAILED,
+        )
+        return False
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("detection_id") == detection_id:
+                    return True
+    except Exception as exc:
+        logger.error(
+            "Interception audit read-back failed for %s "
+            "(decision unaffected; the caller is told '%s'): %s",
+            path,
+            RECEIPT_WRITE_FAILED,
+            exc,
+        )
+        return False
+
+    logger.error(
+        "Interception audit write was not durably findable: detection_id=%s "
+        "path=%s (decision unaffected; the caller is told '%s')",
+        detection_id,
+        path,
+        RECEIPT_WRITE_FAILED,
+    )
+    return False
+
+
+async def _drain_if_needed(audit) -> bool:
+    """
+    Wait for ``AuditWriter``'s background loop when that is the writer in use.
+
+    Duck-typed writers without a queue are assumed to write synchronously and
+    are verified by immediate read-back. A queued writer that is not running
+    cannot make a durable receipt, so it is a write failure for this response.
+    """
+    queue = getattr(audit, "_queue", None)
+    if queue is None:
+        return True
+
+    task = getattr(audit, "_task", None)
+    if task is None or task.done():
+        logger.error(
+            "Interception audit writer is not running; queued receipt cannot "
+            "be drained (decision unaffected; the caller is told '%s')",
+            RECEIPT_WRITE_FAILED,
+        )
+        return False
+
+    try:
+        await asyncio.wait_for(queue.join(), timeout=5.0)
+    except Exception as exc:
+        logger.error(
+            "Interception audit writer did not drain "
+            "(decision unaffected; the caller is told '%s'): %s",
+            RECEIPT_WRITE_FAILED,
+            exc,
+        )
+        return False
+    return True
+
+
 async def _emit(request: Request, record: dict) -> str:
     """
-    Fire-and-forget enqueue that REPORTS WHAT HAPPENED.
+    Emit a receipt and REPORT WHAT CAN BE READ BACK.
 
     Never raises: a receipt failure must not turn a block into a served answer
     (kill-switch-receipt ruling — the halt does not depend on the record
@@ -615,9 +710,9 @@ async def _emit(request: Request, record: dict) -> str:
     ``receipt`` field is this return value, so the response can never claim an
     evidence trail that does not exist:
 
-      ``enqueued``        the rail accepted the record
+      ``enqueued``        the surfaced id is findable in the durable receipt log
       ``no_audit_writer`` no rail is configured — nothing was enqueued anywhere
-      ``write_failed``    the rail raised; nothing landed
+      ``write_failed``    the rail raised, could not drain, or read-back failed
 
     The three are distinguished HERE, at the one place that can observe the
     difference. A literal at the response-construction site cannot, which is the
@@ -634,6 +729,11 @@ async def _emit(request: Request, record: dict) -> str:
         await audit.write(record)
     except Exception as exc:
         logger.error("Interception audit write failed (decision unaffected): %s", exc)
+        return RECEIPT_WRITE_FAILED
+    if not await _drain_if_needed(audit):
+        return RECEIPT_WRITE_FAILED
+    detection_id = str(record.get("detection_id") or "")
+    if not detection_id or not _record_is_findable(audit, detection_id):
         return RECEIPT_WRITE_FAILED
     return RECEIPT_ENQUEUED
 
@@ -749,7 +849,8 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
                 json.dumps(payload).encode("utf-8"), 200,
                 [("content-type", "application/json")],
                 _signal_headers("HIGH", "block", result.detection_id,
-                                gate_action=gate_action, policy_action=policy),
+                                gate_action=gate_action, policy_action=policy,
+                                receipt=receipt),
             )
 
         if result.risk_level == "HIGH" and policy in ("block", "warn"):
@@ -757,7 +858,7 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
             # gate did not authorise it. Both deliver the answer; the difference
             # is legible from `policy_action` on the headers and on the record,
             # so a downgraded block is never silent.
-            await _emit(request, _audit_record(
+            receipt = await _emit(request, _audit_record(
                 detection_id=result.detection_id,
                 risk_level="HIGH",
                 action_taken="warn",
@@ -775,7 +876,8 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
             return _build_response(
                 response_body, status_code, relayed,
                 _signal_headers("HIGH", "warn", result.detection_id,
-                                gate_action=gate_action, policy_action=policy),
+                                gate_action=gate_action, policy_action=policy,
+                                receipt=receipt),
             )
 
         return _build_response(
@@ -859,5 +961,6 @@ class AIInterceptionMiddleware(BaseHTTPMiddleware):
         return _build_response(
             json.dumps(payload).encode("utf-8"), status_code,
             [("content-type", "application/json")],
-            _signal_headers("REFUSED", "refused", detection_id),
+            _signal_headers("REFUSED", "refused", detection_id,
+                            receipt=receipt),
         )
