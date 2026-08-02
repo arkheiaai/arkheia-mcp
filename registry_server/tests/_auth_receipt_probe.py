@@ -16,8 +16,8 @@ observed in this repo, and how this probe closes each:
    ``build_record()`` returns proves what the auth path HANDS the audit layer.
    It proves nothing about what reaches disk: ``AuditWriter._writer_loop``
    redacts, chains and serialises after that point, and can drop the record
-   entirely (it swallows every exception, and ``write()`` drops silently on a
-   full queue). A recording stub cannot observe any of that. So this probe
+   entirely (it swallows every exception, and ``write()`` reports but still
+   drops on a full queue). A recording stub cannot observe any of that. So this probe
    holds a live ``AuditWriter`` and reads the FILE.
 
 2. **It reads back *a* record, not *this* record.** A test that writes one

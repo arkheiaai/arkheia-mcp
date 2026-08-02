@@ -95,6 +95,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from arkheia_common.egress import egress_async_client
+from proxy.audit.writer import AUDIT_WRITE_ENQUEUED, AUDIT_WRITE_QUEUE_FULL
 
 logger = logging.getLogger(__name__)
 
@@ -248,14 +249,21 @@ GATE_ACTION_BLOCK = "block"
 
 #: What the caller is told about the evidence trail, DERIVED from read-back, not
 #: from the enqueue call. ``AuditWriter.write()`` hands the record to a queue and
-#: both ``write()`` and the background loop swallow loss conditions, so this
-#: middleware waits for the queued work to drain and then looks the surfaced
-#: ``detection_id`` up in the writer's actual log before saying ``enqueued``.
+#: the background loop swallows its own I/O errors, so this middleware waits for
+#: the queued work to drain and then looks the surfaced ``detection_id`` up in
+#: the writer's actual log before saying ``enqueued``.
+#:
+#: Saturation is reported SEPARATELY and EARLIER: ``write()`` now returns its own
+#: outcome, so a record dropped at the queue is named ``queue_full`` rather than
+#: collapsed into ``write_failed`` by a read-back that was never going to find
+#: it. The distinction is the difference between "the rail is overloaded" and
+#: "the rail is broken", which are different operator actions.
 RECEIPT_ENQUEUED = "enqueued"
+RECEIPT_QUEUE_FULL = "queue_full"
 RECEIPT_NO_WRITER = "no_audit_writer"
 RECEIPT_WRITE_FAILED = "write_failed"
 RECEIPT_STATUSES = frozenset({
-    RECEIPT_ENQUEUED, RECEIPT_NO_WRITER, RECEIPT_WRITE_FAILED,
+    RECEIPT_ENQUEUED, RECEIPT_QUEUE_FULL, RECEIPT_NO_WRITER, RECEIPT_WRITE_FAILED,
 })
 
 
@@ -711,10 +719,11 @@ async def _emit(request: Request, record: dict) -> str:
     evidence trail that does not exist:
 
       ``enqueued``        the surfaced id is findable in the durable receipt log
+      ``queue_full``      the rail was saturated and dropped the record
       ``no_audit_writer`` no rail is configured — nothing was enqueued anywhere
       ``write_failed``    the rail raised, could not drain, or read-back failed
 
-    The three are distinguished HERE, at the one place that can observe the
+    The four are distinguished HERE, at the one place that can observe the
     difference. A literal at the response-construction site cannot, which is the
     entire defect this replaces.
     """
@@ -726,9 +735,27 @@ async def _emit(request: Request, record: dict) -> str:
         )
         return RECEIPT_NO_WRITER
     try:
-        await audit.write(record)
+        write_status = await audit.write(record)
     except Exception as exc:
         logger.error("Interception audit write failed (decision unaffected): %s", exc)
+        return RECEIPT_WRITE_FAILED
+    # Saturation is checked BEFORE read-back on purpose. A record the queue
+    # refused is never going to be findable, so letting it fall through would
+    # relabel a known drop as a generic read-back failure and lose the one
+    # detail an operator can act on.
+    if write_status == AUDIT_WRITE_QUEUE_FULL:
+        logger.error(
+            "Interception audit write dropped: audit queue full "
+            "(decision unaffected; the caller is told '%s')",
+            RECEIPT_QUEUE_FULL,
+        )
+        return RECEIPT_QUEUE_FULL
+    if write_status not in (None, AUDIT_WRITE_ENQUEUED):
+        logger.error(
+            "Interception audit write returned unknown status %s "
+            "(decision unaffected)",
+            write_status,
+        )
         return RECEIPT_WRITE_FAILED
     if not await _drain_if_needed(audit):
         return RECEIPT_WRITE_FAILED
