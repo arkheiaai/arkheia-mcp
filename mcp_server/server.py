@@ -438,6 +438,11 @@ async def memory_store(name: str, entity_type: str, observations: list[str]) -> 
         entity_type:         Entity type
         observations_added:  Number of new observations added this call
         total_observations:  Total observations stored for this entity
+        receipt_id:          Id of the decision receipt recording this change
+        receipt:             "recorded" — the receipt is on disk and can be quoted; or
+                             "unrecorded" — the change was made but could NOT be
+                             evidenced. The store never fails over a receipt, so this
+                             field is the only way to tell the two apart.
     """
     check("memory_store")
     return await store_entity(name=name, entity_type=entity_type, observations=observations)
@@ -460,16 +465,24 @@ async def memory_retrieve(query: str, entity_type: str | None = None, limit: int
     Args:
         query:        Search string — matches entity names (case-insensitive LIKE)
         entity_type:  Optional filter — only return entities of this type
-        limit:        Max entities to return (default 10, max 50)
+        limit:        Max entities to return (default 10, max 50). Must be >= 1;
+                      a limit below 1 raises ValueError rather than being coerced.
 
     Returns:
         entities:  List of matching entities, each with:
                      entity_id, name, entity_type, created_at,
                      observations: [{"content": ..., "created_at": ...}],
                      relations: [{"relation_type": ..., "to_entity": ...}]
-        total:     Total count of matches (before limit)
+        total:      Total count of matches (before limit)
+        receipt_id: Id of the decision receipt recording this retrieval
+        receipt:    "recorded" | "unrecorded" — see memory_store
     """
     check("memory_retrieve")
+    # The bound is enforced ONCE, in retrieve_entities (_validate_limit), because that is
+    # where the slicing happens. `min(limit, 50)` here was a one-sided bound: it clamped
+    # the top and passed negatives straight through to rows[:limit], where rows[:-1]
+    # returned 59 of 60 rows against a documented cap of 50. Clamping in the wrapper only
+    # would also have left the defect reachable from any other import site.
     return await retrieve_entities(query=query, entity_type=entity_type, limit=limit)
 
 
@@ -480,26 +493,59 @@ async def memory_retrieve(query: str, entity_type: str | None = None, limit: int
     idempotentHint=True,
     openWorldHint=False,
 ))
-async def memory_relate(from_entity: str, relation_type: str, to_entity: str) -> dict:
+async def memory_relate(
+    from_entity: str,
+    relation_type: str,
+    to_entity: str,
+    from_entity_type: str | None = None,
+    to_entity_type: str | None = None,
+) -> dict:
     """
     Store a named relationship between two entities in the knowledge graph.
 
-    Both entities must already exist (use memory_store first).
+    Both entities must already exist (use memory_store first) — this is ENFORCED:
+    an unknown endpoint raises ValueError naming which side was not found. It used
+    to be advisory, so a mistyped name stored a dangling edge that memory_retrieve
+    then reported back as a real relation.
     Relations are directional: from_entity --[relation_type]--> to_entity
 
+    Endpoints are named for convenience but the edge is keyed by ENTITY ID. Because
+    two entities may share a name (a person and a project both called "Mercury"), a
+    name that matches more than one entity is AMBIGUOUS and is refused — pass
+    from_entity_type / to_entity_type to say which one you meant. Previously the name
+    itself was the key, so one stored edge was reported as a fact about every namesake.
+
     Args:
-        from_entity:   Name of the source entity
-        relation_type: Relationship label (e.g. "reports_to", "blocks", "owns", "assigned_to")
-        to_entity:     Name of the target entity
+        from_entity:      Name of the source entity
+        relation_type:    Relationship label (e.g. "reports_to", "blocks", "owns")
+        to_entity:        Name of the target entity
+        from_entity_type: Optional — entity_type disambiguating a non-unique from_entity
+        to_entity_type:   Optional — entity_type disambiguating a non-unique to_entity
+
+    Raises:
+        ValueError: if an endpoint names no stored entity, or names more than one and
+                    no corresponding *_entity_type was given to disambiguate it. The
+                    refusal is itself receipted, and the message ends with
+                    "[receipt <id>: recorded|unrecorded]" so it can be quoted.
 
     Returns:
-        rel_id:        UUID of the stored relation
-        from_entity:   Source entity name
-        relation_type: Relation type
-        to_entity:     Target entity name
+        rel_id:         UUID of the stored relation
+        from_entity:    Source entity name
+        relation_type:  Relation type
+        to_entity:      Target entity name
+        from_entity_id: Resolved source entity_id — the key the edge is stored under
+        to_entity_id:   Resolved target entity_id
+        receipt_id:     Id of the decision receipt recording this relation
+        receipt:        "recorded" | "unrecorded" — see memory_store
     """
     check("memory_relate")
-    return await store_relation(from_entity=from_entity, relation_type=relation_type, to_entity=to_entity)
+    return await store_relation(
+        from_entity=from_entity,
+        relation_type=relation_type,
+        to_entity=to_entity,
+        from_entity_type=from_entity_type,
+        to_entity_type=to_entity_type,
+    )
 
 
 def startup_policy_selfcheck() -> None:

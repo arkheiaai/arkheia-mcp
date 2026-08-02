@@ -838,7 +838,9 @@ def test_memory_relate_does_not_persist_secrets_unredacted(tmp_path):
     """
     from mcp_server.tools import memory as mem
 
-    async def _write_relation():
+    async def relate_after_creating_endpoints():
+        # Both endpoints must exist BEFORE the relate: store_relation resolves each side
+        # to an entity id and refuses an unknown one.
         await mem.store_entity(
             f"{MEMORY_SENTINEL} -- service-A",
             "service",
@@ -853,7 +855,7 @@ def test_memory_relate_does_not_persist_secrets_unredacted(tmp_path):
 
     content = _drive_memory_write_path(
         tmp_path,
-        _write_relation,
+        relate_after_creating_endpoints,
     )
 
     assert MEMORY_SENTINEL.encode() in content, (
