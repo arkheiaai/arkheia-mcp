@@ -28,11 +28,29 @@ ATTACKER_EMAIL = "attacker@evil.example"
 
 
 def _profile(model_id: str = "gpt-4o", version: str = "1.0") -> bytes:
+    # This branch makes ProfileValidator reject a profile that declares no
+    # smoke_test (absence of a check is not evidence the check passed), and the
+    # rollback endpoint validates both the live and backup profile. A valid
+    # fixture therefore has to declare a feature and a smoke test that actually
+    # passes -- otherwise every case below would fail on validation instead of
+    # on the rollback behaviour it is meant to pin.
     return (
         f'model: "{model_id}"\n'
         f'version: "{version}"\n'
         "detection:\n"
-        "  features: {}\n"
+        "  strategy: ensemble\n"
+        "  min_required_features: 1\n"
+        "  features:\n"
+        "    word_count:\n"
+        "      enabled: true\n"
+        "      weight: 0.5\n"
+        "      polarity: positive\n"
+        "      threshold_low: 50.0\n"
+        "      threshold_medium: 100.0\n"
+        "smoke_test:\n"
+        '  prompt: "What is 2+2?"\n'
+        '  response: "Four simple words here."\n'
+        '  expected_risk: "LOW"\n'
     ).encode("utf-8")
 
 

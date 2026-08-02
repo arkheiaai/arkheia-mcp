@@ -6,6 +6,14 @@ on:
   # triggers could NEVER fire. It did still run weekly via `schedule` (which runs
   # against the default branch), so it was not dead; what it could never do is
   # GATE A COMMIT. See PR body item 1.
+  # merge_group ADDED 2026-07-30 — same class as the branch-name defect noted above, one axis over:
+  # a trigger that cannot fire on the event that gates the merge. `master` is `strict: true`, so
+  # merging at scale needs a merge queue, and a queue dispatches CI on `merge_group` against a
+  # `gh-readonly-queue/master/**` branch — which `push: branches: [master]` does not match. Without
+  # this, this workflow could never gate a QUEUED commit, exactly as it once could never gate a pushed
+  # one. Pinned by tests/test_merge_queue_triggers_floor.py.
+  merge_group:
+    branches: [master]
   push:
     branches: [master]
   pull_request:

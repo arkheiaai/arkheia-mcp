@@ -6,7 +6,6 @@ JSON API endpoints (/admin/health, /admin/registry/pull, etc.) return 401.
 """
 
 import logging
-import re
 from pathlib import Path
 from typing import Optional
 
@@ -30,21 +29,42 @@ from proxy.audit.decision_journal import (
     emit,
     stamp_decision,
 )
+from proxy.pathsafe import is_safe_model_id, safe_profile_write_path
 from proxy.registry.validator import ProfileValidator
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin")
 
-_PROFILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-
 
 def _profile_paths(profile_dir: str, model_id: str) -> tuple[Path, Path]:
-    """Resolve the live and backup profile paths without allowing subpaths."""
-    if not _PROFILE_NAME_RE.fullmatch(model_id):
-        raise ValueError("model_id must be a profile filename stem")
+    """Resolve the live and backup profile paths without allowing subpaths.
+
+    ``model_id`` is a REGISTRY identifier, not a filesystem stem: real ids
+    legitimately contain ``:`` and ``/`` (ollama ``qwen3:8b``, HF
+    ``deepseek-ai/DeepSeek-V3.1``). Those ids are cached by the registry client
+    under a percent-ENCODED single-component name, so rollback must derive the
+    same name or it can never target them. Resolution therefore goes through the
+    shared WRITE-side chokepoint ``proxy.pathsafe.safe_profile_write_path``:
+    syntactic pre-filter (``..``/NUL/backslash/empty/oversized rejected), realpath
+    containment on the RAW id (an absolute or escaping id is REJECTED, never
+    silently encoded into a contained name), then encoding to a single top-level
+    component.
+
+    This REPLACES the previous ``^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`` filename-stem
+    regex (which could never target a registry id containing ``:`` or ``/``); every
+    stem that regex admitted still resolves identically, because such a stem
+    encodes to itself. The invariant that regex existed to enforce — the resolved
+    live/backup paths are direct children of the profiles root, never a subpath —
+    is preserved by ``safe_profile_write_path`` AND re-asserted below, so a crafted
+    id still cannot escape: ``ValueError`` -> HTTP 400, no write and no reload.
+    """
+    if not isinstance(model_id, str) or not is_safe_model_id(model_id):
+        raise ValueError("model_id must be a safe profile identifier")
+    live_path = safe_profile_write_path(profile_dir, model_id)
+    if live_path is None:
+        raise ValueError("profile path escaped profile_dir")
     root = Path(profile_dir).resolve()
-    live_path = (root / f"{model_id}.yaml").resolve()
     backup_path = Path(str(live_path) + ".bak").resolve()
     if live_path.parent != root or backup_path.parent != root:
         raise ValueError("profile path escaped profile_dir")
@@ -784,6 +804,9 @@ async def manual_registry_pull(request: Request, _: str = Depends(require_auth))
         updated = list(summary.get("updated") or [])
         skipped = list(summary.get("skipped") or [])
         errors = list(summary.get("errors") or [])
+        # Receipts are the caller-visible proof of the pull decision. Returning
+        # only a summary leaves every refusal unreachable from the HTTP surface.
+        receipts = list(summary.get("receipts") or [])
 
         if errors:
             status = "partial" if updated or skipped else "error"
@@ -798,11 +821,13 @@ async def manual_registry_pull(request: Request, _: str = Depends(require_auth))
             "updated": updated,
             "skipped": skipped,
             "errors": errors,
+            "receipts": receipts,
             "summary": {
                 **summary,
                 "updated": updated,
                 "skipped": skipped,
                 "errors": errors,
+                "receipts": receipts,
             },
         }
     except Exception as e:
@@ -811,6 +836,7 @@ async def manual_registry_pull(request: Request, _: str = Depends(require_auth))
 
 
 @router.post("/profiles/{model_id}/rollback")
+@router.post("/profiles/{model_id:path}/rollback")
 async def rollback_profile(
     model_id: str,
     request: Request,
@@ -822,6 +848,17 @@ async def rollback_profile(
     The registry client keeps a .bak of the previous version after each update.
     Rollback validates the live/backup pair before replacing the current YAML,
     reloads the router, and restores the live file if reload fails.
+
+    Registered TWICE on purpose. The single-segment ``{model_id}`` route is the
+    canonical shape (and the one the admin auth floor enumerates); the
+    ``{model_id:path}`` alias additionally makes a slash-bearing registry id
+    (``deepseek-ai/DeepSeek-V3.1``) reachable at all — the single-segment matcher
+    can never target one, yet its cache/.bak DO exist, under the ENCODED
+    single-component name ``_profile_paths`` derives, so rollback would otherwise
+    be permanently unreachable for those ids. The alias adds no exposure:
+    ``_profile_paths`` rejects traversal via the shared pre-filter + realpath
+    containment and re-asserts ``parent == profiles_root`` before any write, so a
+    crafted id is a fail-closed 400 with no write and no reload.
     """
     settings = getattr(request.app.state, "settings", None)
     profile_router = getattr(request.app.state, "profile_router", None)
@@ -841,6 +878,11 @@ async def rollback_profile(
         )
 
     profile_dir = settings.detection.profile_dir
+    # Path-traversal hardening (F23, WRITE side): resolve model_id through the
+    # shared pre-filter + realpath containment BEFORE building any write path, so
+    # a crafted id ("../pwned", an absolute path) cannot write/target a file
+    # outside the profiles root (nor act as a file-existence oracle / reload
+    # trigger). Fail-closed 400: no write, no reload, receipted below.
     try:
         path, bak = _profile_paths(profile_dir, model_id)
     except ValueError:
