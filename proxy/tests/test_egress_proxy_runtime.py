@@ -267,9 +267,16 @@ async def _forward_passthrough(target_server: _Server) -> None:
         "client": ("127.0.0.1", 12345),
     }, receive)
 
+    # `_forward` is now per-destination: the provider carries the credential
+    # mapping that decides which headers may leave, so it is a required
+    # argument. GROK is the destination this request is spelled for
+    # (`/proxy/grok/...`), and its credential set is `{"authorization"}` — which
+    # is what keeps the assertion below (the provider secret reaches the target
+    # DIRECTLY, not via the ambient proxy) testing what it always tested.
     body, status_code, _headers = await passthrough._forward(
         request,
         f"{target_server.url}/passthrough",
+        passthrough.GROK,
     )
     assert status_code == 200
     assert b"provider answer" in body

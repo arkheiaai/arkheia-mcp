@@ -118,6 +118,20 @@ REVIEWED_UNRESOLVED: dict[str, str] = {
     "proxy/tests/test_egress_proxy_runtime.py::url":
         "f\"{target_server.url}/...\"; _Server.url is a @property returning "
         "f\"http://{host}:{port}\" from a live socket address, never an env read",
+    # Blind spot 1 again, one hop through a frozen dataclass field rather than a
+    # helper: `candidate = f"{provider.base}/{path}"` in `_resolve_upstream`.
+    # `Provider.base` is a FIELD, so `_bindings` finds no assignment to the slot
+    # name `base`. Every value it can hold is a module-level literal in that same
+    # file (GROK_UPSTREAM / TOGETHER_UPSTREAM / GEMINI_UPSTREAM /
+    # ANTHROPIC_UPSTREAM + "/v1"), none env-derived and none trailing-slashed;
+    # `tests/test_passthrough_ssrf_floor.py::test_inv1_...` pins statically that
+    # every `*_UPSTREAM` is a plain `https://host/path` literal on a reviewed
+    # host, and `_resolve_upstream` re-parses the BUILT url and refuses unless
+    # scheme/host/port/path-prefix still match the provider.
+    "proxy/endpoints/passthrough.py::base":
+        "f\"{provider.base}/{path}\"; Provider.base is a frozen-dataclass field "
+        "whose only values are the module's *_UPSTREAM https literals (INV-1 in "
+        "tests/test_passthrough_ssrf_floor.py), never an env read",
 }
 
 
