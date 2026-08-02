@@ -115,6 +115,9 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 _SECRET_PATTERNS: list[tuple[str, re.Pattern]] = [
+    # Google OAuth client secrets are short enough to sit below the generic
+    # opaque-entropy floor, but the GOCSPX prefix is itself credential syntax.
+    ("google-oauth-client-secret", re.compile(r'GOCSPX-[A-Za-z0-9_-]{16,80}')),
     # Armoured secret BLOCK, any `-----BEGIN <label>-----` delimiter — not just
     # `PRIVATE KEY`. The first cut hardcoded the PEM label, so a PGP private key
     # block (`-----BEGIN PGP PRIVATE KEY BLOCK-----`) walked straight through:
@@ -420,6 +423,7 @@ _CREDENTIAL_CONTEXT = re.compile(
 #: Charset of an opaque credential body. Deliberately excludes `.` so dotted
 #: identifiers and versions are not candidates.
 _OPAQUE_TOKEN = re.compile(r'[A-Za-z0-9+/_-]{32,200}={0,2}')
+_CREDENTIAL_FIELD_TOKEN = re.compile(r'[A-Za-z0-9+/_-]{16,200}={0,2}')
 
 _HEX_ONLY = re.compile(r'^[0-9a-fA-F]+$')
 _UUID = re.compile(r'^[0-9a-fA-F-]{36}$')
@@ -466,6 +470,33 @@ def _is_opaque_credential(tok: str) -> bool:
     if _base64_views(tok):
         return False
     return _shannon(tok) >= 3.5
+
+
+def _is_credential_field_token(tok: str) -> bool:
+    """
+    Token predicate for values whose field is already credential-bearing.
+
+    This intentionally differs from the generic opaque fallback: a known
+    credential field has no sha/UUID false-positive cost from redacting a
+    32-byte hex secret, while ordinary audit prose still does.
+    """
+    if _UUID.match(tok):
+        return False
+    if _HEX_ONLY.match(tok):
+        return len(tok) >= 32
+    if tok.startswith("GOCSPX-"):
+        return len(tok) >= 16
+    if not any(c.isdigit() for c in tok):
+        return False
+    return _shannon(tok) >= 3.0
+
+
+def _redact_credential_field_tokens(value: str) -> str:
+    return _CREDENTIAL_FIELD_TOKEN.sub(
+        lambda m: _placeholder(m.group(0))
+        if _is_credential_field_token(m.group(0)) else m.group(0),
+        value,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +559,11 @@ _WRAPPED_LINE = re.compile(r'^[A-Za-z0-9+/_-]{16,}={0,6}$')
 _MIN_WRAPPED_RUN = 2
 
 
-def _redact_encoded_and_opaque(value: str) -> str:
+def _redact_encoded_and_opaque(
+    value: str,
+    *,
+    credential_context: bool = False,
+) -> str:
     """
     One line-oriented pass, so the two fallbacks agree.
 
@@ -542,7 +577,9 @@ def _redact_encoded_and_opaque(value: str) -> str:
     lines = value.split("\n")
 
     def _ctx_at(i: int) -> bool:
-        return any(_CREDENTIAL_CONTEXT.search(w) for w in lines[max(0, i - 3): i + 1])
+        return credential_context or any(
+            _CREDENTIAL_CONTEXT.search(w) for w in lines[max(0, i - 3): i + 1]
+        )
 
     def _view_is_secret(view: str, ctx: bool) -> bool:
         if _contains_secret(view):
@@ -603,7 +640,7 @@ def _redact_encoded_and_opaque(value: str) -> str:
     return "\n".join(out)
 
 
-def _redact_string(value: str) -> str:
+def _redact_string(value: str, *, credential_context: bool = False) -> str:
     """
     Replace all secret patterns found in a string.
 
@@ -611,6 +648,8 @@ def _redact_string(value: str) -> str:
     keeps its specific label; the encoding and entropy passes are the fallbacks
     for bodies those patterns cannot see.
     """
+    if credential_context:
+        value = _redact_credential_field_tokens(value)
     for _label, pattern in _SECRET_PATTERNS:
         value = pattern.sub(lambda m: _placeholder(m.group(0)), value)
     for _label, pattern in _LABELLED_SECRET_PATTERNS:
@@ -618,7 +657,10 @@ def _redact_string(value: str) -> str:
             lambda m: m.group("pre") + _placeholder(m.group("secret")) + m.group("post"),
             value,
         )
-    value = _redact_encoded_and_opaque(value)
+    value = _redact_encoded_and_opaque(
+        value,
+        credential_context=credential_context,
+    )
     return value
 
 
@@ -645,6 +687,39 @@ def redact(obj: Any) -> Any:
         # fields, not an iterable, so `type(obj)(generator)` raised TypeError and
         # (inside the writer's try/except) silently DROPPED the whole record.
         items = [redact(item) for item in obj]
+        if isinstance(obj, list):
+            return items
+        try:
+            return type(obj)(items)
+        except TypeError:
+            return type(obj)(*items)
+    return obj
+
+
+def redact_in_credential_context(obj: Any) -> Any:
+    """
+    Redact a value whose field position is already credential-bearing.
+
+    Plain ``redact()`` deliberately requires local credential context before it
+    removes opaque high-entropy strings; otherwise hashes, UUIDs and base64 audit
+    content would disappear. Some receipt fields are themselves context: a secret
+    can be pasted as a tool name, argument key, or argument value. Use this helper
+    only at those boundaries so the opaque fallback can fire without widening the
+    default audit redactor.
+    """
+    if isinstance(obj, str):
+        return _redact_string(obj, credential_context=True)
+    if isinstance(obj, dict):
+        return {
+            (
+                _redact_string(k, credential_context=True)
+                if isinstance(k, str)
+                else k
+            ): redact_in_credential_context(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, (list, tuple)):
+        items = [redact_in_credential_context(item) for item in obj]
         if isinstance(obj, list):
             return items
         try:

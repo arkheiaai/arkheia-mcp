@@ -79,12 +79,20 @@ ROUTER = ROOT / "proxy" / "router" / "profile_router.py"
 #: test may legitimately construct an off-taxonomy value to prove it is refused.
 PROD_DIRS = ("proxy", "mcp_server", "registry_server", "scripts")
 
-#: The two receipt builders whose field values are allow-listed.
-BUILDERS = ("build_key_load_record", "build_profile_auth_record")
+#: The receipt builders whose field values are allow-listed.
+BUILDERS = (
+    "build_key_load_record",
+    "build_profile_auth_record",
+    "build_profile_rollback_record",
+)
 
 #: Keyword arguments whose value must come from the closed taxonomy.
 TAXONOMY_KWARGS = {
-    "outcome": ("KEY_LOAD_OUTCOMES", "PROFILE_AUTH_OUTCOMES"),
+    "outcome": (
+        "KEY_LOAD_OUTCOMES",
+        "PROFILE_AUTH_OUTCOMES",
+        "PROFILE_ROLLBACK_OUTCOMES",
+    ),
     "key_source": ("KEY_SOURCES",),
     "revocation_state": ("REVOCATION_STATES",),
 }
@@ -554,6 +562,7 @@ def test_inv3_the_bytes_parameters_are_discovered_not_enumerated():
             found[node.name] = _bytes_parameters(node)
     assert found["build_key_load_record"] == {"key"}
     assert found["build_profile_auth_record"] == {"ciphertext", "key"}
+    assert found["build_profile_rollback_record"] == set()
 
 
 def test_inv3_negative_self_test_detects_a_leaking_field():
@@ -629,6 +638,7 @@ def test_inv4_both_governed_decisions_still_have_a_production_emitter():
         )
     assert len(emitters["build_key_load_record"]) >= 4, emitters
     assert len(emitters["build_profile_auth_record"]) >= 2, emitters
+    assert len(emitters["build_profile_rollback_record"]) >= 1, emitters
 
 
 def test_inv4_negative_self_test_detects_an_emitter_with_no_call_sites():
