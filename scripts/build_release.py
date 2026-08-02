@@ -27,17 +27,6 @@ except ImportError:
     ]
 
 
-COMPILED_ARTIFACT_GLOBS = ("*.so", "*.pyd")
-
-
-class EmptyManifest(ValueError):
-    """Raised when a build step would emit an integrity manifest with no modules."""
-
-
-class UnrecordedModule(ValueError):
-    """Raised when a configured compiled module is absent from all manifests."""
-
-
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build the Arkheia release artifacts")
     parser.add_argument(
@@ -103,21 +92,62 @@ def step_encrypt_profiles(master_key: bytes, profile_dir: Path) -> int:
     return encrypted_count
 
 
+#: What ``proxy.license.integrity.generate_manifest`` globs for. Named here so the
+#: refusal below can tell an operator what was actually searched for, rather than
+#: reporting an unexplained zero.
+COMPILED_ARTIFACT_GLOBS = ("*.so", "*.pyd")
+
+
+class EmptyManifest(ValueError):
+    """A manifest that lists no modules. See ``step_generate_manifest``."""
+
+
 def step_generate_manifest(module_dir: Path, output_path: Path | None = None) -> dict[str, str]:
+    """
+    Write the integrity manifest for ``module_dir`` — the durable record of the
+    build-time decision *"these hashes are the trusted state of this artifact"*.
+
+    REFUSES TO WRITE AN EMPTY MANIFEST.
+    ------------------------------------
+    ``generate_manifest`` globs ``*.so``/``*.pyd``. When a directory contains
+    none — ``--skip-compile`` on a source checkout, or a Cython step that
+    produced nothing — it returned ``{}`` and this function wrote it out, printed
+    ``Manifest written: … (0 modules)``, and the build carried on to exit 0.
+
+    That empty file is not a neutral placeholder, it is a FALSE RECEIPT.
+    Historically, ``proxy/license/integrity.verify_integrity`` treated a manifest
+    that exists as a manifest to check, iterated its zero entries, logged
+    *"Integrity check passed: 0 modules verified"* and returned success. Current
+    ``master`` now rejects that at runtime, but a release build still must not
+    ship an artifact whose integrity record certifies zero modules.
+
+    Worse still, the build did not stop: step 4 then DELETED the compiled Python
+    sources listed in ``COMPILED_MODULES``, so a no-binaries build destroyed the
+    originals and still printed "Release build complete".
+
+    So: compute the manifest, and if it lists nothing, delete the file that was
+    just written and abort. Raising here (step 3) aborts before step 4 removes
+    any source. Per DONE.md floor invariant 9(a) the refusal NAMES THE UNITS —
+    the directory and the globs that found nothing — instead of reporting an
+    aggregate zero.
+    """
     print(f"\n=== Step 3: Generate integrity manifest ({module_dir}) ===")
     manifest_path = output_path or module_dir / "integrity_manifest.json"
     manifest = generate_manifest(module_dir, manifest_path)
 
     if not manifest:
+        # Remove the false receipt. Leaving it behind is the defect itself: a
+        # release build must not ship a manifest that records zero modules.
         if manifest_path.exists():
             manifest_path.unlink()
         raise EmptyManifest(
             f"refusing to write an empty integrity manifest for {module_dir}: "
             f"no {' / '.join(COMPILED_ARTIFACT_GLOBS)} found there, so the "
-            f"manifest would certify zero modules. Current verify_integrity() "
+            f"manifest would certify ZERO modules. Current verify_integrity() "
             f"treats that as tamper evidence, and the release build must stop "
             f"before sources are removed. Run the Cython compile step (drop "
-            f"--skip-compile) or remove its modules from COMPILED_MODULES."
+            f"--skip-compile) or remove {module_dir} from COMPILED_MODULES; "
+            f"do not rely on startup integrity checks to reject a bad release."
         )
 
     print(f"  Manifest written: {manifest_path} ({len(manifest)} modules)")
@@ -135,17 +165,33 @@ def compiled_module_dirs(repo_root: Path = REPO_ROOT) -> list[Path]:
     return seen
 
 
+class UnrecordedModule(ValueError):
+    """A module in COMPILED_MODULES that no manifest entry covers."""
+
+
 def check_every_module_is_recorded(
     manifests: dict[str, dict[str, str]],
     repo_root: Path = REPO_ROOT,
 ) -> None:
     """
-    Require one manifest entry for every source file listed in ``COMPILED_MODULES``.
+    Require a manifest entry for EVERY module in ``COMPILED_MODULES``.
 
-    Manifests are generated per directory. One compiled sibling can make the
-    directory manifest non-empty while another configured module in that same
-    directory produced no binary at all. This check names those missing units
-    before step 4 removes their sources.
+    A non-empty manifest is not enough, because the manifest is generated
+    per-DIRECTORY while ``COMPILED_MODULES`` is a list of FILES. All three
+    default entries live in two directories, so one compiled artifact makes its
+    whole directory's manifest non-empty — and a module whose Cython build
+    silently produced nothing is then invisible: it is absent from the manifest,
+    ``verify_integrity`` never looks for it, and step 4 deletes its source
+    anyway. The build ships a partially-verified artifact and reports success.
+
+    This is DONE.md floor invariant 9(a): "39 of 44 scored" passes every
+    non-zero assertion while five units go unexamined, so the five must be
+    NAMED. The per-directory count is the aggregate; the per-module check below
+    is the unit.
+
+    Matching is by stem, because the build tool decides the suffix:
+    ``proxy/detection/features.py`` is satisfied by ``features.so``,
+    ``features.pyd`` or ``features.cpython-312-darwin.so``.
     """
     recorded_stems: dict[Path, set[str]] = {}
     for manifest_path, manifest in manifests.items():
@@ -164,7 +210,9 @@ def check_every_module_is_recorded(
         raise UnrecordedModule(
             f"{len(missing)} of {len(COMPILED_MODULES)} modules have no compiled "
             f"artifact in any integrity manifest: {', '.join(missing)}. Their "
-            f"sources would be deleted by step 4 while nothing verifies them."
+            f"sources would be deleted by step 4 while nothing verifies them. "
+            f"A per-directory manifest count hides this — one sibling that did "
+            f"compile makes the directory look covered."
         )
 
     print(
@@ -226,6 +274,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             manifest_path = module_dir / "integrity_manifest.json"
             manifests[str(manifest_path)] = step_generate_manifest(module_dir, manifest_path)
 
+        # Before anything is deleted: every module must be covered by a record.
         check_every_module_is_recorded(manifests, REPO_ROOT)
 
         removed = step_remove_source(REPO_ROOT)
