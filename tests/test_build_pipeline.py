@@ -20,8 +20,9 @@ else:
 from scripts import build_release
 from proxy.license.integrity import (
     MANIFEST_FILE,
-    IntegrityStatus,
     TamperDetected,
+    VERDICT_VERIFIED,
+    build_integrity_record,
     generate_manifest,
     verify_integrity,
 )
@@ -128,10 +129,11 @@ def test_build_release_manifest_is_consumed_by_integrity_report(tmp_path):
     for name, recorded in on_disk.items():
         assert recorded == hashlib.sha256((module_dir / name).read_bytes()).hexdigest()
 
-    report = verify_integrity(module_dir)
-    assert report.status == IntegrityStatus.VERIFIED
-    assert report.verified is True
-    assert report.modules_checked == 2
+    report = build_integrity_record(module_dir)
+    assert report["verdict"] == VERDICT_VERIFIED
+    assert verify_integrity(module_dir) is True
+    assert report["modules_expected"] == 2
+    assert report["modules_matched"] == 2
 
     manifest = json.loads(manifest_path.read_text())
     fabricated = f"{uuid.uuid4().hex}.so"
@@ -148,7 +150,8 @@ def test_build_release_manifest_is_consumed_by_integrity_report(tmp_path):
 
     manifest[engine.name] = hashlib.sha256(engine.read_bytes()).hexdigest()
     manifest_path.write_text(json.dumps(manifest))
-    assert verify_integrity(module_dir).status == IntegrityStatus.VERIFIED
+    assert verify_integrity(module_dir) is True
+    assert build_integrity_record(module_dir)["verdict"] == VERDICT_VERIFIED
 
     engine.write_bytes(b"\x7fELF" + b"tampered" * 8)
     with pytest.raises(TamperDetected, match=engine.name):
