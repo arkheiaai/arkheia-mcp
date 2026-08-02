@@ -14,7 +14,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, Request, Response
 from pydantic import BaseModel
@@ -41,6 +41,12 @@ class VerifyRequest(BaseModel):
     response: str
     model_id: str
     session_id: Optional[str] = None
+    # Optional structural provider metadata. `output_tokens` is usage metadata,
+    # not derived from the response body; it is what makes the empty-output gate
+    # live without inspecting prompt/response content.
+    output_tokens: Any = None
+    is_function_call: Any = None
+    usage: Optional[dict[str, Any]] = None
 
 
 class VerifyResponse(BaseModel):
@@ -54,12 +60,55 @@ class VerifyResponse(BaseModel):
     timestamp: str
     detection_id: str
     error: Optional[str] = None
-    # Was the verdict computed from real evidence, or is it a "couldn't assess"? The engine
-    # computes this and it used to be DROPPED here, so a LOW off ZERO fired features looked
-    # identical to a well-evidenced LOW at the only surface a caller reads. None = the
-    # detection path did not report it (older/hosted responses), which is NOT the same as
-    # False and must never be rendered as "assessed".
-    evidence_depth_limited: Optional[bool] = None
+    # ---------------------------------------------------------------------------
+    # SCREENING TRANSPARENCY. These three fields decide what the verdict MEANS, and
+    # the engine has always computed them -- they were simply not surfaced, so a
+    # verdict that measured NOTHING was byte-indistinguishable from one that
+    # measured everything. Fail-open must never be fail-silent.
+    #
+    #   evidence_depth_limited  True when nothing (or too little) was actually
+    #                           measured. Defaults TRUE: every path that reaches
+    #                           _unknown() screened nothing, and a couldn't-assess
+    #                           must never default to reading as full evidence.
+    #   detection_method        "profile_<strategy>" when features were scored;
+    #                           "tool_surface_suppressed" / "empty_output_suppressed"
+    #                           when a GATE fired and features_used == 0. A
+    #                           suppressed LOW is a couldn't-assess, not a clean bill
+    #                           of health.
+    #   profile_model_id        The model whose profile ACTUALLY scored this response.
+    #                           NOT always model_id: ProfileRouter resolves through
+    #                           exact -> prefix -> family, so "grok-3" is scored by
+    #                           the "grok-3-mini-fast" fingerprint and
+    #                           "deepseek-coder:33b-instruct" (local) by the cloud
+    #                           "deepseek-ai/DeepSeek-V4-Pro" one. None when no
+    #                           profile matched. profile_model_id != model_id means a
+    #                           substitution the caller must weigh.
+    #
+    # Mirrored in headers by _signal() for transport-layer consumers, and covered by
+    # proxy/tests/test_detect_screening_transparency.py.
+    # ---------------------------------------------------------------------------
+    evidence_depth_limited: bool = True
+    detection_method: Optional[str] = None
+    profile_model_id: Optional[str] = None
+    # SUPPRESSION MARKER. Which false-positive suppression gate produced this verdict,
+    # and against which threshold — one of the closed values in
+    # proxy/detection/features.py (SUPPRESSION_REASONS), e.g. "token_count_below_80",
+    # "output_tokens_below_1", "function_call_part". None means the verdict was
+    # actually SCORED.
+    #
+    # A suppressed verdict is LOW with confidence 0.0 and no features triggered, which
+    # is a couldn't-assess, NOT a clean bill of health. Before this field the reason
+    # died inside features.py: a caller could only infer suppression from a conjunction
+    # of two absences (confidence == 0.0 AND features_triggered == []) that nothing
+    # documents, and the MCP tool consuming this endpoint tells its agent
+    # `LOW -- surface normally`. ALWAYS emitted, null when scored: an absent field is
+    # indistinguishable from an older proxy that never set it.
+    gate_reason: Optional[str] = None
+    # Which detection path served this verdict. ProxyClient.verify() serves callers
+    # from the local proxy OR the hosted API and the caller does not choose;
+    # _verify_hosted already stamps source="hosted", so the local path must declare
+    # itself or the two paths return different contracts under one method.
+    source: str = "local"
     # Governance decision surfaced to the CALLER so a configured block is not silently
     # decorative. These two fields are NOT interchangeable:
     #   action      = POLICY INTENT (NOT authorization). The customer policy applied, from
@@ -88,8 +137,6 @@ def _unknown(
         timestamp=_now(),
         detection_id=detection_id or _uuid(),
         error=error or None,
-        # A detection that never ran observed nothing at all.
-        evidence_depth_limited=True,
     )
 
 
@@ -122,11 +169,19 @@ def _signal(
     so signalling is best-effort -- a malformed action must not 500 an advisory 200 response.
     """
     action = str(action)
-    gate_action = str(gate_action)
+    gate_action = _normalize_gate_action(gate_action)
     verify.action = action
     verify.gate_action = gate_action
     try:
         http_response.headers["X-Arkheia-Risk"] = str(verify.risk_level)
+        # Screening transparency, mirrored for header-only consumers (the /v1/*
+        # interception path, the operator signal hook). A header that is ABSENT is
+        # indistinguishable from an older proxy that never set it, so both are always
+        # emitted -- "none" rather than omitted.
+        http_response.headers["X-Arkheia-Evidence-Limited"] = (
+            "true" if verify.evidence_depth_limited else "false"
+        )
+        http_response.headers["X-Arkheia-Profile"] = str(verify.profile_model_id or "none")
         # X-Arkheia-Action = POLICY INTENT (not authorization); mirrors audit action_taken.
         http_response.headers["X-Arkheia-Action"] = action
         # X-Arkheia-Gate-Action = AUTHORITATIVE authorized action. Consumers hard-block ONLY
@@ -135,6 +190,29 @@ def _signal(
     except Exception as e:  # pragma: no cover - defensive; headers are best-effort
         logger.error("Failed to set Arkheia signal headers (body fields still set): %s", e)
     return verify
+
+
+def _normalize_gate_action(value) -> str:
+    """Fail-safe gate authority: only an explicit block may authorize a block."""
+    try:
+        return "block" if str(value).lower() == "block" else "advise"
+    except Exception:
+        return "advise"
+
+
+def _output_tokens_from_usage(usage: Optional[dict[str, Any]]) -> Any:
+    if not isinstance(usage, dict):
+        return None
+    for key in (
+        "output_tokens",
+        "completion_tokens",
+        "candidatesTokenCount",
+        "eval_count",
+        "response_tokens",
+    ):
+        if key in usage:
+            return usage[key]
+    return None
 
 
 @router.post("/detect/verify", response_model=VerifyResponse)
@@ -165,36 +243,48 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
     if not req.model_id:
         r = _unknown(error="model_id_missing")
         if audit:
-            await audit.write(_audit_record(r, req, "pass"))
+            await audit.write(_audit_record(r, req, "pass", "advise"))
         return _signal(http_response, r, "pass", "advise")
 
-    if not req.response:
+    output_tokens = (
+        req.output_tokens
+        if req.output_tokens is not None
+        else _output_tokens_from_usage(req.usage)
+    )
+
+    if not req.response and output_tokens is None:
         r = _unknown(model_id=req.model_id, error="response_empty")
         if audit:
-            await audit.write(_audit_record(r, req, "pass"))
+            await audit.write(_audit_record(r, req, "pass", "advise"))
         return _signal(http_response, r, "pass", "advise")
 
     if engine is None:
         r = _unknown(model_id=req.model_id, error="engine_unavailable")
         if audit:
-            await audit.write(_audit_record(r, req, "pass"))
+            await audit.write(_audit_record(r, req, "pass", "advise"))
         return _signal(http_response, r, "pass", "advise")
 
     try:
-        result = await engine.verify(req.prompt, req.response, req.model_id)
+        metadata = {}
+        if output_tokens is not None:
+            metadata["output_tokens"] = output_tokens
+        if req.is_function_call is not None:
+            metadata["is_function_call"] = req.is_function_call
+        result = await engine.verify(req.prompt, req.response, req.model_id, **metadata)
     except Exception as e:
         logger.error("Detection engine error for model=%s: %s", req.model_id, e)
         r = _unknown(model_id=req.model_id, error="engine_error")
         if audit:
             try:
-                await audit.write(_audit_record(r, req, "pass"))
+                await audit.write(_audit_record(r, req, "pass", "advise"))
             except Exception as ae:
                 logger.error("Audit write failed after engine error: %s", ae)
         return _signal(http_response, r, "pass", "advise")
 
     # Determine action taken
     settings = getattr(request.app.state, "settings", None)
-    action = _determine_action(result.risk_level, settings)
+    action = str(_determine_action(result.risk_level, settings))
+    gate_action = _normalize_gate_action(getattr(result, "gate_action", "advise"))
 
     response = VerifyResponse(
         risk_level=result.risk_level,
@@ -205,28 +295,38 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
         timestamp=result.timestamp,
         detection_id=result.detection_id,
         error=result.error,
-        evidence_depth_limited=getattr(result, "evidence_depth_limited", None),
+        # Screening transparency -- see the field comments on VerifyResponse. Read
+        # via getattr so an engine built before these fields existed degrades to the
+        # fail-safe defaults (evidence-limited, no method, no profile) rather than
+        # raising inside a path contracted never to crash the pipeline it monitors.
+        evidence_depth_limited=bool(getattr(result, "evidence_depth_limited", True)),
+        detection_method=getattr(result, "detection_method", None),
+        profile_model_id=getattr(result, "profile_model_id", None),
+        # Read via getattr so an engine built before the field existed degrades to None
+        # rather than raising inside a path contracted never to crash the pipeline it
+        # monitors.
+        gate_reason=getattr(result, "gate_reason", None),
+        action=action,
+        gate_action=gate_action,
     )
 
     # Async audit write -- does not block; never crashes the response pipeline
     if audit:
         try:
-            await audit.write(_audit_record(response, req, action))
+            await audit.write(_audit_record(response, req, action, gate_action))
         except Exception as e:
             logger.error("Audit write failed (detection result unaffected): %s", e)
 
     # Push to Arkheia Governance Detection Adapter (fail-open, fire-and-forget).
-    #
-    # The envelope band used to be `... else "LOW"` — an UNRECOGNISED band defaulted to the
-    # SAFEST-SOUNDING value, so the governance record showed the fleet's unscreened default
-    # path (grok-4.20-*: UNKNOWN / no_profile_for_model) as a clean LOW, and dropped the
-    # reason entirely. A detection that never ran was indistinguishable, to an operator, from
-    # one that ran and found nothing wrong. The honest default for "we do not recognise this"
-    # is UNKNOWN. `error` now travels with it so the band is never a bare verdict.
+    # `audit` is passed so the OUTCOME of the push leaves its own hash-chained
+    # receipt: the detection receipt above records what we decided, this records
+    # whether the governance plane was actually told. They are different facts and
+    # a rail that only records the first cannot tell "delivered" from "dark".
     schedule_push(
         tenant_id=_ADAPTER_TENANT_ID,
         source_id=req.model_id,
         event_type="mcp_detection",
+        audit=audit,
         payload={
             "detection_id": response.detection_id,
             "model_id": response.model_id,
@@ -234,19 +334,42 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
             "confidence": response.confidence,
             "features_triggered": response.features_triggered,
             "profile_version": response.profile_version,
+            # Which suppression gate produced this LOW, if any. Without it the
+            # governance plane records a never-scored response and an assessed clean
+            # one as the same event.
+            "gate_reason": response.gate_reason,
             "prompt_hash": hashlib.sha256(req.prompt.encode()).hexdigest(),
             "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
             "action_taken": action,
+            "gate_action": gate_action,
+            # WHY the band is what it is. An UNKNOWN band with the reason dropped is a
+            # bare non-verdict: the operator surface can then tell "not assessed" from
+            # "assessed clean", but not "engine unavailable" from "no profile for this
+            # model" -- and only the second is fixable by shipping a profile. The audit
+            # record already carries both; a governance envelope that carries less than
+            # the local log is the weaker of the two compliance artefacts.
             "error": response.error,
             "evidence_depth_limited": response.evidence_depth_limited,
         },
+        # The band the envelope records. Normalised HERE, at the producer, and
+        # normalised again by detection_adapter.build_proxy_event at the wire schema --
+        # deliberately two layers, because this seam has failed in the LOW direction
+        # once already. This argument used to be
+        #     response.risk_level if response.risk_level in
+        #         ("LOW","MEDIUM","HIGH","CRITICAL") else "LOW"
+        # i.e. anything unrecognised -- UNKNOWN from an unavailable engine, an engine
+        # error, or no profile for the model -- was defaulted to the SAFEST-SOUNDING
+        # value, so a detection that never ran was published to the governance plane as
+        # a clean LOW. The honest default for "we do not recognise this" is UNKNOWN.
+        # The band exactly as the engine reported it still travels verbatim in
+        # `payload["risk_level"]` (-> `context.risk_level`), so nothing is lost.
         risk_level=_envelope_risk_band(response.risk_level),
     )
 
     # Surface the governance decision to the caller: policy `action` (mirrors action_taken in
     # the audit) + profile-earned `gate_action`. Keeps HTTP 200; blocking-at-transport stays the
     # job of proxy/middleware/interception.py. Consumers hard-block only when gate_action=="block".
-    return _signal(http_response, response, action, getattr(result, "gate_action", "advise"))
+    return _signal(http_response, response, action, gate_action)
 
 
 # Bands the governance surface understands. UNKNOWN is in the set on purpose: "we could not
@@ -276,7 +399,12 @@ def _determine_action(risk_level: str, settings) -> str:
     return "pass"
 
 
-def _audit_record(response: VerifyResponse, req: VerifyRequest, action: str) -> dict:
+def _audit_record(
+    response: VerifyResponse,
+    req: VerifyRequest,
+    action: str,
+    gate_action: str = "advise",
+) -> dict:
     return {
         "detection_id": response.detection_id,
         "timestamp": response.timestamp,
@@ -286,13 +414,24 @@ def _audit_record(response: VerifyResponse, req: VerifyRequest, action: str) -> 
         "risk_level": response.risk_level,
         "confidence": response.confidence,
         "features_triggered": response.features_triggered,
+        # Screening transparency in the FORENSIC record too. An audit row that
+        # says "LOW" for a verdict which scored nothing, or which was scored by
+        # another model's profile, is a record of a screening that did not
+        # happen -- and the audit log is the compliance artefact. Structural
+        # metadata only: no prompt or response text, per this log's contract.
+        "evidence_depth_limited": response.evidence_depth_limited,
+        "detection_method": response.detection_method,
+        "profile_model_id": response.profile_model_id,
+        # The suppression marker in the FORENSIC record too. This log is the compliance
+        # artefact: a row reading "LOW" for a response nothing was measured on records a
+        # screening that did not happen. Structural metadata only — a gate reason names
+        # a threshold, never prompt or response text, so the log's contract holds.
+        "gate_reason": response.gate_reason,
         "prompt_hash": hashlib.sha256(req.prompt.encode()).hexdigest(),
         "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
         "response_length": len(req.response),
         "action_taken": action,
+        "gate_action": _normalize_gate_action(gate_action),
         "source": "proxy",
         "error": response.error,
-        # Carried so the operator dashboard can distinguish an ASSESSED verdict from a
-        # couldn't-assess one; without it a LOW off zero features looks like evidence.
-        "evidence_depth_limited": response.evidence_depth_limited,
     }

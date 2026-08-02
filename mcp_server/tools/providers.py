@@ -28,6 +28,8 @@ from typing import Any
 
 import httpx
 
+from arkheia_common.egress import egress_async_client
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 60.0
@@ -125,7 +127,7 @@ async def call_grok(
         return _err_response(model, prompt, "XAI_API_KEY not set")
 
     try:
-        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        async with egress_async_client(timeout=_DEFAULT_TIMEOUT) as client:
             resp = await client.post(
                 "https://api.x.ai/v1/chat/completions",
                 headers={
@@ -187,7 +189,7 @@ async def call_gemini(
         f"/models/{model}:generateContent"
     )
     try:
-        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        async with egress_async_client(timeout=_DEFAULT_TIMEOUT) as client:
             resp = await client.post(
                 url,
                 params={"key": api_key},
@@ -250,7 +252,7 @@ async def call_together(
         return _err_response(model, prompt, "TOGETHER_API_KEY not set")
 
     try:
-        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        async with egress_async_client(timeout=_DEFAULT_TIMEOUT) as client:
             resp = await client.post(
                 "https://api.together.xyz/v1/chat/completions",
                 headers={
@@ -303,10 +305,13 @@ async def call_ollama(
 
     Returns: {response, model, prompt_hash, eval_count, error}
     """
-    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    # `.rstrip("/")`: an operator-written base URL commonly carries a trailing
+    # slash, and httpx does not fold the resulting `//api/generate`. Same class of
+    # defect as the governance-push misroute — see proxy/detection_adapter.py.
+    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 
     try:
-        async with httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT) as client:
+        async with egress_async_client(timeout=_OLLAMA_TIMEOUT) as client:
             resp = await client.post(
                 f"{base_url}/api/generate",
                 json={

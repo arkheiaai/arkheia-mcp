@@ -7,15 +7,113 @@ JSON API endpoints (/admin/health, /admin/registry/pull, etc.) return 401.
 
 import logging
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from proxy.auth import require_auth, COOKIE_NAME, verify_jwt
+from proxy.audit.decision_journal import (
+    DECIDED_AT_AT_EMIT,
+    PROFILE_ROLLBACK_APPLIED,
+    PROFILE_ROLLBACK_BACKUP_VALIDATION_FAILED,
+    PROFILE_ROLLBACK_INVALID_MODEL_ID,
+    PROFILE_ROLLBACK_IO_ERROR,
+    PROFILE_ROLLBACK_LIVE_VALIDATION_FAILED,
+    PROFILE_ROLLBACK_MODEL_MISMATCH,
+    PROFILE_ROLLBACK_NO_BACKUP,
+    PROFILE_ROLLBACK_NO_LIVE,
+    PROFILE_ROLLBACK_RELOAD_FAILED,
+    PROFILE_ROLLBACK_SERVER_NOT_READY,
+    build_profile_rollback_record,
+    emit,
+    stamp_decision,
+)
+from proxy.pathsafe import is_safe_model_id, safe_profile_write_path
+from proxy.registry.validator import ProfileValidator
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin")
+
+
+def _profile_paths(profile_dir: str, model_id: str) -> tuple[Path, Path]:
+    """Resolve the live and backup profile paths without allowing subpaths.
+
+    ``model_id`` is a REGISTRY identifier, not a filesystem stem: real ids
+    legitimately contain ``:`` and ``/`` (ollama ``qwen3:8b``, HF
+    ``deepseek-ai/DeepSeek-V3.1``). Those ids are cached by the registry client
+    under a percent-ENCODED single-component name, so rollback must derive the
+    same name or it can never target them. Resolution therefore goes through the
+    shared WRITE-side chokepoint ``proxy.pathsafe.safe_profile_write_path``:
+    syntactic pre-filter (``..``/NUL/backslash/empty/oversized rejected), realpath
+    containment on the RAW id (an absolute or escaping id is REJECTED, never
+    silently encoded into a contained name), then encoding to a single top-level
+    component.
+
+    This REPLACES the previous ``^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`` filename-stem
+    regex (which could never target a registry id containing ``:`` or ``/``); every
+    stem that regex admitted still resolves identically, because such a stem
+    encodes to itself. The invariant that regex existed to enforce — the resolved
+    live/backup paths are direct children of the profiles root, never a subpath —
+    is preserved by ``safe_profile_write_path`` AND re-asserted below, so a crafted
+    id still cannot escape: ``ValueError`` -> HTTP 400, no write and no reload.
+    """
+    if not isinstance(model_id, str) or not is_safe_model_id(model_id):
+        raise ValueError("model_id must be a safe profile identifier")
+    live_path = safe_profile_write_path(profile_dir, model_id)
+    if live_path is None:
+        raise ValueError("profile path escaped profile_dir")
+    root = Path(profile_dir).resolve()
+    backup_path = Path(str(live_path) + ".bak").resolve()
+    if live_path.parent != root or backup_path.parent != root:
+        raise ValueError("profile path escaped profile_dir")
+    return live_path, backup_path
+
+
+def _profile_model_id(profile: dict) -> Optional[str]:
+    model_id = profile.get("model") or profile.get("metadata", {}).get("model_id")
+    return str(model_id) if model_id is not None else None
+
+
+def _profile_version(profile: dict) -> Optional[str]:
+    version = profile.get("version") or profile.get("metadata", {}).get("version")
+    return str(version) if version is not None else None
+
+
+def _admin_error(status_code: int, detail: str, **extra):
+    body = {"status": "error", "detail": detail}
+    body.update(extra)
+    return JSONResponse(status_code=status_code, content=body)
+
+
+async def _emit_rollback(
+    request: Request,
+    *,
+    outcome: str,
+    model_id: str,
+    admin_email: Optional[str],
+    live_model_id: Optional[str] = None,
+    backup_model_id: Optional[str] = None,
+    live_version: Optional[str] = None,
+    backup_version: Optional[str] = None,
+    error_type: Optional[str] = None,
+) -> tuple[Optional[str], str]:
+    """Emit a rollback governance receipt without making rollback depend on the rail."""
+    record = build_profile_rollback_record(
+        outcome=outcome,
+        model_id=model_id,
+        admin_email=admin_email,
+        live_model_id=live_model_id,
+        backup_model_id=backup_model_id,
+        live_version=live_version,
+        backup_version=backup_version,
+        error_type=error_type,
+    )
+    record = stamp_decision(record, source=DECIDED_AT_AT_EMIT)
+    writer = getattr(request.app.state, "audit_writer", None)
+    receipt_status = await emit(writer, record)
+    return record["decision_id"], receipt_status
 
 _ADMIN_UI_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -725,11 +823,25 @@ async def health(request: Request, _: str = Depends(require_auth)):
         else None
     )
 
+    # Binary-integrity state of the compiled detection modules, published so the
+    # UNVERIFIED case is VISIBLE to an operator rather than only in a startup log
+    # line nobody reads. Codex finding 4: absent/unverifiable fails open, but it
+    # must not fail silent. A TAMPERED engine never reaches this endpoint at all —
+    # the lifespan refuses to start (proxy/main.py step 1c).
+    integrity = getattr(request.app.state, "integrity", None) or {
+        "status": "NOT_CHECKED",
+        "verified": False,
+        "startup_blocked": False,
+        "detail": "the startup integrity self-check did not record a result; treat "
+                  "the compiled detection modules as UNVERIFIED",
+    }
+
     return {
         "status": "ok",
         "profiles_loaded": profiles_loaded,
         "profile_ids": profile_ids,
         "last_registry_pull": last_pull,
+        "integrity": integrity,
     }
 
 
@@ -741,41 +853,273 @@ async def manual_registry_pull(request: Request, _: str = Depends(require_auth))
         return {"status": "error", "detail": "registry_client not configured"}
 
     try:
-        await registry_client.pull()
-        return {"status": "ok", "message": "Registry pull completed"}
+        summary = await registry_client.pull()
+        if not isinstance(summary, dict):
+            return {"status": "error", "detail": "registry_client returned invalid pull summary"}
+
+        updated = list(summary.get("updated") or [])
+        skipped = list(summary.get("skipped") or [])
+        errors = list(summary.get("errors") or [])
+        # Receipts are the caller-visible proof of the pull decision. Returning
+        # only a summary leaves every refusal unreachable from the HTTP surface.
+        receipts = list(summary.get("receipts") or [])
+
+        if errors:
+            status = "partial" if updated or skipped else "error"
+            message = "Registry pull completed with errors"
+        else:
+            status = "ok"
+            message = "Registry pull completed"
+
+        return {
+            "status": status,
+            "message": message,
+            "updated": updated,
+            "skipped": skipped,
+            "errors": errors,
+            "receipts": receipts,
+            "summary": {
+                **summary,
+                "updated": updated,
+                "skipped": skipped,
+                "errors": errors,
+                "receipts": receipts,
+            },
+        }
     except Exception as e:
         logger.error("Manual registry pull failed: %s", e)
         return {"status": "error", "detail": str(e)}
 
 
 @router.post("/profiles/{model_id}/rollback")
-async def rollback_profile(model_id: str, request: Request, _: str = Depends(require_auth)):
+@router.post("/profiles/{model_id:path}/rollback")
+async def rollback_profile(
+    model_id: str,
+    request: Request,
+    admin_email: str = Depends(require_auth),
+):
     """
     Roll back a profile to its previous version (.bak file).
 
     The registry client keeps a .bak of the previous version after each update.
-    Rollback replaces the current YAML with the .bak and reloads the router.
+    Rollback validates the live/backup pair before replacing the current YAML,
+    reloads the router, and restores the live file if reload fails.
+
+    Registered TWICE on purpose. The single-segment ``{model_id}`` route is the
+    canonical shape (and the one the admin auth floor enumerates); the
+    ``{model_id:path}`` alias additionally makes a slash-bearing registry id
+    (``deepseek-ai/DeepSeek-V3.1``) reachable at all — the single-segment matcher
+    can never target one, yet its cache/.bak DO exist, under the ENCODED
+    single-component name ``_profile_paths`` derives, so rollback would otherwise
+    be permanently unreachable for those ids. The alias adds no exposure:
+    ``_profile_paths`` rejects traversal via the shared pre-filter + realpath
+    containment and re-asserts ``parent == profiles_root`` before any write, so a
+    crafted id is a fail-closed 400 with no write and no reload.
     """
     settings = getattr(request.app.state, "settings", None)
     profile_router = getattr(request.app.state, "profile_router", None)
 
     if settings is None or profile_router is None:
-        return {"status": "error", "detail": "server not fully initialized"}
+        decision_id, receipt_status = await _emit_rollback(
+            request,
+            outcome=PROFILE_ROLLBACK_SERVER_NOT_READY,
+            model_id=model_id,
+            admin_email=admin_email,
+        )
+        return _admin_error(
+            503,
+            "server not fully initialized",
+            decision_id=decision_id,
+            receipt_status=receipt_status,
+        )
 
     profile_dir = settings.detection.profile_dir
-    path = Path(profile_dir) / f"{model_id}.yaml"
-    bak = Path(str(path) + ".bak")
+    # Path-traversal hardening (F23, WRITE side): resolve model_id through the
+    # shared pre-filter + realpath containment BEFORE building any write path, so
+    # a crafted id ("../pwned", an absolute path) cannot write/target a file
+    # outside the profiles root (nor act as a file-existence oracle / reload
+    # trigger). Fail-closed 400: no write, no reload, receipted below.
+    try:
+        path, bak = _profile_paths(profile_dir, model_id)
+    except ValueError:
+        decision_id, receipt_status = await _emit_rollback(
+            request,
+            outcome=PROFILE_ROLLBACK_INVALID_MODEL_ID,
+            model_id=model_id,
+            admin_email=admin_email,
+            error_type="ValueError",
+        )
+        return _admin_error(
+            400,
+            "invalid profile id",
+            decision_id=decision_id,
+            receipt_status=receipt_status,
+        )
+
+    if not path.exists():
+        decision_id, receipt_status = await _emit_rollback(
+            request,
+            outcome=PROFILE_ROLLBACK_NO_LIVE,
+            model_id=model_id,
+            admin_email=admin_email,
+        )
+        return _admin_error(
+            404,
+            f"no live profile available for {model_id}",
+            decision_id=decision_id,
+            receipt_status=receipt_status,
+        )
 
     if not bak.exists():
-        return {"status": "error", "detail": f"no backup available for {model_id}"}
+        decision_id, receipt_status = await _emit_rollback(
+            request,
+            outcome=PROFILE_ROLLBACK_NO_BACKUP,
+            model_id=model_id,
+            admin_email=admin_email,
+        )
+        return _admin_error(
+            404,
+            f"no backup available for {model_id}",
+            decision_id=decision_id,
+            receipt_status=receipt_status,
+        )
+
+    validator = ProfileValidator()
+    try:
+        live_bytes = path.read_bytes()
+        backup_bytes = bak.read_bytes()
+    except Exception as e:
+        logger.error("Rollback failed to read profile files for %s: %s", model_id, e)
+        decision_id, receipt_status = await _emit_rollback(
+            request,
+            outcome=PROFILE_ROLLBACK_IO_ERROR,
+            model_id=model_id,
+            admin_email=admin_email,
+            error_type=type(e).__name__,
+        )
+        return _admin_error(
+            500,
+            "could not read live/backup profile files",
+            decision_id=decision_id,
+            receipt_status=receipt_status,
+        )
 
     try:
-        path.write_bytes(bak.read_bytes())
+        live_profile = validator.validate(live_bytes)
+    except ValueError as e:
+        decision_id, receipt_status = await _emit_rollback(
+            request,
+            outcome=PROFILE_ROLLBACK_LIVE_VALIDATION_FAILED,
+            model_id=model_id,
+            admin_email=admin_email,
+            error_type=type(e).__name__,
+        )
+        return _admin_error(
+            409,
+            "live profile failed validation; refusing rollback",
+            decision_id=decision_id,
+            receipt_status=receipt_status,
+        )
+
+    live_model_id = _profile_model_id(live_profile)
+    live_version = _profile_version(live_profile)
+
+    try:
+        backup_profile = validator.validate(backup_bytes)
+    except ValueError as e:
+        decision_id, receipt_status = await _emit_rollback(
+            request,
+            outcome=PROFILE_ROLLBACK_BACKUP_VALIDATION_FAILED,
+            model_id=model_id,
+            admin_email=admin_email,
+            live_model_id=live_model_id,
+            live_version=live_version,
+            error_type=type(e).__name__,
+        )
+        return _admin_error(
+            400,
+            "backup profile failed validation; live profile left unchanged",
+            decision_id=decision_id,
+            receipt_status=receipt_status,
+        )
+
+    backup_model_id = _profile_model_id(backup_profile)
+    backup_version = _profile_version(backup_profile)
+    if live_model_id != backup_model_id:
+        decision_id, receipt_status = await _emit_rollback(
+            request,
+            outcome=PROFILE_ROLLBACK_MODEL_MISMATCH,
+            model_id=model_id,
+            admin_email=admin_email,
+            live_model_id=live_model_id,
+            backup_model_id=backup_model_id,
+            live_version=live_version,
+            backup_version=backup_version,
+        )
+        return _admin_error(
+            409,
+            "backup profile model_id does not match live profile",
+            decision_id=decision_id,
+            receipt_status=receipt_status,
+        )
+
+    tmp = path.with_name(f".{path.name}.rollback.tmp")
+    restore_tmp = path.with_name(f".{path.name}.rollback.restore.tmp")
+    try:
+        tmp.write_bytes(backup_bytes)
+        tmp.replace(path)
         await profile_router.reload()
-        return {"status": "ok", "message": f"Rolled back {model_id} from backup"}
+        decision_id, receipt_status = await _emit_rollback(
+            request,
+            outcome=PROFILE_ROLLBACK_APPLIED,
+            model_id=model_id,
+            admin_email=admin_email,
+            live_model_id=live_model_id,
+            backup_model_id=backup_model_id,
+            live_version=live_version,
+            backup_version=backup_version,
+        )
+        return {
+            "status": "ok",
+            "message": f"Rolled back {model_id} from backup",
+            "decision_id": decision_id,
+            "receipt_status": receipt_status,
+            "live_version": live_version,
+            "backup_version": backup_version,
+        }
     except Exception as e:
         logger.error("Rollback failed for %s: %s", model_id, e)
-        return {"status": "error", "detail": str(e)}
+        try:
+            restore_tmp.write_bytes(live_bytes)
+            restore_tmp.replace(path)
+            await profile_router.reload()
+        except Exception as restore_exc:
+            logger.error(
+                "Rollback restore failed for %s after reload error %s: %s",
+                model_id,
+                type(e).__name__,
+                restore_exc,
+            )
+        decision_id, receipt_status = await _emit_rollback(
+            request,
+            outcome=PROFILE_ROLLBACK_RELOAD_FAILED,
+            model_id=model_id,
+            admin_email=admin_email,
+            live_model_id=live_model_id,
+            backup_model_id=backup_model_id,
+            live_version=live_version,
+            backup_version=backup_version,
+            error_type=type(e).__name__,
+        )
+        return _admin_error(
+            500,
+            "profile rollback failed during router reload; live profile restored",
+            decision_id=decision_id,
+            receipt_status=receipt_status,
+        )
+    finally:
+        tmp.unlink(missing_ok=True)
+        restore_tmp.unlink(missing_ok=True)
 
 
 @router.get("/profiles")

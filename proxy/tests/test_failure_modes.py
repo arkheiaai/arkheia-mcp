@@ -231,8 +231,10 @@ class TestFailureModeContracts:
         from proxy.registry.validator import ProfileValidator
 
         validator = ProfileValidator()
-        # Profile with a smoke test that expects HIGH but will produce UNKNOWN
-        # (no features defined means classify_with_profile returns None -> inconclusive)
+        # Profile with a smoke test that expects HIGH but will produce UNKNOWN.
+        # `"features": []` is malformed (a list, not the required mapping), which
+        # makes classify_with_profile's `features_config.items()` raise -- caught
+        # by run_smoke_test's outer except and reported as a failure.
         profile_with_bad_smoke = {
             "model": "test-model",
             "version": "1.0",
@@ -244,12 +246,12 @@ class TestFailureModeContracts:
             },
         }
         passed, reason = validator.run_smoke_test(profile_with_bad_smoke)
-        # Either inconclusive (None result -> True) or failed (wrong risk -> False)
-        # The spec contract is that run_smoke_test returns (False, reason) on failure
-        # With no features, result is None -> smoke test is "inconclusive" -> True
-        # This is by-design: no features = can't discriminate = pass by default
-        # Document this nuance:
-        assert isinstance(passed, bool)
+        # 2026-07-27: `run_smoke_test` used to treat "no features computed" (a
+        # None result) as an automatic pass ("can't discriminate = pass by
+        # default") -- a vacuous-truth sibling of the integrity.py empty-manifest
+        # defect, fixed the same day. It is now pinned False: neither an
+        # inconclusive smoke test nor a raised exception may read as a pass.
+        assert passed is False, reason
         assert isinstance(reason, str)
 
     def test_smoke_test_failure_with_wrong_risk(self):
