@@ -947,6 +947,38 @@ class TestReceiptStatusIsDerivedNotAsserted:
         assert b"arkheia_blocked" in r.content
         assert b"THE-MODEL-ANSWER" not in r.content
 
+    async def test_a_warn_with_no_audit_writer_surfaces_no_receipt_header(self):
+        """
+        WARN delivers the upstream answer, so there is no JSON body field to
+        carry receipt status. The status still has to be caller-visible; without
+        this header, a warned HIGH whose audit writer was absent looked the same
+        as one whose evidence trail was accepted.
+        """
+        app, _ = build(risk="HIGH", action="warn")
+        assert not hasattr(app.state, "audit_writer")
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert r.content == UPSTREAM_BODY
+        assert r.headers["x-arkheia-action"] == "warn"
+        assert r.headers["x-arkheia-receipt"] == "no_audit_writer"
+
+    async def test_a_warn_whose_audit_write_raised_says_so_in_headers(self):
+        writer = self._RaisingWriter()
+        app, _ = build(risk="HIGH", action="warn", audit=writer)
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert writer.calls == 1, "the rail was never called; the test proves nothing"
+        assert r.content == UPSTREAM_BODY
+        assert r.headers["x-arkheia-receipt"] == "write_failed"
+
+    async def test_block_receipt_header_matches_the_body_status(self):
+        app, _ = build(risk="HIGH", action="block", gate_action="block")
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        payload = json.loads(r.content)
+        assert payload["receipt"] == "no_audit_writer"
+        assert r.headers["x-arkheia-receipt"] == payload["receipt"]
+
     async def test_a_refusal_with_no_audit_writer_does_not_claim_a_receipt(self):
         app, _ = build(risk="LOW", upstream_url="file:///etc/passwd")
         assert not hasattr(app.state, "audit_writer")
@@ -955,6 +987,7 @@ class TestReceiptStatusIsDerivedNotAsserted:
         payload = json.loads(r.content)
         assert payload["deny_code"] == "upstream_scheme_not_allowed"
         assert payload["receipt"] == "no_audit_writer"
+        assert r.headers["x-arkheia-receipt"] == payload["receipt"]
 
     async def test_a_refusal_whose_audit_write_raised_says_so(self):
         writer = self._RaisingWriter()
@@ -990,6 +1023,24 @@ class TestReceiptStatusIsDerivedNotAsserted:
             seen.add(json.loads((await c.post("/v1/chat/completions",
                                               json=REQ)).content)["receipt"])
         assert len(seen) == 2, f"the two cases produced the same status: {seen}"
+        assert seen <= RECEIPT_STATUSES
+
+    async def test_every_receipt_header_the_caller_can_see_is_from_the_closed_set(self):
+        from proxy.middleware.interception import RECEIPT_STATUSES
+
+        seen = set()
+        for kwargs in (
+            {"risk": "HIGH", "action": "warn"},
+            {"risk": "HIGH", "action": "warn", "audit": self._RaisingWriter()},
+            {"risk": "HIGH", "action": "block", "gate_action": "block"},
+            {"risk": "LOW", "upstream_url": "file:///etc/passwd"},
+        ):
+            app, _ = build(**kwargs)
+            async with client(app) as c:
+                seen.add((await c.post("/v1/chat/completions", json=REQ)).headers[
+                    "x-arkheia-receipt"
+                ])
+        assert len(seen) == 2, f"the covered paths produced no status variety: {seen}"
         assert seen <= RECEIPT_STATUSES
 
 
