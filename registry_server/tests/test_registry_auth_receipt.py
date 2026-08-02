@@ -330,6 +330,40 @@ def test_an_unstarted_writer_logs_loudly_rather_than_silently_dropping(env, capl
     assert not any(WRONG_KEY in m for m in messages), "the log echoed the raw key"
 
 
+def test_a_full_receipt_queue_logs_loudly_without_raw_credential(
+    env, tmp_path, monkeypatch, caplog
+):
+    """
+    Queue saturation is another UNRECORDED state. It must be visible in logs,
+    but the log line must name structural receipt facts rather than the raw API
+    key that caused the auth decision.
+    """
+    import logging
+
+    from proxy.audit.writer import AuditWriter
+
+    writer = AuditWriter(str(tmp_path / "registry_audit.jsonl"))
+    n = 0
+    while True:
+        try:
+            writer._queue.put_nowait({"receipt_id": f"filler-{n}"})
+        except Exception:
+            break
+        n += 1
+    assert n >= 1000, f"the queue accepted only {n} records; wrong premise"
+    monkeypatch.setattr(receipts, "_writer", writer)
+
+    with caplog.at_level(logging.ERROR, logger="registry_server.receipts"):
+        asyncio.run(receipts.emit(receipts.build_record(
+            receipt_id="e" * 32, decision="rejected", outcome_status=401,
+            method="GET", path="/profiles", client_ip="203.0.113.7",
+            credential=WRONG_KEY, keys_configured=1,
+        )))
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("audit queue full" in m and "UNRECORDED" in m for m in messages), messages
+    assert not any(WRONG_KEY in m for m in messages), "the log echoed the raw key"
+
+
 # ---------------------------------------------------------------------------
 # 5. Receipts are ON by default — no env var required to enable them
 # ---------------------------------------------------------------------------
