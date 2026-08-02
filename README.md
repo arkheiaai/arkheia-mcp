@@ -79,6 +79,8 @@ Arkheia works with any agent that supports MCP tools — Cursor, Windsurf, Cline
 
 Restart your agent after adding the configuration.
 
+For local Enterprise Proxy audit-log retrieval, set `ARKHEIA_PROXY_AUTH_TOKEN` to a proxy JWT session token. This is distinct from `ARKHEIA_API_KEY`: the MCP client sends it only to `ARKHEIA_PROXY_URL` as `Authorization: Bearer ...` for protected local endpoints such as `arkheia_audit_log`.
+
 ## Your First Detection
 
 Once installed, ask your agent:

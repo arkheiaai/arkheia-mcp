@@ -55,12 +55,20 @@ class ProxyClient:
         timeout: float = 10.0,
         hosted_url: Optional[str] = None,
         api_key: Optional[str] = None,
+        proxy_auth_token: Optional[str] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.hosted_url = (hosted_url or HOSTED_API_URL).rstrip("/")
         self.api_key = api_key or os.environ.get("ARKHEIA_API_KEY")
+        self.proxy_auth_token = proxy_auth_token or os.environ.get("ARKHEIA_PROXY_AUTH_TOKEN")
         self._local_available = True  # optimistic; flips on ConnectError
+
+    def _proxy_auth_headers(self) -> dict[str, str]:
+        """Headers for Enterprise Proxy endpoints protected by proxy.auth.require_auth."""
+        if not self.proxy_auth_token:
+            return {}
+        return {"Authorization": f"Bearer {self.proxy_auth_token}"}
 
     async def verify(
         self,
@@ -378,9 +386,13 @@ class ProxyClient:
 
         try:
             async with egress_async_client(timeout=self.timeout) as client:
+                kwargs: dict = {"params": params}
+                headers = self._proxy_auth_headers()
+                if headers:
+                    kwargs["headers"] = headers
                 resp = await client.get(
                     f"{self.base_url}/audit/log",
-                    params=params,
+                    **kwargs,
                 )
                 resp.raise_for_status()
                 return resp.json()
@@ -390,6 +402,13 @@ class ProxyClient:
         except httpx.ConnectError:
             logger.warning("ProxyClient: cannot connect to proxy at %s", self.base_url)
             return _empty_log("proxy_unavailable")
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status in (401, 403):
+                logger.warning("ProxyClient: /audit/log authentication failed with status %d", status)
+                return _empty_log("proxy_auth_failed")
+            logger.error("ProxyClient: /audit/log HTTP error status=%d", status)
+            return _empty_log(f"proxy_http_error_{status}")
         except Exception as e:
             logger.error("ProxyClient: /audit/log unexpected error: %s", e)
             return _empty_log("proxy_error")
