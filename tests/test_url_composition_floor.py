@@ -21,6 +21,14 @@ same shape in `server.py` (`ARKHEIA_PROXY_URL`), `mcp_server/tools/providers.py`
 have recalled, in three packages. A bug has siblings, and recall does not find
 them; a scanner does.
 
+(Root `server.py` has since been collapsed on `master` into a thin re-export of
+`mcp_server.server` — the duplicate ungated FastMCP it used to be was deleted, and
+with it the `ARKHEIA_PROXY_URL` join this file's sibling fix normalised. That env
+var's join now lives in `mcp_server/proxy_client.py`, which normalises its base at
+construction. The named-site control below therefore pins
+`proxy/detection_adapter.py`, the module the defect was actually found in, in
+`server.py`'s place — the same number of controls, anchored on the origin.)
+
 WHAT IS ENFORCED
 ----------------
 Every site in this repo that joins a base URL to a path must take its base from
@@ -82,7 +90,35 @@ CANONICAL = ("normalise_base_url", "adapter_target")
 # Sites whose base cannot be resolved inside its own module AND which have been
 # reviewed by a human. Empty is the goal state; an entry is a promise, not a pass.
 # Format: "relative/path.py::slot_name" -> reason.
-REVIEWED_UNRESOLVED: dict[str, str] = {}
+#
+# The four below arrived on `master` after this scanner was written and are the
+# scanner's two structural blind spots, not defects. Each was read before being
+# listed, and `stale == []` below deletes an entry the moment its site goes away.
+REVIEWED_UNRESOLVED: dict[str, str] = {
+    # Blind spot 1: the base is `<obj>.base_url` where `<obj>` is the return of
+    # `arkheia_common.hosted_authority.authorize_hosted_base_url`. `_bindings`
+    # resolves the slot NAME (`base_url`) and finds no assignment to it, because
+    # the normalisation lives one hop away on the object. That helper rejects the
+    # URL outright unless it parses as absolute http(s), and returns
+    # `base_url = urlunsplit((scheme, netloc, parsed.path.rstrip("/"), "", ""))`
+    # — normalised by construction, pinned by
+    # `tests/test_hosted_authority.py::assert decision.base_url == url.rstrip("/")`.
+    "examples/integration_test.py::base_url":
+        "f\"{authorized.base_url}/v1/detect\"; authorized = authorize_hosted_base_url(...)",
+    "examples/verify_response.py::base_url":
+        "f\"{authorized.base_url}/v1/detect\"; authorized = authorize_hosted_base_url(...)",
+    "proxy/crypto/profile_crypto.py::base_url":
+        "f\"{authorized.base_url}/v1/profile-key\"; authorized = "
+        "authorize_hosted_base_url(self.hosted_url), and self.hosted_url is itself "
+        "`hosted_url.rstrip(\"/\")` at __init__ — normalised twice over",
+    # Blind spot 2: the base is a @property `return`, and `_bindings` only reads
+    # Assign/AnnAssign. `_Server.url` returns `f"http://{host}:{port}"` off a bound
+    # socket's `server_address` — INTERNAL by construction, with no env value
+    # anywhere in its lineage.
+    "proxy/tests/test_egress_proxy_runtime.py::url":
+        "f\"{target_server.url}/...\"; _Server.url is a @property returning "
+        "f\"http://{host}:{port}\" from a live socket address, never an env read",
+}
 
 
 def _py_files() -> list[Path]:
@@ -356,6 +392,9 @@ def test_the_real_repo_sites_are_actually_being_seen():
             seen.add(path.relative_to(REPO_ROOT).as_posix())
 
     for expected in (
+        # The origin of the defect. Root `server.py` used to stand here; master
+        # deleted the duplicate server that carried its join (see module docstring),
+        # so pinning it would assert a construct that no longer exists.
         "proxy/detection_adapter.py",
         "mcp_server/proxy_client.py",
         "mcp_server/tools/providers.py",

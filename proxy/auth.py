@@ -21,6 +21,8 @@ import httpx
 import jwt
 from fastapi import HTTPException, Request, Response, status
 
+from arkheia_common.egress import egress_async_client
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -131,7 +133,7 @@ async def exchange_google_code(code: str) -> dict[str, Any]:
     Returns dict with 'email', 'name', 'picture' keys on success,
     or raises HTTPException on failure.
     """
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with egress_async_client(timeout=10.0) as client:
         # Exchange code for tokens
         token_resp = await client.post(
             GOOGLE_TOKEN_URL,
@@ -238,8 +240,8 @@ async def require_auth(request: Request) -> str:
     """FastAPI dependency that enforces authentication.
 
     Checks the session cookie first, then the Authorization header.
-    Returns the authenticated email address.
-    Raises 401 if not authenticated.
+    Returns the authenticated, whitelisted admin email address.
+    Raises 401 if not authenticated and 403 if the token subject is not an admin.
     """
     # 1. Cookie
     token = request.cookies.get(COOKIE_NAME)
@@ -261,6 +263,13 @@ async def require_auth(request: Request) -> str:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired session",
+        )
+
+    if not is_email_whitelisted(email):
+        logger.warning("Rejected authenticated session for non-whitelisted admin email")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
         )
 
     return email

@@ -89,6 +89,8 @@ from typing import Any, Optional
 
 import httpx
 
+from arkheia_common.egress import egress_async_client
+
 logger = logging.getLogger(__name__)
 
 # The receiver mounts exactly this path and signs over exactly this literal
@@ -545,7 +547,7 @@ async def push_event(
     headers = _sign_headers(body, secret, key_id)
 
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
+        async with egress_async_client(timeout=3.0) as client:
             resp = await client.post(
                 target,
                 content=body,

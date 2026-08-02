@@ -54,6 +54,22 @@ observations (the `... else "LOW"` governance envelope; push_event serialising
 outside its own try) and the two header-channel pins. The file discriminated
 rather than being uniformly red.
 
+SINCE MERGED WITH `sweep/mcp-governance-adapter-push` (PR #25) — the branch both
+PINNED-not-fixed observations named as the owner of their fix:
+  * the `... else "LOW"` envelope pin went red exactly as its docstring predicted and
+    has been INVERTED, not deleted — see
+    `TestTheGovernanceEnvelopeCarriesUnknownThrough`;
+  * the push now carries the receiver's real `ProxyEvent` envelope, so what this file
+    used to read at `pushed["payload"][...]` it reads at `pushed["context"][...]` and
+    `pushed["detection"][...]`. Same values, same questions, moved fields;
+  * the adapter's config moved from import-time module constants to a call-time
+    `_config()` env read, so the `wire` fixture sets env instead of module attributes.
+The second pin has ALSO been inverted, by this PR (#47): `json.dumps` no longer sits
+above the `try:` in `push_event`. It is now guarded, so a non-serialisable payload
+returns a FAILED `PushOutcome` with a receipted `signed: False` row and a
+FAILURE_MARKER log instead of escaping the fire-and-forget task — see
+`TestThePushSerialisesInsideItsFailOpenHandler`. Neither observation is live any more.
+
 DECLARED OVERLAP: `sweep/f2-mandatory-screening` independently surfaces
 `evidence_depth_limited` / `detection_method` / `profile_model_id` at this same endpoint.
 This branch adds `gate_reason` — the field that says WHICH gate fired and against WHICH
@@ -127,6 +143,14 @@ def wire(monkeypatch):
     w = _PushWire()
     # push_event returns early unless BOTH are configured; set them so the real
     # code path runs end to end.
+    #
+    # SET THE ENV, NOT MODULE ATTRIBUTES. `sweep/mcp-governance-adapter-push`
+    # replaced the import-time `DETECTION_ADAPTER_URL` / `_HMAC_SECRET` module
+    # constants with `detection_adapter._config()`, which reads os.environ at CALL
+    # time so a value cannot be frozen at import by whoever imported first. Patching
+    # the (now absent) attributes would AttributeError; patching env drives the same
+    # real read the production path takes, so this configures the flow rather than
+    # reaching around it.
     monkeypatch.setenv("DETECTION_ADAPTER_URL", "http://adapter.test")
     monkeypatch.setenv("DETECTION_ADAPTER_HMAC_SECRET", "test-secret")
     monkeypatch.setattr(httpx.AsyncClient, "send", w.send)
@@ -335,6 +359,17 @@ class TestTheAuditRecordCanTellSuppressedFromScored:
 # ---------------------------------------------------------------------------
 
 class TestTheGovernancePushCanTellSuppressedFromScored:
+    """
+    ENVELOPE NOTE. `sweep/mcp-governance-adapter-push` replaced the ad-hoc
+    `{"tenant_id", "source_id", "event_type", "payload", "risk_level"}` blob — which
+    the receiver's `normalise.rs::ProxyEvent` rejects outright — with the real
+    envelope. Everything that used to sit under `payload` and has no home in their
+    schema now sits under `context`, and the band lives at
+    `detection.fabrication_risk`. The QUESTION these tests ask is unchanged, and so
+    is every value asserted; only the path to the field moved. `context` is read
+    here rather than the parsed-then-reserialised dict for the same reason as
+    before — see the bytes test below.
+    """
 
     def test_the_pushed_body_carries_the_reason(self, client, wire):
         body = _verify(client, SHORT_RESPONSE).json()
@@ -342,6 +377,8 @@ class TestTheGovernancePushCanTellSuppressedFromScored:
         assert pushed["context"]["detection_id"] == body["detection_id"]
         assert pushed["context"]["risk_level"] == "LOW"
         assert pushed["context"]["risk_level_raw"] == "LOW"
+        assert pushed["event_id"] == body["detection_id"]
+        assert pushed["detection"]["fabrication_risk"] == "LOW"
         assert pushed["context"]["gate_reason"] == "token_count_below_80"
 
     def test_a_scored_push_carries_none(self, client, wire):
@@ -357,18 +394,59 @@ class TestTheGovernancePushCanTellSuppressedFromScored:
         assert b'"token_count_below_80"' in wire.bodies[0]
 
 
-class TestTheGovernanceEnvelopeBandIsHonestForUnknown:
-    """A couldn't-assess UNKNOWN must not be published as an authentic LOW."""
+class TestTheGovernanceEnvelopeCarriesUnknownThrough:
+    """THE PIN WENT RED AS DESIGNED, AND IS NOW THE FIX.
 
-    def test_unknown_is_published_as_uncertain_not_authentic(self, client, wire):
+    This class used to be `TestTheGovernanceEnvelopeBandIsPinnedNotFixed`, pinning
+    live BAD behaviour: `detect.py` pushed
+        risk_level = response.risk_level if response.risk_level in
+                     ("LOW","MEDIUM","HIGH","CRITICAL") else "LOW"
+    — the `... else "LOW"` shape, where UNKNOWN (engine unavailable, engine error, no
+    profile — every couldn't-assess path) reached the governance plane as a clean
+    **LOW** while the caller was correctly told UNKNOWN. The rail was MORE REASSURING
+    than the caller.
+
+    Its docstring named `sweep/mcp-governance-adapter-push` as the owner of the fix
+    and said "this test goes red the moment that branch lands", and its assertion
+    message said "delete this pin". That branch is what you are reading; it landed.
+    So the pin is not deleted but INVERTED — same scenario, same entry point, now
+    asserting the property the fix establishes, which is strictly more than the pin
+    asserted:
+
+      * `detect.py` passes the RAW band, so nothing coerces UNKNOWN on the way out;
+      * `build_proxy_event` writes `detection.fabrication_risk = "UNKNOWN"`;
+      * `_classification` refuses to claim AUTHENTIC for a non-LOW band, so the
+        receiver — whose `parse_classification` flattens every unrecognised string to
+        `Authentic` — is handed UNCERTAIN explicitly rather than by default;
+      * `context.risk_level_raw` carries our band verbatim regardless.
+
+    A couldn't-assess must never read as an all-clear on any of the four.
+    """
+
+    def test_unknown_is_not_republished_to_the_envelope_as_a_clean_low(self, client, wire):
         body = client.post("/detect/verify", json={
             "prompt": "p", "response": "r" * 400, "model_id": "no-such-model-xyz",
         }).json()
         assert body["risk_level"] == "UNKNOWN"
         pushed = wire.await_one()
         assert pushed["detection"]["fabrication_risk"] == "UNKNOWN"
-        assert pushed["detection"]["classification"] == "UNCERTAIN"
+        assert pushed["detection"]["classification"] == "UNCERTAIN", (
+            "the receiver maps every unrecognised classification to Authentic, so "
+            "anything but an explicit UNCERTAIN here is a confident clean verdict "
+            "on a response nothing was measured on"
+        )
         assert pushed["context"]["risk_level_raw"] == "UNKNOWN"
+        assert pushed["context"]["risk_level"] == "UNKNOWN"
+
+    def test_the_unknown_band_is_on_the_serialized_bytes(self, client, wire):
+        """The signed bytes, not a dict view — the same discipline as the gate_reason
+        bytes test, and the half a `... else "LOW"` regression would slip past."""
+        client.post("/detect/verify", json={
+            "prompt": "p", "response": "r" * 400, "model_id": "no-such-model-xyz",
+        })
+        wire.await_one()
+        assert b'"UNKNOWN"' in wire.bodies[0]
+        assert b'"AUTHENTIC"' not in wire.bodies[0]
 
 
 class TestThePushSerialisesInsideItsFailOpenHandler:
@@ -379,6 +457,7 @@ class TestThePushSerialisesInsideItsFailOpenHandler:
         self, monkeypatch, caplog
     ):
         import proxy.detection_adapter as da
+        # Env, not module attributes — see the `wire` fixture for why.
         monkeypatch.setenv("DETECTION_ADAPTER_URL", "http://adapter.test")
         monkeypatch.setenv("DETECTION_ADAPTER_HMAC_SECRET", "s")
         with caplog.at_level(logging.ERROR, logger="proxy.detection_adapter"):

@@ -28,6 +28,9 @@ import time
 import httpx
 import pytest
 
+# `.rstrip("/")`: these are operator-supplied base URLs too, and an e2e suite that
+# silently probed `//admin/health` would report the proxy down rather than the env
+# var wrong — the same misdiagnosis the governance-push misroute caused.
 PROXY_URL = os.environ.get("ARKHEIA_E2E_PROXY", "http://127.0.0.1:8098").rstrip("/")
 REGISTRY_URL = os.environ.get("ARKHEIA_E2E_REGISTRY", "http://127.0.0.1:8201").rstrip("/")
 RUN_E2E = os.environ.get("ARKHEIA_E2E", "0") == "1"

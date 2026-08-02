@@ -12,7 +12,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from proxy.detection.features import classify_with_profile, extract_structural_features
 
@@ -76,6 +76,8 @@ class DetectionEngine:
         prompt: str,
         response: str,
         model_id: str,
+        output_tokens: Any = None,
+        is_function_call: Any = None,
     ) -> DetectionResult:
         detection_id = str(uuid.uuid4())
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -104,13 +106,18 @@ class DetectionEngine:
             or None
         )
 
-        # Build signals from response text
-        # For /detect/verify we only have text -- no logprobs or timing
+        # Build signals from response text plus explicit provider metadata.
+        # Never infer output_tokens from response text: zero output is a
+        # server-side usage fact, not a string-shape fact.
         signals = extract_structural_features(response)
         # Add token-level approximation from word count
         words = response.split() if response else []
         signals.setdefault("tokens", words)
         signals.setdefault("token_count", len(words))
+        if output_tokens is not None:
+            signals["output_tokens"] = output_tokens
+        if is_function_call is not None:
+            signals["is_function_call"] = is_function_call
 
         try:
             result = classify_with_profile(profile, signals)
