@@ -103,15 +103,25 @@ def _literal_string(node: ast.AST) -> str | None:
     return None
 
 
+#: Names that construct the outbound client. ``egress_async_client`` is the
+#: shared factory in ``arkheia_common.egress``: it returns an
+#: ``httpx.AsyncClient`` built from the kwargs handed to it, so a construction
+#: spelled through the factory is the SAME construction as far as this invariant
+#: is concerned. It is listed because otherwise moving to the factory would make
+#: INV-3 discover nothing and pass vacuously — a redirect control silently
+#: unguarded is the exact failure this floor exists to prevent.
+CLIENT_CONSTRUCTORS = ("AsyncClient", "egress_async_client")
+
+
 def _async_client_calls(tree: ast.Module) -> list[ast.Call]:
-    """Every ``httpx.AsyncClient(...)`` construction."""
+    """Every async client construction — direct or via the egress factory."""
     out = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
-            if isinstance(func, ast.Attribute) and func.attr == "AsyncClient":
+            if isinstance(func, ast.Attribute) and func.attr in CLIENT_CONSTRUCTORS:
                 out.append(node)
-            elif isinstance(func, ast.Name) and func.id == "AsyncClient":
+            elif isinstance(func, ast.Name) and func.id in CLIENT_CONSTRUCTORS:
                 out.append(node)
     return out
 
@@ -227,7 +237,7 @@ def _violations_redirects(calls: list[ast.Call]) -> list[str]:
     for call in calls:
         kwargs = {kw.arg: kw.value for kw in call.keywords}
         if "follow_redirects" not in kwargs:
-            bad.append(f"line {call.lineno}: AsyncClient(...) does not pass "
+            bad.append(f"line {call.lineno}: client construction does not pass "
                        f"follow_redirects; an SSRF control must not be a library default")
             continue
         value = kwargs["follow_redirects"]
@@ -238,8 +248,24 @@ def _violations_redirects(calls: list[ast.Call]) -> list[str]:
 
 def test_inv3_redirect_following_is_disabled_explicitly(tree):
     calls = _async_client_calls(tree)
-    assert calls, "no httpx client construction found — discovery failure"
+    assert calls, "no outbound client construction found — discovery failure"
     assert _violations_redirects(calls) == []
+
+
+def test_inv3_discovery_covers_the_egress_factory_spelling():
+    """
+    Discovery self-test: the factory spelling must be FOUND, not merely tolerated.
+
+    Without this, a move from ``httpx.AsyncClient(...)`` to
+    ``egress_async_client(...)`` would empty the result set and INV-3 would pass
+    by examining nothing.
+    """
+    factory = ast.parse("egress_async_client(timeout=60.0)")
+    assert len(_async_client_calls(factory)) == 1
+    direct = ast.parse("httpx.AsyncClient(timeout=60.0)")
+    assert len(_async_client_calls(direct)) == 1
+    unrelated = ast.parse("json.dumps(timeout=60.0)")
+    assert _async_client_calls(unrelated) == []
 
 
 def test_inv3_negative_self_test():
@@ -247,10 +273,17 @@ def test_inv3_negative_self_test():
     truthy = ast.parse("httpx.AsyncClient(follow_redirects=True)").body[0].value
     variable = ast.parse("httpx.AsyncClient(follow_redirects=cfg)").body[0].value
     ok = ast.parse("httpx.AsyncClient(follow_redirects=False)").body[0].value
+    # The same four shapes through the shared egress factory.
+    f_missing = ast.parse("egress_async_client(timeout=60.0)").body[0].value
+    f_truthy = ast.parse("egress_async_client(follow_redirects=True)").body[0].value
+    f_ok = ast.parse("egress_async_client(follow_redirects=False)").body[0].value
     assert _violations_redirects([missing])
     assert _violations_redirects([truthy])
     assert _violations_redirects([variable])
     assert _violations_redirects([ok]) == []
+    assert _violations_redirects([f_missing])
+    assert _violations_redirects([f_truthy])
+    assert _violations_redirects([f_ok]) == []
 
 
 # ---------------------------------------------------------------------------

@@ -521,11 +521,21 @@ async def test_redirect_to_link_local_is_not_followed():
 
 
 async def test_follow_redirects_is_disabled_explicitly():
-    """The policy is stated at the call site, not inherited."""
+    """
+    The policy is stated at the call site, not inherited.
+
+    Exact-equality pin retained. ``trust_env: False`` is in the expected value
+    because the client is now built by ``arkheia_common.egress_async_client``,
+    which refuses ambient HTTP(S)_PROXY interposition on a credentialed call —
+    so the pin now covers BOTH egress controls rather than being loosened to a
+    subset check.
+    """
     app = make_app()
     with capture_upstream() as log:
         await asgi_request(app, "POST", "/proxy/grok/v1/chat/completions")
-    assert log.client_kwargs == [{"timeout": 60.0, "follow_redirects": False}]
+    assert log.client_kwargs == [
+        {"timeout": 60.0, "follow_redirects": False, "trust_env": False}
+    ]
 
 
 # ---------------------------------------------------------------------------

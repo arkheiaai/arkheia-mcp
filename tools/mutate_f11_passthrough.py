@@ -226,12 +226,25 @@ MUTANTS: list[Mutant] = [
            "    if connection_value:",
            "    connection_value = upstream_headers.get(\"connection\")\n"
            "    if False:", "framing"),
+    # M31/M32 REPOINTED (2026-08-02, master merge). The client is now built by
+    # `arkheia_common.egress.egress_async_client`, which forwards **kwargs to
+    # httpx.AsyncClient after pinning trust_env=False. The FAULTS are unchanged —
+    # only the spelling of the construction moved. Left un-repointed they would
+    # score NOT_OBSERVED, which is a measurement of nothing, not a pass.
     Mutant("M31", "redirects are followed",
-           "httpx.AsyncClient(timeout=60.0, follow_redirects=False)",
-           "httpx.AsyncClient(timeout=60.0, follow_redirects=True)", "framing"),
+           "egress_async_client(timeout=60.0, follow_redirects=False)",
+           "egress_async_client(timeout=60.0, follow_redirects=True)", "framing"),
     Mutant("M32", "redirect policy falls back to the library default",
-           "httpx.AsyncClient(timeout=60.0, follow_redirects=False)",
-           "httpx.AsyncClient(timeout=60.0)", "framing"),
+           "egress_async_client(timeout=60.0, follow_redirects=False)",
+           "egress_async_client(timeout=60.0)", "framing"),
+    # M32B is NEW and belongs to the merge: the second egress control the merged
+    # call site carries. `egress_async_client` refuses trust_env=True outright,
+    # so the removable form of the fault is a bare httpx client — the exact
+    # regression "just use httpx here" would reintroduce, letting an ambient
+    # HTTP(S)_PROXY interpose on a call carrying the caller's provider key.
+    Mutant("M32B", "outbound client stops pinning trust_env (ambient proxy can interpose)",
+           "egress_async_client(timeout=60.0, follow_redirects=False)",
+           "httpx.AsyncClient(timeout=60.0, follow_redirects=False)", "framing"),
 
     # -- receipts -----------------------------------------------------------
     Mutant("M33", "refusal receipt is never written",
