@@ -238,7 +238,10 @@ async def call_ollama(
 
     Returns: {response, model, prompt_hash, eval_count, error}
     """
-    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    # `.rstrip("/")`: an operator-written base URL commonly carries a trailing
+    # slash, and httpx does not fold the resulting `//api/generate`. Same class of
+    # defect as the governance-push misroute — see proxy/detection_adapter.py.
+    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
 
     try:
         async with egress_async_client(timeout=_OLLAMA_TIMEOUT) as client:

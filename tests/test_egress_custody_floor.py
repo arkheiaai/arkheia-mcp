@@ -33,10 +33,24 @@ EXCLUDED_DIRS = {
     "venv",
 }
 
+# Reconciled when master merged in: the four hosted-key sites that used to call
+# the factory directly (examples/integration_test.py::verify_response,
+# examples/verify_response.py::main,
+# mcp_server/proxy_client.py::ProxyClient._verify_hosted and
+# proxy/crypto/profile_crypto.py::DynamicKeyLoader._fetch_from_hosted) now reach
+# it one hop away, through
+# arkheia_common.hosted_authority.hosted_key_egress_client, which is itself a
+# thin `return egress_async_client(timeout=timeout)`. So the FACTORY CALL SITE
+# moved into that helper, which is listed below; the four callers did not stop
+# being custodied. They are pinned harder than this census pins them, by
+# tests/test_mcp_hosted_authority_floor.py, which auto-discovers every
+# X-Arkheia-Key-bearing production site (examples/ included -- it is not in that
+# floor's EXCLUDED_DIRS) and fails unless the site uses hosted_key_egress_client()
+# AND routes its URL through authorize_hosted_base_url(). The bypass invariant in
+# this file -- `report.raw_credentialed_sites == []` below -- is unchanged and
+# still proves no credentialed call reaches httpx without the no-env-proxy factory.
 EGRESS_SITE_MANIFEST = frozenset({
-    "examples/integration_test.py::verify_response",
-    "examples/verify_response.py::main",
-    "mcp_server/proxy_client.py::ProxyClient._verify_hosted",
+    "arkheia_common/hosted_authority.py::hosted_key_egress_client",
     "mcp_server/proxy_client.py::ProxyClient._verify_local",
     "mcp_server/proxy_client.py::ProxyClient.get_audit_log",
     "mcp_server/tools/providers.py::call_gemini",
@@ -44,7 +58,6 @@ EGRESS_SITE_MANIFEST = frozenset({
     "mcp_server/tools/providers.py::call_ollama",
     "mcp_server/tools/providers.py::call_together",
     "proxy/auth.py::exchange_google_code",
-    "proxy/crypto/profile_crypto.py::DynamicKeyLoader._fetch_from_hosted",
     "proxy/detection_adapter.py::push_event",
     "proxy/endpoints/passthrough.py::_forward",
     "proxy/middleware/interception.py::AIInterceptionMiddleware._obtain",

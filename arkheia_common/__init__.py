@@ -1,2 +1,1 @@
-"""Shared first-party helpers used by multiple Arkheia MCP packages."""
-
+"""Shared first-party helpers used by both Arkheia MCP and proxy code."""

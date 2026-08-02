@@ -125,9 +125,12 @@ class TestInv1SinglePrefixConstant:
 
 
 # ---------------------------------------------------------------------------
-# INV-2 — every AsyncClient passes follow_redirects=False explicitly
+# INV-2 — every forwarding client passes follow_redirects=False explicitly
 # ---------------------------------------------------------------------------
 
+#: Both spellings that construct the forwarding client: the raw httpx class and
+#: the shared no-proxy egress factory it is now reached through. Named so the
+#: two negative self-tests below can prove the scan covers each spelling.
 CLIENT_FACTORIES = {"AsyncClient", "egress_async_client"}
 
 
@@ -160,8 +163,9 @@ class TestInv2RedirectsNeverFollowed:
     """
     A followed 302 is a cross-host relay with the caller's credential attached —
     ``Location: http://169.254.169.254/`` and the gate's whole post-condition is
-    bypassed by the origin. Today that is prevented by an ``httpx`` DEFAULT. A
-    third party's default is not a control we own; it can change on a bump.
+    bypassed by the origin. The forwarding client now comes from the shared
+    no-proxy egress factory, but redirect refusal is still a call-site-owned
+    transport control.
     """
 
     def test_every_client_is_explicit(self, tree):
@@ -179,11 +183,18 @@ class TestInv2RedirectsNeverFollowed:
 
     def test_control_an_explicit_client_is_not_flagged(self):
         good = ast.parse(
-            "async with egress_async_client(follow_redirects=False) as client:\n"
+            "async with httpx.AsyncClient(follow_redirects=False) as client:\n"
             "    pass\n"
         )
         assert _clients_without_explicit_no_redirect(good) == []
         assert len(_async_clients(good)) == 1
+
+        via_factory = ast.parse(
+            "async with egress_async_client(follow_redirects=False) as client:\n"
+            "    pass\n"
+        )
+        assert _clients_without_explicit_no_redirect(via_factory) == []
+        assert len(_async_clients(via_factory)) == 1
 
 
 # ---------------------------------------------------------------------------
