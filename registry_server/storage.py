@@ -173,6 +173,15 @@ class ProfileStorage:
             or data.get("metadata", {}).get("model_id")
             or path.stem
         )
+        # A profile's OWN `model:` value is untrusted input too - it is authored
+        # in a YAML file, not validated on the way in, and it is what the listing
+        # advertises as a download id. If it cannot name a legitimate profile,
+        # refuse to publish an entry rather than advertise an id every download
+        # route will then reject (PR #66 floor; pinned by
+        # test_profile_storage_skips_unsafe_model_ids_in_listing). Raising here is
+        # caught by `list_profiles`, which logs and skips the file.
+        if not _is_safe_model_id(model_id):
+            raise ValueError(f"unsafe model_id: {model_id!r}")
         version = str(
             data.get("version")
             or data.get("metadata", {}).get("version", "1.0")

@@ -769,3 +769,52 @@ def test_storage_download_never_leaks_secret(storage_with_secret, vector):
     # Belt-and-braces: even if a future regression returned bytes, they must
     # never be the planted secret's content.
     assert out is None or b"SUPER_SECRET" not in out
+
+
+# ---------------------------------------------------------------------------
+# PR #66 floors, kept on merge into master's F23 hardening.
+#
+# Master's suite above covers traversal against a POPULATED profiles root and
+# proves the advertised download URL round-trips. These two pin behaviour master
+# does not otherwise assert:
+#   * containment must not depend on the scan branch having files to walk, and
+#   * a profile's OWN `model:` value is untrusted input, so an unsafe internal id
+#     must be skipped by the LISTING rather than advertised and rejected later.
+# ---------------------------------------------------------------------------
+
+
+def test_profile_storage_rejects_traversal_even_when_profiles_dir_is_empty(tmp_path):
+    """
+    A traversal-shaped model_id must not read a sibling YAML file just because
+    the configured profiles directory is empty.
+
+    Distinct from `test_storage_traversal_returns_none`: with an EMPTY root the
+    fallback scan iterates nothing, so the exact-filename branch's realpath
+    containment is the only thing between the id and the sibling file.
+    """
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    outside = tmp_path / "escaped.yaml"
+    outside.write_text("model: escaped\nversion: '1.0'\n", encoding="utf-8")
+    storage = ProfileStorage(str(profiles), "http://testserver")
+
+    assert storage.list_profiles() == []
+    assert storage.get_profile_bytes("../escaped") is None
+    assert storage.get_profile_bytes("nested/../../escaped") is None
+    assert outside.read_text(encoding="utf-8").startswith("model: escaped")
+
+
+def test_profile_storage_skips_unsafe_model_ids_in_listing(tmp_path):
+    """Listing must not publish a download URL for a path-shaped profile id.
+
+    The id here comes from INSIDE the YAML (`model: ../escaped`), not from the
+    filename, so the only thing that can catch it is the `_profile_meta` guard.
+    Without it the listing advertises an id every download route will refuse.
+    """
+    (tmp_path / "bad.yaml").write_text(
+        "model: ../escaped\nversion: '1.0'\n",
+        encoding="utf-8",
+    )
+    storage = ProfileStorage(str(tmp_path), "http://testserver")
+
+    assert storage.list_profiles() == []
