@@ -26,6 +26,20 @@ from typing import Optional
 
 import yaml
 
+from proxy.audit.decision_journal import (
+    PROFILE_AUTH_AUTHENTICATED,
+    PROFILE_AUTH_EMPTY,
+    PROFILE_AUTH_FAILED,
+    PROFILE_AUTH_LICENSE_REJECTED,
+    PROFILE_AUTH_MALFORMED,
+    PROFILE_AUTH_NOT_YAML,
+    PROFILE_AUTH_NO_MODEL_ID,
+    PROFILE_AUTH_SKIPPED_NO_KEY,
+    DecisionJournal,
+    build_profile_auth_record,
+    flush_journal,
+)
+
 logger = logging.getLogger(__name__)
 
 # Read once at import time; NSSM AppEnvironmentExtra sets these per installation.
@@ -176,14 +190,69 @@ class ProfileRouter:
       4. No match -> None (caller returns UNKNOWN)
     """
 
-    def __init__(self, profile_dir: str, decryption_key: Optional[bytes] = None):
+    def __init__(
+        self,
+        profile_dir: str,
+        decryption_key: Optional[bytes] = None,
+        audit_writer: Optional[object] = None,
+        journal: Optional[DecisionJournal] = None,
+    ):
         self._profiles: dict[str, dict] = {}
         self._lock = asyncio.Lock()
         self.profile_dir = profile_dir
         self._loaded_count = 0
         self._decryption_key = decryption_key
         self.last_load_report = ProfileLoadReport()
+        # The audit rail, handed in at CONSTRUCTION. ``proxy/main.py`` builds the
+        # AuditWriter at step 0 for exactly this reason: the router decides
+        # whether each encrypted profile authenticated, and before this change no
+        # writer existed when it decided.
+        self._audit_writer = audit_writer
+        self.decision_journal = journal or DecisionJournal()
+        #: Fire-and-forget flush tasks, held so the GC cannot collect a pending
+        #: one mid-flight (asyncio only holds a weak reference to a bare task).
+        self._flush_tasks: set = set()
         self.load_all()
+        self._schedule_flush()
+
+    def attach_audit_writer(self, writer: object) -> None:
+        """Attach the rail after construction. Anything already journalled is
+        flushed by the next ``flush_decision_journal()``."""
+        self._audit_writer = writer
+
+    async def flush_decision_journal(self) -> list:
+        """
+        Drain journalled profile-authentication decisions to the audit rail.
+
+        Returns ``[(decision_id, receipt_status), ...]``. Empty when no writer is
+        attached — and in that case the entries are LEFT in the journal rather
+        than discarded, so attaching a writer later still records them.
+        """
+        if self._audit_writer is None:
+            return []
+        return await flush_journal(self.decision_journal, self._audit_writer)
+
+    def _schedule_flush(self) -> None:
+        """
+        Flush from a synchronous call site.
+
+        ``load_all()`` is sync (it is called from ``__init__``) while the rail is
+        async, so decisions taken inside it cannot be handed over in the same
+        statement. Where a loop is already running — every reload path, and the
+        proxy lifespan — schedule the drain immediately; the ``decided_at`` /
+        ``receipt_enqueued_at`` / ``receipt_deferred_ms`` fields on each record
+        make the resulting gap visible rather than hidden. Where no loop is
+        running the entries stay journalled until someone flushes them.
+        """
+        if self._audit_writer is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(self.flush_decision_journal())
+        self._flush_tasks.add(task)
+        task.add_done_callback(self._flush_tasks.discard)
 
     def set_decryption_key(self, key: bytes) -> "ProfileLoadReport":
         """Set the decryption key and reload encrypted profiles.
@@ -195,6 +264,7 @@ class ProfileRouter:
         """
         self._decryption_key = key
         self.load_all()
+        self._schedule_flush()
         return self.last_load_report
 
     def load_all(self) -> None:
@@ -245,53 +315,99 @@ class ProfileRouter:
                 len(enc_files),
                 ", ".join(report.encrypted_skipped_no_key),
             )
+            # One record: no per-profile decision was TAKEN here, so emitting a
+            # per-profile row would overstate what happened. The names are
+            # journalled because "which surfaces went dark" is the fact an
+            # operator needs.
+            self.decision_journal.record(build_profile_auth_record(
+                outcome=PROFILE_AUTH_SKIPPED_NO_KEY,
+                skipped_profile_names=[f.name for f in enc_files],
+            ))
         elif enc_files:
+            from cryptography.exceptions import InvalidTag
             from proxy.crypto.profile_crypto import decrypt_profile
             for f in enc_files:
                 if not f.resolve().parent == path:  # aikido-ignore
                     continue
                 profile_name = f.name.replace(".yaml.enc", "")
                 report.encrypted_attempted += 1
+                encrypted = b""
                 try:
                     encrypted = f.read_bytes()
                     plaintext = decrypt_profile(encrypted, self._decryption_key, profile_name)
+                except InvalidTag as e:
+                    # THE TAMPER SIGNAL. AES-GCM refused the tag: the bytes on
+                    # disk are not the bytes that were sealed, or this is not the
+                    # key they were sealed with. Previously this was one ERROR
+                    # line in an unchained log; it is now a row on the
+                    # hash-chained rail carrying which bytes and which key, AND a
+                    # named unit in the work-done report below -- it must never
+                    # vanish into a log line while the summary reports a clean
+                    # load. InvalidTag carries an EMPTY message, so the exception
+                    # type is named explicitly or the operator gets no reason at
+                    # all.
+                    report.encrypted_failed.append(f.name)
+                    logger.error(
+                        "AUTHENTICATION FAILED for encrypted profile %s (%s) — "
+                        "tampered file or wrong key. Profile DROPPED; no "
+                        "plaintext fallback.",
+                        f.name, type(e).__name__,
+                    )
+                    self._journal_auth(PROFILE_AUTH_FAILED, profile_name, encrypted, e)
+                    continue
+                except ValueError as e:
+                    # Too short to contain a nonce and a tag -- never reached the
+                    # cipher at all. Discriminated from a tamper (InvalidTag)
+                    # rather than filed as one, so a truncated file does not cry
+                    # wolf; still a dropped, named, non-clean unit.
+                    report.encrypted_failed.append(f.name)
+                    logger.error(
+                        "AUTHENTICATION FAILED for encrypted profile %s (%s: %s) — "
+                        "malformed ciphertext. Profile DROPPED; no plaintext "
+                        "fallback.",
+                        f.name, type(e).__name__, e or "<no detail>",
+                    )
+                    self._journal_auth(PROFILE_AUTH_MALFORMED, profile_name, encrypted, e)
+                    continue
                 except Exception as e:
-                    # An authentication failure is the whole point of AES-GCM. It
-                    # is NOT recoverable and there is NO plaintext fallback: the
-                    # profile is dropped. But it must never vanish into a log line
-                    # while the summary below reports a clean load -- record the
-                    # unit by name so the count of work-not-done is auditable.
-                    # InvalidTag carries an EMPTY message, so name the exception
-                    # type explicitly or the operator gets "Failed ... :" and no
-                    # reason at all.
                     report.encrypted_failed.append(f.name)
                     logger.error(
                         "AUTHENTICATION FAILED for encrypted profile %s (%s: %s) — "
                         "tampered, or the wrong decryption key. Profile DROPPED; "
                         "no plaintext fallback.",
-                        f.name,
-                        type(e).__name__,
-                        e or "<no detail>",
+                        f.name, type(e).__name__, e or "<no detail>",
                     )
+                    self._journal_auth(PROFILE_AUTH_MALFORMED, profile_name, encrypted, e)
                     continue
+
+                # From here the profile HAS authenticated; every further refusal
+                # is a content decision, and each gets its own outcome so a
+                # tamper can never be confused with a licence expiry -- and its
+                # own named bucket in the work-done report.
                 try:
                     data = yaml.safe_load(plaintext)
-                    if not data:
-                        report.encrypted_rejected.append(f.name)
-                        continue
-                    if not _verify_profile_license(data, f.name):
-                        report.encrypted_rejected.append(f.name)
-                        continue
-                    model_id = self._extract_model_id(data, f.name)
-                    if model_id:
-                        profiles[model_id] = data
-                        report.encrypted_decrypted += 1
-                        logger.debug("Loaded encrypted profile: %s -> %s", f.name, model_id)
-                    else:
-                        report.encrypted_rejected.append(f.name)
                 except Exception as e:
                     report.encrypted_rejected.append(f.name)
-                    logger.error("Failed to parse decrypted profile %s: %s", f.name, e)
+                    logger.error("Decrypted profile %s is not valid YAML: %s", f.name, e)
+                    self._journal_auth(PROFILE_AUTH_NOT_YAML, profile_name, encrypted, e)
+                    continue
+                if not data:
+                    report.encrypted_rejected.append(f.name)
+                    self._journal_auth(PROFILE_AUTH_EMPTY, profile_name, encrypted, None)
+                    continue
+                if not _verify_profile_license(data, f.name):
+                    report.encrypted_rejected.append(f.name)
+                    self._journal_auth(PROFILE_AUTH_LICENSE_REJECTED, profile_name, encrypted, None)
+                    continue
+                model_id = self._extract_model_id(data, f.name)
+                if not model_id:
+                    report.encrypted_rejected.append(f.name)
+                    self._journal_auth(PROFILE_AUTH_NO_MODEL_ID, profile_name, encrypted, None)
+                    continue
+                profiles[model_id] = data
+                report.encrypted_decrypted += 1
+                logger.debug("Loaded encrypted profile: %s -> %s", f.name, model_id)
+                self._journal_auth(PROFILE_AUTH_AUTHENTICATED, profile_name, encrypted, None)
 
         self._profiles = profiles
         self._loaded_count = len(profiles)
@@ -305,6 +421,27 @@ class ProfileRouter:
             logger.error("ProfileRouter: %s", report.summary(self.profile_dir))
         else:
             logger.info("ProfileRouter: %s", report.summary(self.profile_dir))
+
+    def _journal_auth(
+        self,
+        outcome: str,
+        profile_name: str,
+        ciphertext: bytes,
+        error: Optional[BaseException],
+    ) -> str:
+        """
+        Journal one profile-authentication decision.
+
+        ``error`` contributes its TYPE only. An exception message can carry the
+        text of whatever it choked on; a class name cannot.
+        """
+        return self.decision_journal.record(build_profile_auth_record(
+            outcome=outcome,
+            profile_name=profile_name,
+            ciphertext=ciphertext or None,
+            key=self._decryption_key,
+            error_type=type(error).__name__ if error is not None else None,
+        ))
 
     def _load_plaintext(self, f: Path) -> Optional[dict]:
         """Load and validate a plaintext YAML profile."""
@@ -464,6 +601,11 @@ class ProfileRouter:
         self.profile_dir = target
         self.load_all()
         self.profile_dir = old_dir if profile_dir else target
+        # A scheduled registry pull reloads profiles hours after startup. The
+        # authentication decisions it takes are as governed as the ones at boot,
+        # so they go to the same rail rather than being lost because nobody was
+        # holding the journal.
+        self._schedule_flush()
 
         logger.info("ProfileRouter reloaded: %d valid profiles", self._loaded_count)
 

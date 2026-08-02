@@ -80,7 +80,7 @@ import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Optional
 
 import pytest
 import yaml
@@ -336,16 +336,18 @@ def test_the_hosted_endpoint_issues_the_key_the_build_encrypted_with():
     )
 
 
-def test_pinned_hosted_derivation_matches_the_live_arkheia_proxy_source():
+def _pinned_hosted_derivation_source() -> Optional[Path]:
     """
-    Keep the transcription above honest against the sibling repo.
+    Locate the sibling arkheia-proxy source this module pins, or return None.
 
-    HONEST LIMITATION, stated rather than hidden: arkheia-mcp CI has no
-    arkheia-proxy checkout, so in CI this SKIPS. A cross-repo derivation contract
-    is not verifiable from inside one repo's CI — closing that needs either a
-    shared contract module both repos import, or a job that checks out both. Until
-    then this guard only fires for a developer or agent with both trees, and the
-    ledger records the gap rather than counting a skip as coverage.
+    Resolved at IMPORT time, not inside the test body, so the resulting skip can
+    be expressed as a declarative ``@pytest.mark.skipif`` mark. That is not a
+    style preference: this module carries strict xfails, and
+    ``tests/test_ci_enforcement_floor.py::test_inv4_unmodelled_skip_paths_are_surfaced``
+    correctly refuses a runtime ``pytest.skip(...)`` in a module that does,
+    because a runtime skip is invisible to INV-4's mark walk and could therefore
+    hide a strict xfail from it. A ``skipif`` mark IS visible to that walk, so the
+    coverage gap below stays declared AND stays checkable.
     """
     candidates = []
     env_override = os.environ.get("ARKHEIA_PROXY_REPO")
@@ -360,22 +362,43 @@ def test_pinned_hosted_derivation_matches_the_live_arkheia_proxy_source():
     for repo in candidates:
         source = repo / PINNED_HOSTED_DERIVATION_PATH
         if source.exists():
-            text = source.read_text(encoding="utf-8")
-            assert PINNED_HOSTED_DERIVATION_SOURCE in text, (
-                f"{PINNED_HOSTED_DERIVATION_REPO}/{PINNED_HOSTED_DERIVATION_PATH} no "
-                f"longer contains the derivation pinned in this file at commit "
-                f"{PINNED_HOSTED_DERIVATION_COMMIT}. Re-pin "
-                f"PINNED_HOSTED_DERIVATION_SOURCE and hosted_issued_key_b64 from the "
-                f"current source, then re-check the xfail markers in this module: a "
-                f"corrected derivation makes them XPASS."
-            )
-            return
+            return source
+    return None
 
-    pytest.skip(
+
+PINNED_HOSTED_DERIVATION_SOURCE_PATH = _pinned_hosted_derivation_source()
+
+
+@pytest.mark.skipif(
+    PINNED_HOSTED_DERIVATION_SOURCE_PATH is None,
+    reason=(
         "arkheia-proxy checkout not found (looked at $ARKHEIA_PROXY_REPO and "
         f"{REPO_ROOT.parent / PINNED_HOSTED_DERIVATION_REPO}); the cross-repo pin in "
         "this module is UNVERIFIED in this environment. This is a real coverage gap, "
         "not a pass."
+    ),
+)
+def test_pinned_hosted_derivation_matches_the_live_arkheia_proxy_source():
+    """
+    Keep the transcription above honest against the sibling repo.
+
+    HONEST LIMITATION, stated rather than hidden: arkheia-mcp CI has no
+    arkheia-proxy checkout, so in CI this SKIPS. A cross-repo derivation contract
+    is not verifiable from inside one repo's CI — closing that needs either a
+    shared contract module both repos import, or a job that checks out both. Until
+    then this guard only fires for a developer or agent with both trees, and the
+    ledger records the gap rather than counting a skip as coverage.
+    """
+    source = PINNED_HOSTED_DERIVATION_SOURCE_PATH
+    assert source is not None, "the skipif above should have prevented this"
+    text = source.read_text(encoding="utf-8")
+    assert PINNED_HOSTED_DERIVATION_SOURCE in text, (
+        f"{PINNED_HOSTED_DERIVATION_REPO}/{PINNED_HOSTED_DERIVATION_PATH} no "
+        f"longer contains the derivation pinned in this file at commit "
+        f"{PINNED_HOSTED_DERIVATION_COMMIT}. Re-pin "
+        f"PINNED_HOSTED_DERIVATION_SOURCE and hosted_issued_key_b64 from the "
+        f"current source, then re-check the xfail markers in this module: a "
+        f"corrected derivation makes them XPASS."
     )
 
 

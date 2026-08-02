@@ -45,11 +45,16 @@ services:
     ports:
       - "8200:8200"
     environment:
+      # Empty = UNPROVISIONED = reject all. That default is deliberate and is
+      # the fail-closed branch this service is named for -- do not "fix" it by
+      # supplying a fallback key.
       - ARKHEIA_REGISTRY_KEYS=${ARKHEIA_REGISTRY_KEYS:-}
       - ARKHEIA_REGISTRY_PROFILE_DIR=/app/profiles
       - ARKHEIA_REGISTRY_BASE_URL=http://localhost:8200
+      - ARKHEIA_REGISTRY_AUDIT_LOG=/var/log/arkheia/registry-audit.jsonl
     volumes:
       - ./profiles:/app/profiles:ro
+      - registry_audit_logs:/var/log/arkheia   # auth-decision receipts must survive the container
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
@@ -76,3 +81,4 @@ services:
 volumes:
   profile_data:
   audit_logs:
+  registry_audit_logs:

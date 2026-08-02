@@ -57,7 +57,18 @@ class TestProxyClientVerify:
 
     @pytest.mark.asyncio
     async def test_verify_returns_proxy_response(self):
-        """CRITERION 2: verify() returns proxy response dict."""
+        """
+        CRITERION 2: verify() surfaces the proxy's verdict values.
+
+        This asserted ``result == expected`` — exact verbatim passthrough of the
+        local proxy's body. That equality was itself the PR #17 finding-1 defect
+        on the local success path: it required the client to return whatever the
+        proxy sent, which is how that path came to omit `detection_method`,
+        `evidence_depth_limited` and `source` while the hosted path carried them.
+        The proxy body is an INPUT, not the caller-facing contract, so the
+        assertion is now "every value the proxy reported survives, inside the
+        full verdict shape" rather than "the dict is byte-identical".
+        """
         expected = {
             "risk_level": "HIGH",
             "confidence": 0.92,
@@ -75,7 +86,24 @@ class TestProxyClientVerify:
             client = ProxyClient("http://localhost:8099")
             result = await client.verify("q", "a", "gpt-4o")
 
-        assert result == expected
+        # Every value the proxy reported reaches the caller unchanged...
+        for key, value in expected.items():
+            assert result[key] == value, (
+                f"verify() altered {key!r}: proxy said {value!r}, caller got "
+                f"{result.get(key)!r}"
+            )
+        # ...inside the full verdict shape, so no caller has to guess whether a
+        # transparency field is absent or false.
+        from mcp_server.proxy_client import ROUTED_DETECTION_FIELDS
+        assert set(result) == set(ROUTED_DETECTION_FIELDS), (
+            f"local success path returned {sorted(result)}, contract is "
+            f"{sorted(ROUTED_DETECTION_FIELDS)}"
+        )
+        assert result["source"] == "local"
+        assert result["error"] is None
+        # The proxy did not report its evidence depth, so the client must not
+        # invent one: absent => limited.
+        assert result["evidence_depth_limited"] is True
 
     @pytest.mark.asyncio
     async def test_verify_returns_unknown_on_connect_error(self):
@@ -125,6 +153,33 @@ class TestProxyClientVerify:
 
             payload = mock_client.post.call_args.kwargs["json"]
             assert payload.get("session_id") == "session-xyz"
+
+    @pytest.mark.asyncio
+    async def test_verify_passes_structural_usage_metadata(self):
+        """Provider usage metadata reaches /detect/verify so output_tokens=0 is a live signal."""
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_cls.return_value.__aenter__.return_value = mock_client
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"risk_level": "LOW", "confidence": 0.0,
+                                           "features_triggered": [], "detection_id": "x"}
+            mock_resp.raise_for_status = MagicMock()
+            mock_client.post.return_value = mock_resp
+
+            client = ProxyClient("http://localhost:8099")
+            await client.verify(
+                "q",
+                "",
+                "gpt-4o",
+                usage={"completion_tokens": 0},
+                output_tokens=0,
+                is_function_call=True,
+            )
+
+            payload = mock_client.post.call_args.kwargs["json"]
+            assert payload["usage"] == {"completion_tokens": 0}
+            assert payload["output_tokens"] == 0
+            assert payload["is_function_call"] is True
 
 
 class TestProxyClientAuditLog:
@@ -200,6 +255,40 @@ class TestMCPToolBehaviour:
             mcp_server_module.proxy = original_proxy
 
     @pytest.mark.asyncio
+    async def test_arkheia_verify_tool_forwards_empty_output_metadata(self):
+        """Direct verify can prove a hard-empty output; it is not structurally text-only."""
+        from mcp_server import server as mcp_server_module
+
+        expected = {"risk_level": "LOW", "confidence": 0.0,
+                    "features_triggered": [], "detection_id": "uuid-test"}
+
+        original_proxy = mcp_server_module.proxy
+        mock_proxy = AsyncMock(spec=ProxyClient)
+        mock_proxy.verify.return_value = expected
+        mcp_server_module.proxy = mock_proxy
+
+        try:
+            result = await mcp_server_module.arkheia_verify(
+                prompt="test",
+                response="",
+                model="gpt-4o",
+                usage={"completion_tokens": 0},
+                output_tokens=0,
+                is_function_call=False,
+            )
+            assert result == expected
+            mock_proxy.verify.assert_called_once_with(
+                prompt="test",
+                response="",
+                model_id="gpt-4o",
+                usage={"completion_tokens": 0},
+                output_tokens=0,
+                is_function_call=False,
+            )
+        finally:
+            mcp_server_module.proxy = original_proxy
+
+    @pytest.mark.asyncio
     async def test_arkheia_verify_returns_unknown_on_proxy_failure(self):
         """CRITERION 7: Tool never raises -- UNKNOWN returned on proxy failure."""
         from mcp_server import server as mcp_server_module
@@ -237,6 +326,106 @@ class TestMCPToolBehaviour:
             await mcp_server_module.arkheia_audit_log(limit=9999)
             call_kwargs = mock_proxy.get_audit_log.call_args.kwargs
             assert call_kwargs["limit"] <= 500
+        finally:
+            mcp_server_module.proxy = original_proxy
+
+    @pytest.mark.parametrize(
+        "tool_name,provider_name,provider_result,expected_verify_kwargs",
+        [
+            (
+                "run_grok",
+                "call_grok",
+                {
+                    "response": "",
+                    "model": "grok-4-fast-non-reasoning",
+                    "prompt_hash": "hash",
+                    "usage": {"completion_tokens": 0},
+                    "error": None,
+                },
+                {
+                    "model_id": "grok-4-fast-non-reasoning",
+                    "usage": {"completion_tokens": 0},
+                },
+            ),
+            (
+                "run_gemini",
+                "call_gemini",
+                {
+                    "response": "",
+                    "model": "gemini-2.5-flash",
+                    "prompt_hash": "hash",
+                    "usage": {"candidatesTokenCount": 0},
+                    "error": None,
+                },
+                {
+                    "model_id": "gemini-2.5-flash",
+                    "usage": {"candidatesTokenCount": 0},
+                },
+            ),
+            (
+                "run_ollama",
+                "call_ollama",
+                {
+                    "response": "",
+                    "model": "phi4:14b",
+                    "prompt_hash": "hash",
+                    "eval_count": 0,
+                    "error": None,
+                },
+                {
+                    "model_id": "phi4:14b",
+                    "output_tokens": 0,
+                },
+            ),
+            (
+                "run_together",
+                "call_together",
+                {
+                    "response": "",
+                    "model": "moonshotai/Kimi-K2.5",
+                    "prompt_hash": "hash",
+                    "usage": {"completion_tokens": 0},
+                    "error": None,
+                },
+                {
+                    "model_id": "moonshotai/Kimi-K2.5",
+                    "usage": {"completion_tokens": 0},
+                },
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_provider_wrapper_forwards_output_metadata_to_screening(
+        self,
+        tool_name,
+        provider_name,
+        provider_result,
+        expected_verify_kwargs,
+    ):
+        """Provider wrappers must forward their native zero-output metadata to F7 screening."""
+        from mcp_server import server as mcp_server_module
+
+        original_proxy = mcp_server_module.proxy
+        mock_proxy = AsyncMock(spec=ProxyClient)
+        mock_proxy.verify.return_value = {"risk_level": "LOW", "confidence": 0.0,
+                                          "features_triggered": [], "detection_id": "uuid-test"}
+        mcp_server_module.proxy = mock_proxy
+
+        try:
+            with patch.object(mcp_server_module, "check", lambda _tool: None), \
+                 patch.object(
+                     mcp_server_module,
+                     provider_name,
+                     AsyncMock(return_value=provider_result),
+                 ):
+                result = await getattr(mcp_server_module, tool_name)("prompt")
+
+            assert result["arkheia"]["risk_level"] == "LOW"
+            mock_proxy.verify.assert_called_once_with(
+                prompt="prompt",
+                response="",
+                **expected_verify_kwargs,
+            )
         finally:
             mcp_server_module.proxy = original_proxy
 
@@ -393,7 +582,14 @@ class TestMemoryTools:
         """memory_retrieve: limit is capped at 50 in server.py."""
         from mcp_server import server as mcp_server_module
 
-        # Just verify it doesn't raise and returns a dict
-        result = await mcp_server_module.memory_retrieve(query="anything", limit=9999)
-        assert "entities" in result
-        assert "total" in result
+        for i in range(55):
+            await mcp_server_module.memory_store(
+                name=f"Node {i:03d}",
+                entity_type="node",
+                observations=[f"obs {i}"],
+            )
+
+        result = await mcp_server_module.memory_retrieve(query="Node", limit=9999)
+
+        assert len(result["entities"]) == 50
+        assert result["total"] == 55

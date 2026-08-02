@@ -16,11 +16,18 @@ jobs:
   unit:
     name: unit-tests
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       # Pin: actions/checkout v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          # Aikido LOW: a checkout that keeps the token in .git/config leaves it
+          # readable by every later step, including the real `npm pack` this job
+          # runs, which executes repo-authored build scripts. This job never
+          # pushes, so the credential has no purpose here.
+          persist-credentials: false
+          fetch-depth: 0
 
       - name: Set up Python
         # Pin: actions/setup-python v5.3.0
@@ -28,28 +35,107 @@ jobs:
         with:
           python-version: '3.12'
 
+      # This job collects `tests/` with the default `python_files`, so it also runs
+      # `tests/test_packed_artifact_floor.py`, which produces the REAL published
+      # artifact with `npm pack`. Pinned here as well as in floor-invariants.yml
+      # rather than inherited from the runner image: the floor FAILS when npm is
+      # absent (a skipped artifact check is indistinguishable from a passing one),
+      # so an image change must not be able to turn this job red for a reason that
+      # has nothing to do with the code.
+      - name: Set up Node (the packed-artifact floor runs a real `npm pack`)
+        # Pin: actions/setup-node v4.1.0
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af  # v4.1.0
+        with:
+          node-version: '20'
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r mcp_server/requirements.txt
-          # respx: fixture used by tests/test_detection_adapter.py.
-          # cryptography: imported by proxy/crypto/profile_crypto.py (encrypted
-          #   profiles) but MISSING from requirements.txt — a latent production
-          #   gap flagged in the PR. Installed here so the crypto suites run.
-          pip install cryptography respx pytest pytest-asyncio pytest-timeout
+          # NO ad-hoc installs. cryptography / python-dotenv / respx /
+          # pytest-timeout are now DECLARED in requirements.txt. Installing them
+          # here instead meant CI green did not prove the declared manifest could
+          # run the suite — the workflow papered over its own dependency gap.
+          # Security scanner tools are installed in the next step and are
+          # explicitly classified as CI-only by INV-2.
+          # Enforced by tests/test_ci_enforcement_floor.py (INV-2).
+
+      - name: Install required security scanners
+        run: pip install bandit[toml] pip-audit
+
+      - name: Run required security scan aggregate
+        run: |
+          set -euo pipefail
+          bandit -r proxy/ mcp_server/ registry_server/ scripts/ \
+            --exclude proxy/tests,mcp_server/tests,registry_server/tests \
+            --skip B101,B601 \
+            -lll -f json -o bandit-results.json
+          pip-audit -r requirements.txt --format json -o pip-audit-results.json
+          python - <<'PY'
+          import json
+          import sys
+
+          with open("pip-audit-results.json", encoding="utf-8") as f:
+              report = json.load(f)
+          dependencies = report.get("dependencies")
+          if not isinstance(dependencies, list) or not dependencies:
+              print("pip-audit produced no dependency records; failing closed")
+              sys.exit(1)
+          findings = []
+          for dep in dependencies:
+              for vuln in dep.get("vulns", []):
+                  aliases = ", ".join(vuln.get("aliases", [])) or "no aliases"
+                  findings.append(
+                      f"{dep.get('name')} {dep.get('version', '?')}: "
+                      f"{vuln.get('id')} ({aliases})"
+                  )
+          if findings:
+              print("pip-audit reported vulnerabilities:")
+              for finding in findings:
+                  print(f"  - {finding}")
+              sys.exit(1)
+          print("pip-audit reported no vulnerabilities")
+          PY
+
+      - name: Check for committed secrets
+        # Pin: trufflesecurity/trufflehog v3.88.22
+        uses: trufflesecurity/trufflehog@34339eaf08bf5c2a27dbd969812127721f3743ed  # v3.88.22
+        with:
+          path: ./
+          extra_args: --only-verified
+
+      - name: Upload required security scan aggregate results
+        if: always()
+        # Pin: actions/upload-artifact v4.4.3
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882  # v4.4.3
+        with:
+          name: required-security-scan-results-${{ github.run_number }}
+          path: |
+            bandit-results.json
+            pip-audit-results.json
+          retention-days: 90
 
       - name: Run hermetic unit suites
         env:
           # Hermetic, non-secret test value (mirrors smoke-test.yml). No live
-          # secrets are used: any suite that needs them self-skips or is gated
-          # separately (test_smoke_e2e is covered by smoke-test.yml).
+          # secrets are used: any suite that needs them self-skips.
           JWT_SECRET: "ci-test-secret-not-for-production-use-minimum-32chars!!"
         run: |
+          # tests/test_smoke_e2e.py is NO LONGER --ignore'd. It was doubly
+          # orphaned: --ignore'd here AND its own workflow (smoke-test.yml) only
+          # triggered on `main`, a branch that does not exist -- so NO required
+          # status context could ever collect it. Its first two stages are fully
+          # hermetic (real `python -m mcp_server.server` subprocess over stdio,
+          # no secrets, no live services, 2.1s for 5 tests) and are the only
+          # end-to-end proof that the shipped MCP server starts, completes the
+          # MCP initialize handshake, and advertises all 9 documented tools.
+          # Stages 3 and 4 self-skip (hosted API key / local proxy on :8098).
+          # `-rs` makes every skip reason appear in the summary of this REQUIRED
+          # job, so a not-observed stage cannot hide. See PR body items 3 and 4.
           pytest \
             proxy/tests \
             mcp_server/tests \
             registry_server/tests \
             tests \
-            --ignore=tests/test_smoke_e2e.py \
-            -v --timeout=120
+            -v -rs --timeout=120

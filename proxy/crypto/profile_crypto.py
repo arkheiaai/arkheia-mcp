@@ -26,6 +26,23 @@ from typing import Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from proxy.audit.decision_journal import (
+    KEY_LOAD_FETCHED_CACHE,
+    KEY_LOAD_FETCHED_HOSTED,
+    KEY_LOAD_UNAVAILABLE,
+    KEY_SOURCE_CACHE,
+    KEY_SOURCE_HOSTED,
+    KEY_SOURCE_NONE,
+    RECEIPT_ENQUEUED,
+    RECEIPT_UNAVAILABLE,
+    REVOCATION_CHECKED,
+    REVOCATION_NOT_APPLICABLE,
+    REVOCATION_UNKNOWN_OFFLINE,
+    DecisionJournal,
+    build_key_load_record,
+    flush_journal,
+)
+
 logger = logging.getLogger(__name__)
 
 # 12-byte nonce for AES-GCM (NIST recommended)
@@ -200,19 +217,58 @@ class DynamicKeyLoader:
     _CACHE_MAC_SIZE = 16
     _CACHE_SIZE = len(_CACHE_MAGIC) + _KEY_SIZE + _CACHE_MAC_SIZE
 
-    def __init__(self, hosted_url: str, api_key: str):
+    def __init__(
+        self,
+        hosted_url: str,
+        api_key: str,
+        audit_writer: Optional[object] = None,
+        journal: Optional[DecisionJournal] = None,
+    ):
         self.hosted_url = hosted_url.rstrip("/")
         self.api_key = api_key
         self._cached_key: Optional[bytes] = None
         # The key-load decision, for the caller to surface. Never the key itself.
         self.last_source: Optional[str] = None
+        # The audit rail, handed in at CONSTRUCTION. This is the ordering fix:
+        # ``proxy/main.py`` now builds the AuditWriter at step 0, so a writer
+        # exists before this loader is created and D1 is receipted at the moment
+        # it is decided rather than reconstructed afterwards.
+        self._audit_writer = audit_writer
+        self.decision_journal = journal or DecisionJournal()
+        #: The id of the most recent key-load decision, for a caller to quote.
+        self.last_decision_id: Optional[str] = None
+        #: What the rail said about that record — "enqueued" or "unavailable".
+        #: Reported, never assumed: a caller that prints "enqueued" without
+        #: reading this is asserting an outcome it did not observe.
+        self.last_receipt_status: Optional[str] = None
+        self.last_http_status: Optional[int] = None
+
+    def attach_audit_writer(self, writer: object) -> None:
+        """Attach the rail after construction (used by callers that build the
+        writer late). Anything already journalled is flushed on the next
+        ``fetch_key`` or explicit ``flush_decisions``."""
+        self._audit_writer = writer
+
+    async def flush_decisions(self) -> list:
+        """Drain journalled key-load decisions to the rail, if one is attached."""
+        if self._audit_writer is None:
+            return []
+        return await flush_journal(self.decision_journal, self._audit_writer)
 
     @property
     def _machine_salt(self) -> bytes:
         return _machine_salt()
 
     async def fetch_key(self) -> Optional[bytes]:
-        """Fetch profile decryption key. Returns 32-byte AES key or None."""
+        """
+        Fetch profile decryption key. Returns 32-byte AES key or None.
+
+        Whichever branch is taken, the decision — *which key, from where, and
+        whether anyone has confirmed it is still valid* — is journalled and
+        handed to the audit rail before this returns. A key silently promoted
+        from an offline cache is exactly the decision an auditor needs to see,
+        and it was previously a single WARNING line in a log nobody chains.
+        """
         # 1. Try hosted endpoint
         key = await self._fetch_from_hosted()
         if key:
@@ -221,6 +277,12 @@ class DynamicKeyLoader:
             self._save_cache(key)
             logger.info(
                 "Profile key source=hosted fingerprint=%s", key_fingerprint(key)
+            )
+            await self._record_key_load(
+                outcome=KEY_LOAD_FETCHED_HOSTED,
+                key_source=KEY_SOURCE_HOSTED,
+                revocation_state=REVOCATION_CHECKED,
+                key=key,
             )
             return key
 
@@ -235,12 +297,51 @@ class DynamicKeyLoader:
             )
             self._cached_key = key
             self.last_source = "cache"
+            await self._record_key_load(
+                outcome=KEY_LOAD_FETCHED_CACHE,
+                key_source=KEY_SOURCE_CACHE,
+                # The cache is read precisely because the issuer was unreachable,
+                # so no revocation check happened. "Unknown" is the only honest
+                # value; recording it as checked would be a false attestation.
+                revocation_state=REVOCATION_UNKNOWN_OFFLINE,
+                key=key,
+            )
             return key
 
         # 3. No key available
         self.last_source = "none"
         logger.error("No profile decryption key available — detection will return UNKNOWN")
+        await self._record_key_load(
+            outcome=KEY_LOAD_UNAVAILABLE,
+            key_source=KEY_SOURCE_NONE,
+            revocation_state=REVOCATION_NOT_APPLICABLE,
+        )
         return None
+
+    async def _record_key_load(
+        self,
+        *,
+        outcome: str,
+        key_source: str,
+        revocation_state: str,
+        key: Optional[bytes] = None,
+    ) -> str:
+        record = build_key_load_record(
+            outcome=outcome,
+            key_source=key_source,
+            revocation_state=revocation_state,
+            key=key,
+            hosted_url=self.hosted_url,
+            http_status=self.last_http_status,
+        )
+        self.last_decision_id = self.decision_journal.record(record)
+        results = await self.flush_decisions()
+        statuses = {status for _id, status in results}
+        self.last_receipt_status = (
+            RECEIPT_UNAVAILABLE if (not results or RECEIPT_UNAVAILABLE in statuses)
+            else RECEIPT_ENQUEUED
+        )
+        return self.last_decision_id
 
     async def _fetch_from_hosted(self) -> Optional[bytes]:
         """POST /v1/profile-key with API key to get decryption key."""
@@ -254,6 +355,11 @@ class DynamicKeyLoader:
                     f"{self.hosted_url}/v1/profile-key",
                     headers={"X-Arkheia-Key": self.api_key},
                 )
+                # Structural evidence for the key-load record: a status code, not
+                # a body. 401 vs 429 vs a network failure are different
+                # governance facts and were previously distinguishable only in a
+                # log line.
+                self.last_http_status = resp.status_code
                 if resp.status_code == 200:
                     data = resp.json()
                     key_b64 = data.get("profile_key", "")

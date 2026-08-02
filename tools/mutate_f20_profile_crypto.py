@@ -210,8 +210,30 @@ MUTANTS: list[Mutant] = [
     # --- Router: fail-closed + honest accounting ---------------------------
     Mutant(
         "M15", ROUTER,
+        "                except InvalidTag as e:\n"
+        "                    # THE TAMPER SIGNAL. AES-GCM refused the tag: the bytes on\n"
+        "                    # disk are not the bytes that were sealed, or this is not the\n"
+        "                    # key they were sealed with. Previously this was one ERROR\n"
+        "                    # line in an unchained log; it is now a row on the\n"
+        "                    # hash-chained rail carrying which bytes and which key, AND a\n"
+        "                    # named unit in the work-done report below -- it must never\n"
+        "                    # vanish into a log line while the summary reports a clean\n"
+        "                    # load. InvalidTag carries an EMPTY message, so the exception\n"
+        "                    # type is named explicitly or the operator gets no reason at\n"
+        "                    # all.\n"
         "                    report.encrypted_failed.append(f.name)\n"
         "                    logger.error(",
+        "                except InvalidTag as e:\n"
+        "                    # THE TAMPER SIGNAL. AES-GCM refused the tag: the bytes on\n"
+        "                    # disk are not the bytes that were sealed, or this is not the\n"
+        "                    # key they were sealed with. Previously this was one ERROR\n"
+        "                    # line in an unchained log; it is now a row on the\n"
+        "                    # hash-chained rail carrying which bytes and which key, AND a\n"
+        "                    # named unit in the work-done report below -- it must never\n"
+        "                    # vanish into a log line while the summary reports a clean\n"
+        "                    # load. InvalidTag carries an EMPTY message, so the exception\n"
+        "                    # type is named explicitly or the operator gets no reason at\n"
+        "                    # all.\n"
         "                    logger.error(",
         "stop recording which files failed to authenticate — the failure "
         "becomes a log line only",
@@ -232,9 +254,13 @@ MUTANTS: list[Mutant] = [
     ),
     Mutant(
         "M17", ROUTER,
-        "                    report.encrypted_failed.append(f.name)",
         "                    report.encrypted_failed.append(f.name)\n"
-        "                    profiles[profile_name] = yaml.safe_load(encrypted) or {}",
+        "                    logger.error(\n"
+        "                        \"AUTHENTICATION FAILED for encrypted profile %s (%s) — \"",
+        "                    report.encrypted_failed.append(f.name)\n"
+        "                    profiles[profile_name] = yaml.safe_load(encrypted) or {}\n"
+        "                    logger.error(\n"
+        "                        \"AUTHENTICATION FAILED for encrypted profile %s (%s) — \"",
         "FALL BACK TO PLAINTEXT on decrypt failure — the highest-severity "
         "outcome available to this flow",
     ),

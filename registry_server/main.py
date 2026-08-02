@@ -7,13 +7,15 @@ Endpoints:
   GET /                           -- service info (no auth)
   GET /health                     -- health check (no auth)
   GET /profiles                   -- list available profiles (auth required)
-  GET /profiles/{model_id}/download -- download profile YAML (auth required)
+  GET /profiles/download?model_id= -- download profile YAML (auth required)
+  GET /profiles/{model_id}/download -- legacy download alias (auth required)
 
 Config (env vars):
   ARKHEIA_REGISTRY_PROFILE_DIR   -- profiles directory (default: ../profiles relative to this file)
   ARKHEIA_REGISTRY_BASE_URL      -- base URL for download_url construction (default: http://localhost:8200)
   ARKHEIA_REGISTRY_PORT          -- port to listen on (default: 8200)
   ARKHEIA_REGISTRY_KEYS          -- comma-separated valid API keys (required for protected endpoints)
+  ARKHEIA_REGISTRY_AUDIT_LOG     -- auth-decision receipt log (default: ./registry_audit.jsonl)
 """
 
 import os
@@ -25,6 +27,7 @@ from typing import Optional
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import Response
 
+from registry_server import receipts
 from registry_server.auth import require_auth
 from registry_server.storage import ProfileStorage
 
@@ -43,7 +46,17 @@ async def lifespan(app: FastAPI):
     profile_dir = _get_profile_dir()
     base_url = _get_base_url()
     app.state.storage = ProfileStorage(profile_dir=profile_dir, base_url=base_url)
-    yield
+    # Auth-decision receipts. Started here so the writer's background drain
+    # task lives for the app's lifetime and is flushed on shutdown. If this
+    # raised, the server would not boot -- deliberate: a registry that cannot
+    # record who it let in should be fixed, not run silently. It does not
+    # raise in practice (AuditWriter.start only mkdirs and spawns a task), and
+    # a per-request write failure is fail-open by design (see receipts.emit).
+    await receipts.start()
+    try:
+        yield
+    finally:
+        await receipts.stop()
 
 
 app = FastAPI(
@@ -64,7 +77,8 @@ async def root():
         "endpoints": {
             "health": "/health",
             "profiles": "/profiles",
-            "download": "/profiles/{model_id}/download",
+            "download": "/profiles/download?model_id={model_id}",
+            "download_legacy": "/profiles/{model_id}/download",
         },
     }
 
@@ -108,12 +122,8 @@ async def list_profiles(
     return {"profiles": profiles, "count": len(profiles)}
 
 
-@app.get("/profiles/{model_id}/download")
-async def download_profile(
-    model_id: str,
-    api_key: str = Depends(require_auth),
-):
-    """Download raw YAML bytes for the given model_id."""
+def _serve_profile(model_id: str) -> Response:
+    """Serve profile bytes through the storage containment chokepoint."""
     storage: ProfileStorage = app.state.storage
     content = storage.get_profile_bytes(model_id)
     if content is None:
@@ -122,3 +132,24 @@ async def download_profile(
             detail=f"Profile not found: {model_id}",
         )
     return Response(content=content, media_type="application/yaml")
+
+
+@app.get("/profiles/download")
+async def download_profile_by_query(
+    model_id: str = Query(
+        ...,
+        description="Registry model id, percent-escaped into the query string.",
+    ),
+    api_key: str = Depends(require_auth),
+):
+    """Download raw YAML bytes for the given model_id from the query string."""
+    return _serve_profile(model_id)
+
+
+@app.get("/profiles/{model_id}/download")
+async def download_profile(
+    model_id: str,
+    api_key: str = Depends(require_auth),
+):
+    """Legacy path-form download route for single-segment model ids."""
+    return _serve_profile(model_id)
