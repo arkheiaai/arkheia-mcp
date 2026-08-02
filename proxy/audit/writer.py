@@ -161,6 +161,21 @@ class AuditWriter:
             return AUDIT_WRITE_QUEUE_FULL
         return AUDIT_WRITE_ENQUEUED
 
+    async def flush(self, timeout: float = 5.0) -> None:
+        """
+        Block until everything enqueued so far has been through ``_writer_loop``.
+
+        ``write()`` is deliberately fire-and-forget so an audit write can never
+        delay a response — which is right for the detection stream and wrong for
+        a caller that must be able to state, afterwards, that its record was
+        committed. Such a caller flushes and then reads the record back by id
+        (see ``proxy.license.integrity._emit_receipt``). Raises
+        ``asyncio.TimeoutError`` if the queue does not drain — never swallows,
+        because "the flush timed out" and "the record was written" must not be
+        the same observation.
+        """
+        await asyncio.wait_for(self._queue.join(), timeout=timeout)
+
     async def _writer_loop(self) -> None:
         """Background loop: drain queue, redact, chain-hash, write to JSONL."""
         while self._running or not self._queue.empty():
