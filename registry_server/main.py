@@ -7,7 +7,10 @@ Endpoints:
   GET /                           -- service info (no auth)
   GET /health                     -- health check (no auth)
   GET /profiles                   -- list available profiles (auth required)
-  GET /profiles/{model_id}/download -- download profile YAML (auth required)
+  GET /profiles/download?model_id= -- download profile YAML (auth required); the
+                                     ADVERTISED shape, id in the query so the URL
+                                     is percent-decode-invariant
+  GET /profiles/{model_id}/download -- legacy alias, id in the path (auth required)
 
 Config (env vars):
   ARKHEIA_REGISTRY_PROFILE_DIR   -- profiles directory (default: ../profiles relative to this file)
@@ -77,6 +80,7 @@ async def root():
             "health": "/health",
             "profiles": "/profiles",
             "download": "/profiles/download?model_id={model_id}",
+            "download_legacy": "/profiles/{model_id}/download",
         },
     }
 
@@ -120,7 +124,11 @@ async def list_profiles(
     return {"profiles": profiles, "count": len(profiles)}
 
 
-def _profile_response(model_id: str) -> Response:
+def _serve_profile(model_id: str) -> Response:
+    """Resolve ``model_id`` through storage containment and serve the bytes, or
+    404. The SINGLE resolution chokepoint for both download routes below —
+    ``get_profile_bytes`` applies the syntactic pre-filter + realpath containment,
+    so neither route can read outside the profiles root."""
     storage: ProfileStorage = app.state.storage
     content = storage.get_profile_bytes(model_id)
     if content is None:
@@ -135,20 +143,53 @@ def _profile_response(model_id: str) -> Response:
 async def download_profile_by_query(
     model_id: str = Query(
         ...,
-        min_length=1,
-        max_length=128,
-        description="Profile model ID to download.",
+        description="Registry model id, percent-escaped into the query string.",
     ),
     api_key: str = Depends(require_auth),
 ):
-    """Download raw YAML bytes for the given model_id."""
-    return _profile_response(model_id)
+    """ADVERTISED download route: the id travels in the QUERY, not the path.
+
+    ``list_profiles()`` advertises this shape because a query string is decoded
+    EXACTLY ONCE by every layer in the stack, whereas a path is decoded once by
+    uvicorn but TWICE by starlette's TestClient (and by path-normalising reverse
+    proxies) — which 404'd the advertised URL for any id containing a literal
+    percent escape (``model%23`` -> ``model#``), Codex #13 LOW. Keeping the id out
+    of the path makes the advertised URL decode-invariant: there is no escape in
+    its path for anyone to decode.
+
+    Declared BEFORE the ``{model_id:path}`` route: ``/profiles/download`` cannot
+    match that pattern (it needs a segment before ``/download``), but the explicit
+    ordering keeps that independent of regex subtleties.
+
+    Same containment as the legacy route — ``get_profile_bytes`` rejects ``..``/
+    NUL/backslash ids and any resolved path escaping the profiles root, so
+    ``?model_id=../../etc/passwd`` is a 404 with no read out-of-root.
+    """
+    return _serve_profile(model_id)
 
 
-@app.get("/profiles/{model_id}/download")
+@app.get("/profiles/{model_id:path}/download")
 async def download_profile(
     model_id: str,
     api_key: str = Depends(require_auth),
 ):
-    """Download raw YAML bytes for the given model_id."""
-    return _profile_response(model_id)
+    """LEGACY/alias download route: the id in the path.
+
+    Retained (and still exercised) because it resolves every id wherever the path
+    is decoded exactly once — slash ids included — but it is NO LONGER what
+    ``list_profiles()`` advertises: a path segment cannot carry an id containing a
+    literal ``%`` robustly (see ``download_profile_by_query``).
+
+    Original note, still true:
+
+    Uses the ``:path`` converter so a registry id that legitimately contains a
+    ``/`` (HF ``deepseek-ai/DeepSeek-V3.1``) matches — the single-segment
+    ``{model_id}`` route 404'd the advertised download_url for those 6 ids. The
+    ``:path`` surface is safe ONLY because ``get_profile_bytes`` applies the
+    syntactic pre-filter + realpath containment: Starlette decodes ``%2f``/``%2e``
+    before this handler, so a traversal like ``..%2f..%2fx`` arrives as
+    ``../../x`` and is rejected there (contains ``..``) — 404, no read
+    out-of-root. Containment is the backstop; the route just stops mis-404ing
+    legitimate slash ids.
+    """
+    return _serve_profile(model_id)

@@ -9,11 +9,8 @@ Instantiates and wires all components:
   - Endpoints: /detect/verify, /audit/log, /admin/*
 """
 
-# Load .env BEFORE any proxy.* imports so env vars are available.
 import os
 import sys
-from dotenv import load_dotenv, find_dotenv
-load_dotenv(find_dotenv(usecwd=True), override=True)
 
 import logging
 from contextlib import asynccontextmanager
@@ -196,6 +193,15 @@ async def lifespan(app: FastAPI):
     # Validate JWT_SECRET at startup (fails fast with clear error, not at import time)
     from proxy.auth import _get_jwt_secret
     _get_jwt_secret()  # raises RuntimeError with clear message if missing/short
+
+    # Validate the governance push address at BOOT, not at push time. A trailing
+    # slash in DETECTION_ADAPTER_URL used to compose `//v1/events/proxy`, which the
+    # receiver 404s with an empty body on a fire-and-forget path -- every push lost,
+    # silently. The value cannot become valid later, so refusing here (while an
+    # operator is watching) is the only moment the feedback is cheap. Silent when
+    # the rail is unconfigured, so a clean local/demo boot is unaffected.
+    from proxy.detection_adapter import validate_config_or_raise
+    validate_config_or_raise()  # raises RuntimeError naming the setting and value
 
     logger.info("Arkheia Enterprise Proxy starting up")
 
@@ -423,6 +429,7 @@ async def lifespan(app: FastAPI):
         profile_dir=settings.detection.profile_dir,
         router=profile_router,
         validator=ProfileValidator(),
+        audit_writer=audit_writer,
     )
 
     # Store on app state -- endpoints access via request.app.state

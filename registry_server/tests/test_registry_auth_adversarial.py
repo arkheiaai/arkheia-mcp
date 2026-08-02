@@ -114,12 +114,12 @@ def concrete(path: str) -> str:
     converter it declares.
 
     Deliberately a regex over `{...}` rather than `.replace("{model_id}", ...)`:
-    PR #13 re-declares the legacy download route as `{model_id:path}`, and a
-    literal replace silently produced the un-substituted URL — which 404s, so
+    route converters such as `{model_id:path}` must still be substituted. A
+    literal replace would silently leave the un-substituted URL — which 404s, so
     every refusal assertion on that route would still have "passed" while
-    testing a route that does not exist. A parametrised test that quietly
-    stops exercising its subject is the failure mode this whole file exists
-    to avoid, so the substitution asserts it consumed every placeholder.
+    testing a route that does not exist. A parametrised test that quietly stops
+    exercising its subject is the failure mode this whole file exists to avoid,
+    so the substitution asserts it consumed every placeholder.
     """
     concrete_path = re.sub(r"\{[^}]+\}", "adversarial-model", path)
     assert "{" not in concrete_path, f"unsubstituted path parameter in {path!r}"
