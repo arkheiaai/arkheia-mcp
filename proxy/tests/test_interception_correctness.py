@@ -48,10 +48,10 @@ class _Engine:
         self.risk = risk
         self.gate_action = gate_action
         self.raises = raises
-        self.calls: list[tuple[str, str, str]] = []
+        self.calls: list[tuple[str, str, str, dict]] = []
 
-    async def verify(self, prompt, response, model_id):
-        self.calls.append((prompt, response, model_id))
+    async def verify(self, prompt, response, model_id, **metadata):
+        self.calls.append((prompt, response, model_id, metadata))
         if self.raises:
             raise RuntimeError("simulated engine crash")
         return _result(self.risk, self.gate_action)
@@ -74,7 +74,7 @@ def build(
 
     @app.post("/v1/chat/completions")
     async def chat():
-        return JSONResponse(json.loads(UPSTREAM_BODY))
+        return JSONResponse(json.loads(upstream_body))
 
     @app.get("/health")
     async def health():
@@ -261,10 +261,25 @@ class TestPassAndDetectorContract:
         async with client(app) as c:
             await c.post("/v1/chat/completions", json=REQ)
         assert len(eng.calls) == 1
-        prompt, response, model_id = eng.calls[0]
+        prompt, response, model_id, metadata = eng.calls[0]
         assert prompt == "hi"
         assert response == UPSTREAM_BODY.decode()
         assert model_id == "gpt-4o"
+        assert metadata == {}
+
+    async def test_engine_receives_completion_tokens_zero_metadata(self):
+        body = b'{"choices":[{"message":{"content":""}}],"usage":{"completion_tokens":0}}'
+        eng = _Engine("LOW")
+        app, _ = build(engine=eng, upstream_body=body)
+        async with client(app) as c:
+            r = await c.post("/v1/chat/completions", json=REQ)
+        assert r.headers["x-arkheia-risk"] == "LOW"
+        assert len(eng.calls) == 1
+        prompt, response, model_id, metadata = eng.calls[0]
+        assert prompt == "hi"
+        assert response == body.decode()
+        assert model_id == "gpt-4o"
+        assert metadata == {"output_tokens": 0}
 
     async def test_engine_absent_is_declared_not_silently_low(self):
         """
