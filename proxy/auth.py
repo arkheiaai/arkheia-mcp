@@ -21,6 +21,8 @@ import httpx
 import jwt
 from fastapi import HTTPException, Request, Response, status
 
+from arkheia_common.egress import egress_async_client
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -131,7 +133,7 @@ async def exchange_google_code(code: str) -> dict[str, Any]:
     Returns dict with 'email', 'name', 'picture' keys on success,
     or raises HTTPException on failure.
     """
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with egress_async_client(timeout=10.0) as client:
         # Exchange code for tokens
         token_resp = await client.post(
             GOOGLE_TOKEN_URL,

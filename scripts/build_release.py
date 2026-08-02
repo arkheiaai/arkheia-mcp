@@ -149,8 +149,10 @@ def step_generate_manifest(module_dir: Path, output_path: Path | None = None) ->
         raise EmptyManifest(
             f"refusing to write an empty integrity manifest for {module_dir}: "
             f"no {' / '.join(COMPILED_ARTIFACT_GLOBS)} found there, so the "
-            f"manifest would certify ZERO modules. Run the Cython compile step "
-            f"(drop --skip-compile) or remove {module_dir} from COMPILED_MODULES; "
+            f"manifest would certify ZERO modules. Current verify_integrity() "
+            f"treats that as tamper evidence, and the release build must stop "
+            f"before sources are removed. Run the Cython compile step (drop "
+            f"--skip-compile) or remove {module_dir} from COMPILED_MODULES; "
             f"do not rely on startup integrity checks to reject a bad release."
         )
 
