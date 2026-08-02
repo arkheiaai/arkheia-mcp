@@ -231,23 +231,29 @@ def test_key_loader_no_cache():
 def test_integrity_no_manifest():
     """No manifest must NOT block, and must NOT read as a pass either.
 
-    Updated 2026-07-26 (Codex finding 4): `verify_integrity` used to return `True`
-    both here and for a fully verified artifact, which is exactly the collapse that
-    let proxy/main.py treat a tamper like a missing manifest. The two states are now
-    distinct, so this test asserts the state rather than the truthiness.
+    Updated again for F18: `verify_integrity` is now the policy wrapper
+    (`True` or `TamperDetected`), while `build_integrity_record` carries the
+    state.
     """
-    from proxy.license.integrity import IntegrityStatus, verify_integrity
+    from proxy.license.integrity import (
+        VERDICT_UNVERIFIABLE,
+        build_integrity_record,
+        verify_integrity,
+    )
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        report = verify_integrity(Path(tmpdir))
-        assert report.status == IntegrityStatus.UNVERIFIED_NO_MANIFEST
-        assert report.verified is False
+        path = Path(tmpdir)
+        assert verify_integrity(path) is True
+        record = build_integrity_record(path)
+        assert record["verdict"] == VERDICT_UNVERIFIABLE
+        assert record["modules_expected"] == 0
 
 
 def test_integrity_valid_manifest():
     """Valid manifest should pass verification."""
     from proxy.license.integrity import (
-        IntegrityStatus,
+        VERDICT_VERIFIED,
+        build_integrity_record,
         generate_manifest,
         verify_integrity,
     )
@@ -257,10 +263,11 @@ def test_integrity_valid_manifest():
         # Create a fake .so file
         (p / "features.cpython-312.so").write_bytes(b"fake compiled module content")
         generate_manifest(p, p / "integrity_manifest.json")
-        report = verify_integrity(p)
-        assert report.status == IntegrityStatus.VERIFIED
-        assert report.verified is True
-        assert report.modules_checked == 1
+        assert verify_integrity(p) is True
+        record = build_integrity_record(p)
+        assert record["verdict"] == VERDICT_VERIFIED
+        assert record["modules_expected"] == 1
+        assert record["modules_matched"] == 1
 
 
 def test_integrity_tampered_module():

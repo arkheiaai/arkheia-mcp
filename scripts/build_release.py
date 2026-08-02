@@ -16,8 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from proxy.crypto.profile_crypto import encrypt_profile
-from proxy.license.integrity import generate_manifest
-
+from proxy.license.integrity import COMPILED_ARTIFACT_GLOBS, generate_manifest
 try:
     from setup_cython import COMPILED_MODULES
 except ImportError:
@@ -61,7 +60,7 @@ def resolve_profile_key(profile_key: str | None) -> bytes:
 
 def _compiled_artifacts(module_dir: Path) -> list[Path]:
     artifacts: list[Path] = []
-    for pattern in ("*.so", "*.pyd"):
+    for pattern in COMPILED_ARTIFACT_GLOBS:
         artifacts.extend(sorted(module_dir.glob(pattern)))
     return artifacts
 
@@ -110,10 +109,16 @@ def step_encrypt_profiles(master_key: bytes, profile_dir: Path) -> int:
     return encrypted_count
 
 
-#: What ``proxy.license.integrity.generate_manifest`` globs for. Named here so the
+#: Re-exported from ``proxy.license.integrity`` (see the import above) so the
 #: refusal below can tell an operator what was actually searched for, rather than
 #: reporting an unexplained zero.
-COMPILED_ARTIFACT_GLOBS = ("*.so", "*.pyd")
+#:
+#: It used to be a SECOND declaration here, documented as "what generate_manifest
+#: globs for". Two constants that must agree eventually will not, and drifting low
+#: on this one would let a compiled artifact exist that the runtime check never
+#: notices — the missing-manifest bypass with extra steps. The runtime owns the
+#: definition; this module imports it.
+__all_globs__ = COMPILED_ARTIFACT_GLOBS
 
 
 class EmptyManifest(ValueError):
