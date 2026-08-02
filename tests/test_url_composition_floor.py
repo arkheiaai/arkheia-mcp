@@ -73,7 +73,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Directories with no first-party source to guard.
 SKIP_DIRS = {
-    ".venv", "venv", "__pycache__", ".git", "node_modules", "profiles",
+    ".venv", ".venv312", "venv", "__pycache__", ".git", "node_modules", "profiles",
     "build", "dist", ".tmp_test_build_pipeline", ".pytest_cache", "specs", "docs",
 }
 

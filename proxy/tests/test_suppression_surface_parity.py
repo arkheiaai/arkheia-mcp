@@ -64,8 +64,11 @@ PINNED-not-fixed observations named as the owner of their fix:
     `pushed["detection"][...]`. Same values, same questions, moved fields;
   * the adapter's config moved from import-time module constants to a call-time
     `_config()` env read, so the `wire` fixture sets env instead of module attributes.
-`TestThePushSerialisesOutsideItsOwnTryBlock` still holds: `json.dumps` remains above
-the `try:` in `push_event`, so that observation is still a live, unfixed one.
+The second pin has ALSO been inverted, by this PR (#47): `json.dumps` no longer sits
+above the `try:` in `push_event`. It is now guarded, so a non-serialisable payload
+returns a FAILED `PushOutcome` with a receipted `signed: False` row and a
+FAILURE_MARKER log instead of escaping the fire-and-forget task — see
+`TestThePushSerialisesInsideItsFailOpenHandler`. Neither observation is live any more.
 
 DECLARED OVERLAP: `sweep/f2-mandatory-screening` independently surfaces
 `evidence_depth_limited` / `detection_method` / `profile_model_id` at this same endpoint.
@@ -76,6 +79,7 @@ will conflict textually in the `VerifyResponse` / `_audit_record` / push blocks.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -371,8 +375,9 @@ class TestTheGovernancePushCanTellSuppressedFromScored:
         body = _verify(client, SHORT_RESPONSE).json()
         pushed = wire.await_one()
         assert pushed["context"]["detection_id"] == body["detection_id"]
-        assert pushed["event_id"] == body["detection_id"]
         assert pushed["context"]["risk_level"] == "LOW"
+        assert pushed["context"]["risk_level_raw"] == "LOW"
+        assert pushed["event_id"] == body["detection_id"]
         assert pushed["detection"]["fabrication_risk"] == "LOW"
         assert pushed["context"]["gate_reason"] == "token_count_below_80"
 
@@ -444,33 +449,25 @@ class TestTheGovernanceEnvelopeCarriesUnknownThrough:
         assert b'"AUTHENTIC"' not in wire.bodies[0]
 
 
-class TestThePushSerialisesOutsideItsOwnTryBlock:
-    """PINNED — NOT this flow's file to fix (`proxy/detection_adapter.py` is owned by
-    `sweep/mcp-governance-adapter-push`). Found while building the wire harness.
-
-    `push_event` documents "Fails open — never raises". It does not: `json.dumps(body_dict)`
-    sits ABOVE the `try:`, so a payload value that is not JSON-serialisable raises
-    straight out of the fire-and-forget task. The event is lost, the `logger.debug`
-    fail-open line below never runs, and the only trace is asyncio's
-    "Task exception was never retrieved". The reachable route is `action_taken`, which is
-    whatever `settings.detection.high_risk_action` / `unknown_action` holds — a `str` in
-    production, so this is a latent hole rather than a live outage, but it is a
-    governance event silently lost by the one function contracted never to lose one.
-    """
+class TestThePushSerialisesInsideItsFailOpenHandler:
+    """Non-serialisable context degrades to a visible failed push, not a task crash."""
 
     @pytest.mark.asyncio
-    async def test_a_non_serialisable_payload_escapes_the_fail_open_handler(
-        self, monkeypatch
+    async def test_a_non_serialisable_payload_is_reported_not_raised(
+        self, monkeypatch, caplog
     ):
         import proxy.detection_adapter as da
         # Env, not module attributes — see the `wire` fixture for why.
         monkeypatch.setenv("DETECTION_ADAPTER_URL", "http://adapter.test")
         monkeypatch.setenv("DETECTION_ADAPTER_HMAC_SECRET", "s")
-        with pytest.raises(TypeError):
-            await da.push_event(
+        with caplog.at_level(logging.ERROR, logger="proxy.detection_adapter"):
+            outcome = await da.push_event(
                 tenant_id="t", source_id="m", event_type="mcp_detection",
                 payload={"action_taken": object()}, risk_level="LOW",
             )
+        assert outcome.status == da.PushOutcome.FAILED
+        assert "TypeError" in outcome.error
+        assert [r for r in caplog.records if da.FAILURE_MARKER in r.getMessage()]
 
 
 # ---------------------------------------------------------------------------

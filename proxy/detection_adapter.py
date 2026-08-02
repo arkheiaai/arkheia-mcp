@@ -488,7 +488,7 @@ async def push_event(
     body_dict = build_proxy_event(tenant_id, source_id, event_type, payload, risk_level)
     event_id = body_dict["event_id"]
 
-    def _record(outcome: PushOutcome, target: str) -> dict:
+    def _record(outcome: PushOutcome, target: str, *, signed: bool = True) -> dict:
         return {
             # Unique per ATTEMPT. `detection_id` correlates the receipt to the
             # decision, but it is not unique: a retried push for the same
@@ -504,7 +504,7 @@ async def push_event(
             # the un-composed base cannot answer it.
             "adapter_url": target,
             "key_id": key_id,
-            "signed": True,
+            "signed": signed,
             "delivery_status": outcome.status,
             "http_status": outcome.http_status,
             "error": outcome.error,
@@ -529,7 +529,21 @@ async def push_event(
         await _receipt(audit, _record(outcome, ""))
         return outcome
 
-    body = json.dumps(body_dict).encode()
+    try:
+        body = json.dumps(body_dict).encode()
+    except Exception as exc:  # noqa: BLE001
+        outcome = PushOutcome(
+            PushOutcome.FAILED,
+            error=f"{type(exc).__name__}: {exc}",
+            event_id=event_id,
+        )
+        logger.error(
+            "%s could not serialize governance push event_id=%s for %s: %s",
+            FAILURE_MARKER, event_id, target, outcome.error,
+        )
+        await _receipt(audit, _record(outcome, target, signed=False))
+        return outcome
+
     headers = _sign_headers(body, secret, key_id)
 
     try:
