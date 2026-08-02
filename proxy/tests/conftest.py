@@ -20,6 +20,7 @@ import threading
 
 import pytest
 
+from arkheia_common.hosted_authority import ALLOW_UNSAFE_HOSTED_URL_ENV
 from proxy.crypto.profile_crypto import DynamicKeyLoader
 
 
@@ -57,8 +58,11 @@ class _Server:
 
 
 @pytest.fixture
-def key_server():
+def key_server(monkeypatch):
     """A live endpoint. ``serve(key_bytes)`` / ``fail(status)`` reconfigure it."""
+    # The fixture is deliberately an HTTP localhost authority. Production code
+    # may send ``X-Arkheia-Key`` to it only because the test opted in explicitly.
+    monkeypatch.setenv(ALLOW_UNSAFE_HOSTED_URL_ENV, "1")
     server = _Server(_KeyEndpoint)
 
     class _Control:

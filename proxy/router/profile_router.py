@@ -381,7 +381,11 @@ class ProfileRouter:
                 if not self._verify_license(data, f.name):
                     self._journal_auth(PROFILE_AUTH_LICENSE_REJECTED, profile_name, encrypted, None)
                     continue
-                model_id = self._extract_model_id(data, f.name)
+                model_id = self._extract_model_id(
+                    data,
+                    f.name,
+                    allow_filename_fallback=False,
+                )
                 if not model_id:
                     self._journal_auth(PROFILE_AUTH_NO_MODEL_ID, profile_name, encrypted, None)
                     continue
@@ -442,13 +446,38 @@ class ProfileRouter:
         )
 
     @staticmethod
-    def _extract_model_id(data: dict, filename: str) -> Optional[str]:
-        """Extract model_id from profile data."""
+    def _extract_model_id(
+        data: dict,
+        filename: str,
+        *,
+        allow_filename_fallback: bool = True,
+    ) -> Optional[str]:
+        """Extract model_id from profile data.
+
+        Primary source is the profile CONTENTS (``model:`` / ``metadata.model_id``).
+        Optional fallback: a cache file written by the registry client is named with the
+        reversibly-ENCODED model_id (``deepseek-ai%2FDeepSeek-V3.1.yaml``); if the
+        contents somehow lack an id, recover it by DECODING the filename stem, so
+        an encoded slash/colon id still round-trips to a loadable profile.
+        """
         model_id = (
             data.get("model")
             or data.get("metadata", {}).get("model_id")
         )
         if not model_id:
+            if not allow_filename_fallback:
+                logger.warning("Profile %s has no model_id, skipping", filename)
+                return None
+            from proxy.pathsafe import decode_model_id
+            stem = filename
+            for suffix in (".yaml.enc", ".yaml"):
+                if stem.endswith(suffix):
+                    stem = stem[: -len(suffix)]
+                    break
+            decoded = decode_model_id(stem)
+            if decoded:
+                logger.debug("Recovered model_id from filename %s -> %s", filename, decoded)
+                return decoded
             logger.warning("Profile %s has no model_id, skipping", filename)
             return None
         return model_id
