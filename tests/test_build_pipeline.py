@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import json
@@ -20,8 +21,9 @@ else:
 from scripts import build_release
 from proxy.license.integrity import (
     MANIFEST_FILE,
-    IntegrityStatus,
     TamperDetected,
+    VERDICT_VERIFIED,
+    build_integrity_record,
     generate_manifest,
     verify_integrity,
 )
@@ -36,6 +38,20 @@ def make_case_dir(case_name: str) -> Path:
     case_dir = TEMP_ROOT / f"{case_name}_{uuid.uuid4().hex}"
     case_dir.mkdir()
     return case_dir
+
+
+def release_key() -> str:
+    return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+
+
+def seed_release_profiles(repo_root: Path) -> None:
+    profiles_dir = repo_root / "profiles"
+    profiles_dir.mkdir()
+    (profiles_dir / "gpt-4o.yaml").write_text(
+        "model: gpt-4o\nthresholds:\n  cohens_d: 0.35\n",
+        encoding="utf-8",
+    )
+    (profiles_dir / "schema.yaml").write_text("type: object\n", encoding="utf-8")
 
 
 def _fake_binary(directory: Path, name: str, payload: bytes) -> Path:
@@ -104,6 +120,70 @@ def test_build_release_manifest_step(capsys):
         shutil.rmtree(case_dir, ignore_errors=True)
 
 
+def test_build_release_refuses_empty_compiled_module_configuration(monkeypatch, capsys):
+    """
+    Hard-empty release floor: a build whose configured compiled-module population
+    is empty must fail before it can print a successful release summary.
+    """
+    case_dir = make_case_dir("empty_compiled_modules")
+    try:
+        seed_release_profiles(case_dir)
+        monkeypatch.setattr(build_release, "REPO_ROOT", case_dir)
+        monkeypatch.setattr(build_release, "COMPILED_MODULES", [])
+
+        rc = build_release.main(["--skip-compile", "--profile-key", release_key()])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "No compiled modules configured" in captured.err
+        assert "Release build complete" not in captured.out
+        assert (case_dir / "profiles" / "gpt-4o.yaml").exists(), (
+            "the build mutated profiles before refusing the empty compiled-module "
+            "population"
+        )
+    finally:
+        shutil.rmtree(case_dir, ignore_errors=True)
+
+
+def test_build_release_refuses_manifest_dirs_with_zero_compiled_artifacts(
+    monkeypatch, capsys
+):
+    """
+    Soft-empty release floor: COMPILED_MODULES can be non-empty while the compiled
+    artifact population is still empty, for example when --skip-compile is used
+    against a clean source checkout. That must not produce an empty manifest and
+    report success.
+    """
+    case_dir = make_case_dir("zero_compiled_artifacts")
+    try:
+        seed_release_profiles(case_dir)
+        source_path = case_dir / "proxy" / "detection" / "features.py"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("VALUE = 1\n", encoding="utf-8")
+        monkeypatch.setattr(build_release, "REPO_ROOT", case_dir)
+        monkeypatch.setattr(build_release, "COMPILED_MODULES", [
+            "proxy/detection/features.py",
+        ])
+
+        rc = build_release.main(["--skip-compile", "--profile-key", release_key()])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "No compiled artifacts found" in captured.err
+        assert "Release build complete" not in captured.out
+        assert not (source_path.parent / "integrity_manifest.json").exists()
+        assert source_path.exists(), (
+            "the build removed source before proving there was a compiled artifact "
+            "to manifest"
+        )
+        assert (case_dir / "profiles" / "gpt-4o.yaml").exists(), (
+            "the build encrypted profiles before refusing the empty compiled "
+            "artifact population"
+        )
+    finally:
+        shutil.rmtree(case_dir, ignore_errors=True)
+
+
 def test_build_release_manifest_is_consumed_by_integrity_report(tmp_path):
     module_dir = tmp_path / "detection"
     features = _fake_binary(
@@ -128,10 +208,11 @@ def test_build_release_manifest_is_consumed_by_integrity_report(tmp_path):
     for name, recorded in on_disk.items():
         assert recorded == hashlib.sha256((module_dir / name).read_bytes()).hexdigest()
 
-    report = verify_integrity(module_dir)
-    assert report.status == IntegrityStatus.VERIFIED
-    assert report.verified is True
-    assert report.modules_checked == 2
+    report = build_integrity_record(module_dir)
+    assert report["verdict"] == VERDICT_VERIFIED
+    assert verify_integrity(module_dir) is True
+    assert report["modules_expected"] == 2
+    assert report["modules_matched"] == 2
 
     manifest = json.loads(manifest_path.read_text())
     fabricated = f"{uuid.uuid4().hex}.so"
@@ -148,7 +229,8 @@ def test_build_release_manifest_is_consumed_by_integrity_report(tmp_path):
 
     manifest[engine.name] = hashlib.sha256(engine.read_bytes()).hexdigest()
     manifest_path.write_text(json.dumps(manifest))
-    assert verify_integrity(module_dir).status == IntegrityStatus.VERIFIED
+    assert verify_integrity(module_dir) is True
+    assert build_integrity_record(module_dir)["verdict"] == VERDICT_VERIFIED
 
     engine.write_bytes(b"\x7fELF" + b"tampered" * 8)
     with pytest.raises(TamperDetected, match=engine.name):
