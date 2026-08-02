@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from proxy.crypto.profile_crypto import encrypt_profile
 from proxy.license.integrity import generate_manifest
+
 try:
     from setup_cython import COMPILED_MODULES
 except ImportError:
@@ -56,6 +57,23 @@ def resolve_profile_key(profile_key: str | None) -> bytes:
         raise ValueError(f"Profile key must decode to 32 bytes, got {len(master_key)}.")
 
     return master_key
+
+
+def _compiled_artifacts(module_dir: Path) -> list[Path]:
+    artifacts: list[Path] = []
+    for pattern in ("*.so", "*.pyd"):
+        artifacts.extend(sorted(module_dir.glob(pattern)))
+    return artifacts
+
+
+def assert_compiled_artifact_population(module_dirs: Sequence[Path]) -> None:
+    empty_dirs = [module_dir for module_dir in module_dirs if not _compiled_artifacts(module_dir)]
+    if empty_dirs:
+        formatted = ", ".join(str(path) for path in empty_dirs)
+        raise ValueError(
+            "No compiled artifacts found for integrity manifest generation in: "
+            f"{formatted}"
+        )
 
 
 def step_cython_compile(repo_root: Path = REPO_ROOT) -> None:
@@ -157,6 +175,9 @@ def step_generate_manifest(module_dir: Path, output_path: Path | None = None) ->
 
 
 def compiled_module_dirs(repo_root: Path = REPO_ROOT) -> list[Path]:
+    if not COMPILED_MODULES:
+        raise ValueError("No compiled modules configured; refusing to build a release.")
+
     seen: list[Path] = []
     for module_path in COMPILED_MODULES:
         module_dir = (repo_root / module_path).parent
@@ -264,13 +285,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         master_key = resolve_profile_key(args.profile_key)
+        module_dirs = compiled_module_dirs(REPO_ROOT)
         if not args.skip_compile:
             step_cython_compile(REPO_ROOT)
+
+        assert_compiled_artifact_population(module_dirs)
 
         encrypted_count = step_encrypt_profiles(master_key, REPO_ROOT / "profiles")
 
         manifests: dict[str, dict[str, str]] = {}
-        for module_dir in compiled_module_dirs(REPO_ROOT):
+        for module_dir in module_dirs:
             manifest_path = module_dir / "integrity_manifest.json"
             manifests[str(manifest_path)] = step_generate_manifest(module_dir, manifest_path)
 
