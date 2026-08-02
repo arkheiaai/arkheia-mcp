@@ -154,8 +154,10 @@ def test_profile_router_warns_no_key(master_key, profile_yaml, caplog):
         assert any("no decryption key" in r.message.lower() for r in caplog.records)
 
 
-def test_profile_router_mixed_plaintext_and_encrypted(master_key, sample_profile, profile_yaml):
-    """ProfileRouter should load both .yaml and .yaml.enc files."""
+def test_profile_router_mixed_plaintext_and_encrypted_requires_explicit_escape_hatch(
+    master_key, sample_profile, profile_yaml
+):
+    """Mixed plaintext/encrypted estates are explicit local/dev mode, not fallback."""
     from proxy.router.profile_router import ProfileRouter
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -167,7 +169,11 @@ def test_profile_router_mixed_plaintext_and_encrypted(master_key, sample_profile
         encrypted = encrypt_profile(profile_yaml, master_key, "gpt-4o")
         (Path(tmpdir) / "gpt-4o.yaml.enc").write_bytes(encrypted)
 
-        router = ProfileRouter(tmpdir, decryption_key=master_key)
+        router = ProfileRouter(
+            tmpdir,
+            decryption_key=master_key,
+            allow_plaintext_profiles=True,
+        )
         assert router.loaded_count == 2
         assert router.get("gpt-4o") is not None
         assert router.get("claude-sonnet-4-6") is not None

@@ -51,6 +51,7 @@ from proxy.audit.decision_journal import (
     PROFILE_AUTH_MALFORMED,
     PROFILE_AUTH_NOT_YAML,
     PROFILE_AUTH_NO_MODEL_ID,
+    PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
     PROFILE_AUTH_SKIPPED_NO_KEY,
     RECEIPT_ENQUEUED,
     RISK_LEVEL,
@@ -102,8 +103,13 @@ def _rows(probe, outcome: str | None = None) -> list[dict]:
     return rows
 
 
-async def _build(profiles, probe, key=None) -> ProfileRouter:
-    router = ProfileRouter(str(profiles), decryption_key=key, audit_writer=probe.writer)
+async def _build(profiles, probe, key=None, license_key=None) -> ProfileRouter:
+    router = ProfileRouter(
+        str(profiles),
+        decryption_key=key,
+        audit_writer=probe.writer,
+        license_key=license_key,
+    )
     await router.flush_decision_journal()
     await probe.writer._queue.join()
     return router
@@ -226,6 +232,34 @@ async def test_an_expired_LICENCE_is_never_confused_with_a_tamper(profiles, prob
     assert len(rows) == 1
     assert rows[0]["outcome"] == PROFILE_AUTH_LICENSE_REJECTED
     assert rows[0]["outcome"] != PROFILE_AUTH_FAILED
+
+
+async def test_a_bad_license_signature_is_never_confused_with_a_tamper(profiles, probe):
+    """
+    The encrypted bytes authenticated, then license trust failed. That is not an
+    AES-GCM tag failure and must not be reported as one.
+    """
+    key = _key()
+    license_key = "test-license-secret"
+    valid_until = (date.today() + timedelta(days=30)).isoformat()
+    body = {
+        "model": "test-model",
+        "version": "1.0",
+        "license": {
+            "customer_id": "acme",
+            "valid_until": valid_until,
+            "signature": "bad",
+        },
+    }
+    _seal(profiles, "test-model", key, body)
+
+    await _build(profiles, probe, key, license_key=license_key)
+
+    rows = _rows(probe)
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == PROFILE_AUTH_LICENSE_REJECTED
+    assert rows[0]["outcome"] != PROFILE_AUTH_FAILED
+    assert rows[0]["error_type"] is None
 
 
 async def test_decrypted_but_empty_and_decrypted_but_unusable_are_distinct(profiles, probe):
@@ -465,3 +499,28 @@ async def test_plaintext_profiles_produce_no_authentication_rows(profiles, probe
     assert router.loaded_count == 1
     assert _rows(probe) == []
     assert json.dumps(probe.rows()) == "[]"
+
+
+async def test_plaintext_profile_in_encrypted_dir_is_refused_and_receipted(
+    profiles, probe
+):
+    key = _key()
+    _seal(profiles, "victim", key)
+    secret_marker = "SENTINEL-PLAINTEXT-FALLBACK-249b"
+    (profiles / "attacker.yaml").write_text(yaml.dump({
+        "model": "victim",
+        "version": "1.0",
+        "notes": secret_marker,
+    }))
+
+    router = await _build(profiles, probe, key=None)
+
+    assert router.loaded_count == 0
+    assert router.get("victim") is None
+    plaintext_rows = _rows(probe, PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR)
+    assert len(plaintext_rows) == 1
+    assert plaintext_rows[0]["profile_name"] == "attacker"
+    assert plaintext_rows[0]["ciphertext_sha256"] is None
+    assert plaintext_rows[0]["key_id"] is None
+    assert _rows(probe, PROFILE_AUTH_SKIPPED_NO_KEY)
+    assert secret_marker.encode() not in probe.raw_bytes()
