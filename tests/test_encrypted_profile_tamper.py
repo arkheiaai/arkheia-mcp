@@ -36,6 +36,7 @@ import os
 import secrets
 import stat
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
@@ -599,11 +600,42 @@ def test_plaintext_yaml_bypasses_the_entire_crypto_path(tmp_path, master_key):
 # `validate=True` were unproven code.
 
 import base64  # noqa: E402  (grouped with the section it serves)
+import socket  # noqa: E402
 
 import httpx  # noqa: E402
 import respx  # noqa: E402
 
-HOSTED = "https://hosted.invalid"
+from arkheia_common.hosted_authority import (  # noqa: E402
+    ALLOW_UNSAFE_HOSTED_URL_ENV,
+    DEFAULT_HOSTED_API_URL,
+)
+
+# HOSTED must be an APPROVED authority, not an arbitrary sentinel.
+#
+# It was ``https://hosted.invalid`` until 2026-08-02, and that silently voided
+# this entire section. ``_fetch_from_hosted`` calls
+# ``authorize_hosted_base_url(self.hosted_url)`` BEFORE it posts, so an
+# unapproved host raises ``HostedAuthorityError`` and the function returns
+# ``None`` without ever reaching the key-body logic. Every negative test below
+# asserts ``is None`` — so all of them PASSED while proving nothing, and only
+# the three positive controls (which assert the key IS returned) went red and
+# exposed it. M10 (any-length key) and M14 (lenient base64) would have survived
+# again.
+#
+# Two structural defences against that recurring:
+#   * the base URL is the approved production authority, which
+#     ``authorize_hosted_base_url`` accepts with no DNS lookup and no reliance
+#     on ``ARKHEIA_ALLOW_UNSAFE_HOSTED_URL`` being set or unset; and
+#   * every test below asserts ``route.called`` — a request was actually made —
+#     so a guard that starts short-circuiting this path turns these tests RED
+#     instead of green-for-the-wrong-reason.
+#
+# ``.rstrip("/")`` is not decoration: ``tests/test_url_composition_floor.py``
+# scans this file too, and a base URL joined to a path must be normalised at the
+# join or it is a violation. Normalising here is the fix that floor asks for —
+# not a REVIEWED_UNRESOLVED waiver — and it is what production does as well
+# (``DynamicKeyLoader.__init__`` stores ``hosted_url.rstrip("/")``).
+HOSTED = DEFAULT_HOSTED_API_URL.rstrip("/")
 KEY_URL = f"{HOSTED}/v1/profile-key"
 
 
@@ -618,22 +650,88 @@ def _loader(tmp_path: Path, api_key: str = "ak_live_test") -> _IsolatedLoader:
 async def test_hosted_200_with_a_valid_key_is_accepted_and_cached(tmp_path):
     """Positive control for every rejection test below."""
     key = secrets.token_bytes(32)
-    respx.post(KEY_URL).mock(
+    route = respx.post(KEY_URL).mock(
         return_value=httpx.Response(200, json={"profile_key": base64.b64encode(key).decode()})
     )
     loader = _loader(tmp_path)
     assert await loader.fetch_key() == key
+    assert route.called, "no request reached the hosted key endpoint"
     assert loader.last_source == "hosted"
     assert loader.has_key is True
     assert loader.current_key == key
     assert loader._load_cache() == key  # it was written through to the cache
 
 
+async def test_the_authority_guard_and_the_key_body_check_are_BOTH_proven(tmp_path, monkeypatch):
+    """The seam the rebase broke: guard first, key-body second — both observed.
+
+    ``_fetch_from_hosted`` has two independent refusals stacked in one function:
+    the hosted-authority guard (may this URL receive ``X-Arkheia-Key`` at all?)
+    and the key-body validation (is what came back a real 32-byte key?). Both
+    return ``None``, so a test that only asserts ``None`` cannot tell which one
+    fired — and when the guard started rejecting the fixture host, every
+    key-body test in this section kept passing on the guard's refusal.
+
+    This pins the two apart in one test, by what reaches the wire:
+      * unapproved authority  -> None AND **zero** requests made;
+      * approved authority    -> the request IS made, and the short key is
+        refused by the key-body check, not by the guard;
+      * approved authority    -> a well-formed key is ACCEPTED.
+
+    The third leg is the positive control: without it, legs one and two would
+    both still pass if the guard rejected everything.
+    """
+    monkeypatch.delenv(ALLOW_UNSAFE_HOSTED_URL_ENV, raising=False)
+    # Offline and deterministic: an unresolvable host cannot be classified
+    # self-hosted, so the guard must refuse it. Patched rather than relying on a
+    # real DNS failure for `.invalid`.
+    monkeypatch.setattr(socket, "getaddrinfo", MagicMock(side_effect=socket.gaierror))
+
+    unapproved_url = "https://rogue-authority.invalid"
+    with respx.mock:
+        blocked_route = respx.post(f"{unapproved_url}/v1/profile-key").mock(
+            return_value=httpx.Response(
+                200, json={"profile_key": base64.b64encode(secrets.token_bytes(32)).decode()}
+            )
+        )
+        rogue = _IsolatedLoader(unapproved_url, "ak_live_test")
+        rogue.CACHE_DIR = tmp_path / "rogue" / ".arkheia"
+        rogue.CACHE_FILE = rogue.CACHE_DIR / "profile_key.cache"
+        assert await rogue._fetch_from_hosted() is None
+        assert not blocked_route.called, (
+            "the hosted-authority guard let a key-bearing request out to an "
+            "unapproved authority"
+        )
+        assert rogue.last_error_type == "HostedAuthorityError", (
+            f"expected the guard to be the refusal, got {rogue.last_error_type!r}"
+        )
+
+    with respx.mock:
+        short_route = respx.post(KEY_URL).mock(
+            return_value=httpx.Response(
+                200, json={"profile_key": base64.b64encode(bytes(16)).decode()}
+            )
+        )
+        assert await _loader(tmp_path)._fetch_from_hosted() is None
+        assert short_route.called, (
+            "the approved authority was not reached — this section is testing the "
+            "guard again instead of the key body"
+        )
+
+    with respx.mock:
+        key = secrets.token_bytes(32)
+        good_route = respx.post(KEY_URL).mock(
+            return_value=httpx.Response(200, json={"profile_key": base64.b64encode(key).decode()})
+        )
+        assert await _loader(tmp_path)._fetch_from_hosted() == key
+        assert good_route.called
+
+
 @pytest.mark.parametrize("nbytes", [0, 1, 16, 31, 33, 64])
 @respx.mock
 async def test_hosted_key_of_the_WRONG_LENGTH_is_refused(tmp_path, nbytes):
     """M10. A short key would otherwise be hashed into a well-formed AES key."""
-    respx.post(KEY_URL).mock(
+    route = respx.post(KEY_URL).mock(
         return_value=httpx.Response(
             200, json={"profile_key": base64.b64encode(bytes(nbytes)).decode()}
         )
@@ -643,6 +741,8 @@ async def test_hosted_key_of_the_WRONG_LENGTH_is_refused(tmp_path, nbytes):
     assert await loader.fetch_key() is None
     assert loader.last_source == "none"
     assert loader.has_key is False
+    # Not vacuous: the key body was actually fetched and then refused.
+    assert route.called
 
 
 @pytest.mark.parametrize(
@@ -657,9 +757,10 @@ async def test_hosted_key_of_the_WRONG_LENGTH_is_refused(tmp_path, nbytes):
 @respx.mock
 async def test_hosted_key_that_is_not_valid_base64_is_refused(tmp_path, payload):
     """M14. Without validate=True, b64decode silently DROPS stray characters."""
-    respx.post(KEY_URL).mock(return_value=httpx.Response(200, json={"profile_key": payload}))
+    route = respx.post(KEY_URL).mock(return_value=httpx.Response(200, json={"profile_key": payload}))
     loader = _loader(tmp_path)
     assert await loader._fetch_from_hosted() is None
+    assert route.called
 
 
 @respx.mock
@@ -684,31 +785,50 @@ async def test_a_MANGLED_key_blob_is_refused_rather_than_silently_repaired(tmp_p
     with pytest.raises(Exception):
         base64.b64decode(mangled, validate=True)
 
-    respx.post(KEY_URL).mock(return_value=httpx.Response(200, json={"profile_key": mangled}))
+    mangled_route = respx.post(KEY_URL).mock(
+        return_value=httpx.Response(200, json={"profile_key": mangled})
+    )
     assert await _loader(tmp_path)._fetch_from_hosted() is None
+    assert mangled_route.called
 
     # Positive control: the same key, cleanly encoded, IS accepted.
-    respx.post(KEY_URL).mock(return_value=httpx.Response(200, json={"profile_key": b64}))
+    clean_route = respx.post(KEY_URL).mock(
+        return_value=httpx.Response(200, json={"profile_key": b64})
+    )
     assert await _loader(tmp_path)._fetch_from_hosted() == key
+    assert clean_route.called
 
 
 @pytest.mark.parametrize("status", [400, 401, 403, 404, 429, 500, 502, 503])
 @respx.mock
 async def test_a_non_200_from_the_hosted_endpoint_yields_no_key(tmp_path, status):
-    respx.post(KEY_URL).mock(return_value=httpx.Response(status, json={}))
-    assert await _loader(tmp_path)._fetch_from_hosted() is None
+    route = respx.post(KEY_URL).mock(return_value=httpx.Response(status, json={}))
+    loader = _loader(tmp_path)
+    assert await loader._fetch_from_hosted() is None
+    assert route.called
+    # The status is the governance fact: refused-by-endpoint, not
+    # refused-before-the-wire. Pins that this test observes the HTTP path.
+    assert loader.last_http_status == status
 
 
 @respx.mock
 async def test_a_200_with_no_profile_key_field_yields_no_key(tmp_path):
-    respx.post(KEY_URL).mock(return_value=httpx.Response(200, json={"expires_at": "2030-01-01"}))
+    route = respx.post(KEY_URL).mock(
+        return_value=httpx.Response(200, json={"expires_at": "2030-01-01"})
+    )
     assert await _loader(tmp_path)._fetch_from_hosted() is None
+    assert route.called
 
 
 @respx.mock
 async def test_a_transport_error_yields_no_key_and_does_not_propagate(tmp_path):
-    respx.post(KEY_URL).mock(side_effect=httpx.ConnectError("refused"))
-    assert await _loader(tmp_path)._fetch_from_hosted() is None
+    route = respx.post(KEY_URL).mock(side_effect=httpx.ConnectError("refused"))
+    loader = _loader(tmp_path)
+    assert await loader._fetch_from_hosted() is None
+    assert route.called
+    # A transport failure, NOT an authority refusal — the two must stay
+    # distinguishable in the key-load record.
+    assert loader.last_error_type == "ConnectError"
 
 
 async def test_no_api_key_means_no_hosted_fetch_is_attempted(tmp_path):
@@ -729,8 +849,9 @@ async def test_fetch_key_falls_back_to_the_cache_then_to_None(tmp_path):
     loader = _loader(tmp_path)
     loader._save_cache(key)
 
-    respx.post(KEY_URL).mock(return_value=httpx.Response(503, json={}))
+    route = respx.post(KEY_URL).mock(return_value=httpx.Response(503, json={}))
     assert await loader.fetch_key() == key
+    assert route.called, "the cache was used without the hosted endpoint being tried first"
     assert loader.last_source == "cache"
 
     loader.CACHE_FILE.unlink()
@@ -744,12 +865,13 @@ async def test_fetch_key_falls_back_to_the_cache_then_to_None(tmp_path):
 async def test_no_log_line_from_a_key_fetch_contains_key_material(tmp_path, caplog):
     """What leaks on success and on failure."""
     key = secrets.token_bytes(32)
-    respx.post(KEY_URL).mock(
+    route = respx.post(KEY_URL).mock(
         return_value=httpx.Response(200, json={"profile_key": base64.b64encode(key).decode()})
     )
     loader = _loader(tmp_path, api_key="ak_live_SUPERSECRET")
     with caplog.at_level(logging.DEBUG):
         assert await loader.fetch_key() == key
+    assert route.called
 
     blob = "\n".join(r.getMessage() for r in caplog.records)
     assert key.hex() not in blob

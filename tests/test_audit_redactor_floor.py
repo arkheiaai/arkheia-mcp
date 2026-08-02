@@ -1022,6 +1022,15 @@ DISK_SINKS: dict[str, tuple[str, str]] = {
         "creates/appends only the sidecar flock file used for serialization; no "
         "caller/model payload is written to that file",
     ),
+    "mcp_server/receipts.py:_ensure_receipt_file": (
+        "NO_CALLER_DATA",
+        "os.open(O_CREAT|O_EXCL|O_WRONLY, 0o600) then os.close(fd): it CREATES the "
+        "receipt log 0600 from its first byte and writes ZERO bytes through that fd. "
+        "Every byte that lands in the file is written by _append_record_and_confirm, "
+        "which is classified REDACTED above. Newly visible to this scan because "
+        "_os_open_is_write() now sees raw-fd sinks that the string-mode heuristic "
+        "could not; the sink itself predates it",
+    ),
 }
 
 # The ratchet bound on UNREDACTED_GAP. Reduce it when a gap is closed; it must
