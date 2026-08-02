@@ -292,7 +292,10 @@ class TestNulSafety:
 
         result = await retrieve_entities("A")
 
-        assert result == {"entities": [], "total": 0}
+        # Field-by-field for the same reason as above: the receipt fields are additive
+        # and say nothing about whether the NUL-bearing row was disclosed.
+        assert result["entities"] == []
+        assert result["total"] == 0
 
     @pytest.mark.asyncio
     async def test_legacy_nul_observations_and_relations_are_not_dumped(self, db):
@@ -347,7 +350,11 @@ class TestSearchIsLiteral:
         wildcard = await retrieve_entities("%")
         control = await retrieve_entities("Acme")
 
-        assert wildcard == {"entities": [], "total": 0}
+        # Field-by-field, not whole-dict: retrieve_entities also returns receipt_id /
+        # receipt now, so `== {...}` would fail for a reason unrelated to the wildcard.
+        # The disclosure claim is unchanged — nothing matched and nothing was returned.
+        assert wildcard["entities"] == []
+        assert wildcard["total"] == 0
         assert [entity["name"] for entity in control["entities"]] == ["Acme Corp"]
 
     @pytest.mark.asyncio
