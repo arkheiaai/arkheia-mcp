@@ -40,7 +40,7 @@ def mock_engine():
 
     engine = AsyncMock(spec=DetectionEngine)
 
-    async def _verify(prompt, response, model_id):
+    async def _verify(prompt, response, model_id, **_metadata):
         if model_id == "no-such-model":
             return DetectionResult(
                 risk_level="UNKNOWN",
@@ -145,6 +145,36 @@ class TestDetectVerifyEndpoint:
         data = resp.json()
         assert data["risk_level"] == "UNKNOWN"
         assert data["error"] == "response_empty"
+
+    def test_empty_response_with_zero_output_metadata_reaches_engine(self, client, mock_engine):
+        """Zero provider output is a usage fact, so it reaches the gate instead of response_empty."""
+        resp = client.post("/detect/verify", json={
+            "prompt": "test",
+            "response": "",
+            "model_id": "claude-sonnet-4-6",
+            "output_tokens": 0,
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["risk_level"] == "LOW"
+        assert data["error"] is None
+        mock_engine.verify.assert_called_once()
+        assert mock_engine.verify.call_args.kwargs["output_tokens"] == 0
+
+    def test_usage_metadata_output_tokens_reaches_engine(self, client, mock_engine):
+        """Provider usage metadata is accepted without requiring callers to duplicate a top-level field."""
+        resp = client.post("/detect/verify", json={
+            "prompt": "test",
+            "response": "text",
+            "model_id": "claude-sonnet-4-6",
+            "usage": {"completion_tokens": 0},
+            "is_function_call": True,
+        })
+        assert resp.status_code == 200
+        assert resp.json()["risk_level"] == "LOW"
+        mock_engine.verify.assert_called_once()
+        assert mock_engine.verify.call_args.kwargs["output_tokens"] == 0
+        assert mock_engine.verify.call_args.kwargs["is_function_call"] is True
 
     def test_unknown_model_returns_unknown(self, client):
         """CRITERION 5: Unknown model -> UNKNOWN (information, not error)."""
