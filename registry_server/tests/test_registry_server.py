@@ -16,15 +16,18 @@ Passing criteria:
 
 import os
 import hashlib
+import json
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
 from registry_server.auth import generate_key
 from registry_server.main import app
-from registry_server.storage import ProfileStorage
+from registry_server.storage import ProfileStorage, _is_safe_model_id
 
 
 # ---------------------------------------------------------------------------
@@ -278,3 +281,491 @@ def test_profiles_since_invalid_format_returns_422(client):
         headers={"Authorization": f"Bearer {VALID_KEY}"},
     )
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Path-traversal hardening + registry-id round-trip (adversarial ledger F23)
+#
+# `get_profile_bytes` resolves an untrusted `model_id` two ways: an exact
+# filename `<profiles>/<model_id>.yaml` (gated by realpath containment) and a
+# fallback SCAN that matches the id against each profile's own `model:` value.
+# The public id is a REGISTRY identifier that MAY contain `:` or `/` (ollama
+# `qwen3:8b`, HF `deepseek-ai/DeepSeek-V3.1`, `zoecohn4/Ouro:latest`) — so BOTH
+# properties must hold TOGETHER:
+#   CONTRACT  — every id `list_profiles()` emits is downloadable by that id, and
+#   SECURITY  — no id (traversal / absolute / encoded / symlink / NUL) ever reads
+#               a file outside the profiles root.
+# The CONTRACT regressed when an over-strict charset 404'd the 21 `:`/`/` ids
+# (38/59 downloadable); the CONTRACT tests below are RED on that head and GREEN
+# after the realpath-containment redesign. The SECURITY tests were RED on the
+# ORIGINAL vulnerable storage (traversal read out-of-root files) and stay GREEN.
+# ---------------------------------------------------------------------------
+
+# ESCAPING ids: they carry a `..` token / NUL / backslash / are empty, or are an
+# absolute path — each either fails the syntactic pre-filter or is caught by
+# realpath containment. None may ever yield bytes.
+ESCAPING_MODEL_IDS = [
+    "../SECRET_outside",
+    "../../SECRET_outside",
+    "../../../../../../etc/passwd",
+    "/etc/passwd",
+    "/tmp/anything",
+    "..",
+    "..\\SECRET_outside",
+    "foo/../../SECRET_outside",
+    "..%2fSECRET_outside",      # contains a literal ".." token
+    "a\x00b",
+    "",
+]
+
+# CONTAINED-but-nonexistent ids: no `..`, no escape — they resolve to a literal
+# filename INSIDE the root that names no real profile (encoded `%2e%2e`, a hidden
+# / dash name, an in-root subpath, a bare dot). NOT security escapes; they simply
+# are not found. Kept distinct so the redesign is honest: containment, not a
+# charset, is what makes these safe.
+CONTAINED_NONEXISTENT_MODEL_IDS = [
+    "%2e%2e%2fSECRET_outside",
+    ".hidden",
+    "-rf",
+    "sub/child",
+    ".",
+]
+
+ALL_TRAVERSAL_VECTORS = ESCAPING_MODEL_IDS + CONTAINED_NONEXISTENT_MODEL_IDS
+
+
+def _shipped_storage_and_emitted_ids():
+    """(ProfileStorage over the REAL profiles/, list of emitted model ids), or
+    (None, []) if profiles/ is absent in this checkout."""
+    profiles_dir = Path(__file__).resolve().parents[2] / "profiles"
+    if not profiles_dir.is_dir():
+        return None, []
+    storage = ProfileStorage(profile_dir=str(profiles_dir), base_url="http://x")
+    return storage, [m["model_id"] for m in storage.list_profiles()]
+
+
+@pytest.fixture()
+def storage_with_secret(tmp_path):
+    """A ProfileStorage whose profiles root has one legit profile, with a
+    secret *.yaml planted OUTSIDE the root (sibling) and one at an absolute
+    path — the files a traversal would try to reach."""
+    root = tmp_path / "profiles"
+    root.mkdir()
+    (root / "claude-opus-4-8.yaml").write_text(
+        "model: claude-opus-4-8\nversion: '1.0'\n", encoding="utf-8"
+    )
+    # secret sibling of the profiles root (reached via ../)
+    (tmp_path / "SECRET_outside.yaml").write_text(
+        "api_key: SUPER_SECRET\n", encoding="utf-8"
+    )
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "creds.yaml").write_text("db_password: SUPER_SECRET\n", encoding="utf-8")
+    storage = ProfileStorage(profile_dir=str(root), base_url="http://x")
+    return storage, tmp_path, vault
+
+
+def test_storage_all_emitted_ids_downloadable():
+    """CONTRACT round-trip (RED on the over-strict-charset head): every id the
+    registry EMITS is downloadable by that id via get_profile_bytes — all of
+    them, including the 21 that contain `:` or `/` (qwen3:8b,
+    deepseek-ai/DeepSeek-V3.1)."""
+    storage, ids = _shipped_storage_and_emitted_ids()
+    if storage is None:
+        pytest.skip("profiles/ directory not present in this checkout")
+    assert ids, "expected shipped profiles to emit ids"
+    undownloadable = [i for i in ids if storage.get_profile_bytes(i) is None]
+    assert undownloadable == [], (
+        f"emitted ids NOT downloadable by their own id: {undownloadable}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ADVERTISED-URL ROUND-TRIP (Codex #13 LOW, second pass)
+#
+# The contract is NOT "the URL string looks right": it is **advertise a URL, GET
+# that exact URL, receive 200 and the right bytes**. The first attempt at this
+# LOW asserted the constructed string and ran `urlsplit` over it — it never
+# fetched — which is precisely why a bug about percent-encoding survived a fix
+# about percent-encoding: the assertion could not see the second decode happening
+# downstream of URL construction.
+#
+# The probe set is Codex's failing set plus the ids this branch exists to keep
+# working. `%`-bearing ids are the discriminator: an id holding a VALID escape
+# (`model%23`) breaks under a DOUBLE path decode (`%2523` -> `%23` -> `#`) while a
+# bare `%` or an invalid escape (`model%`, `model%zz`) survives, because there is
+# nothing decodable left after the first pass. `+` and a space are included
+# because the query slot treats `+` as a space unless it is escaped.
+ROUNDTRIP_PROBE_IDS = [
+    "plain-model",                  # control: no escaping needed at all
+    "model#frag",                   # `#` — would truncate the URL client-side
+    "model?q=1",                    # `?` — would start a query string
+    "model%",                       # trailing bare `%` (invalid escape)
+    "model%zz",                     # invalid escape
+    "model%23",                     # VALID escape -> 404 on the path form
+    "model%2e",
+    "model%2f",
+    "model%3f",
+    "model%41",
+    "deepseek-ai/DeepSeek-V3.1",    # `/` — the slash ids this branch fixed
+    "qwen3:8b",                     # `:` — ollama-style id
+    "model+plus",                   # `+` — a space in the query unless escaped
+    "model with space",
+]
+
+# Ids whose escaped PATH is decode-idempotent (they contain no literal `%`), so
+# the LEGACY path route resolves them under either one or two path decodes.
+_PATH_SAFE_PROBE_IDS = [m for m in ROUNDTRIP_PROBE_IDS if "%" not in m]
+
+
+def _probe_profile_body(mid: str) -> str:
+    """A spec-format profile whose emitted model_id is exactly `mid` (json.dumps
+    gives a correctly quoted YAML scalar for `#`, `%`, `?`, spaces)."""
+    return (
+        "metadata:\n"
+        f"  model_id: {json.dumps(mid)}\n"
+        "  version: '1'\n"
+        f"probe: {json.dumps(mid)}\n"
+    )
+
+
+@pytest.fixture()
+def probe_app(monkeypatch, tmp_path):
+    """Factory -> (profiles_root, {model_id: expected_bytes}) for a profiles root
+    holding one profile per requested id, with the registry app pointed at it."""
+    def _make(ids):
+        root = tmp_path / "profiles"
+        root.mkdir(exist_ok=True)
+        expected = {}
+        for i, mid in enumerate(ids):
+            body = _probe_profile_body(mid)
+            (root / f"probe{i}.yaml").write_text(body, encoding="utf-8")
+            expected[mid] = body.encode("utf-8")
+        monkeypatch.setenv("ARKHEIA_REGISTRY_KEYS", VALID_KEY)
+        monkeypatch.setenv("ARKHEIA_REGISTRY_PROFILE_DIR", str(root))
+        monkeypatch.setenv("ARKHEIA_REGISTRY_BASE_URL", "http://testserver")
+        return root, expected
+    return _make
+
+
+@pytest.mark.parametrize("mid", ROUNDTRIP_PROBE_IDS)
+def test_advertised_download_url_round_trips_through_the_app(probe_app, mid):
+    """CONTRACT (RED on HEAD for the 5 valid-escape ids): read the advertised
+    `download_url` out of `/profiles` and GET **that exact URL** through the app —
+    200 plus the profile's exact bytes and advertised checksum.
+
+    Runs over starlette's TestClient, which decodes the request PATH twice
+    (testclient.py:262 `unquote(httpx.URL.path)` — `URL.path` is already decoded).
+    On HEAD that made `model%23` & friends 404; the fix keeps the id out of the
+    path entirely, so the advertised URL is decode-invariant and this harness — the
+    one the repo actually runs — can finally express the contract."""
+    _root, expected = probe_app([mid])
+    with TestClient(app) as c:
+        listing = c.get("/profiles", headers={"Authorization": f"Bearer {VALID_KEY}"}).json()
+        rows = [p for p in listing["profiles"] if p["model_id"] == mid]
+        assert rows, f"{mid!r} not emitted in the listing: {listing}"
+        row = rows[0]
+        url = row["download_url"]
+        resp = c.get(url, headers={"Authorization": f"Bearer {VALID_KEY}"})
+        assert resp.status_code == 200, f"advertised {url!r} -> {resp.status_code}"
+        assert resp.content == expected[mid], f"advertised {url!r} served the wrong bytes"
+        assert hashlib.sha256(resp.content).hexdigest() == row["checksum"]
+
+
+@pytest.mark.parametrize("mid", ROUNDTRIP_PROBE_IDS)
+def test_advertised_download_url_path_is_decode_invariant(tmp_path, mid):
+    """STRUCTURAL guard for the same defect class: the advertised URL's PATH must
+    contain NO percent escape, so no layer can change the request by decoding it
+    (uvicorn decodes the path once, starlette's TestClient twice, a normalising
+    reverse proxy may too). The id rides in the query, which every layer in this
+    stack decodes exactly once — and it must parse back to the id verbatim."""
+    from urllib.parse import parse_qsl, unquote, urlsplit
+
+    prof = tmp_path / "profiles"
+    prof.mkdir()
+    (prof / "p.yaml").write_text(_probe_profile_body(mid), encoding="utf-8")
+    st = ProfileStorage(profile_dir=prof, base_url="https://reg.example")
+    metas = st.list_profiles()
+    assert metas, "expected one profile"
+    url = metas[0]["download_url"]
+
+    parts = urlsplit(url)
+    assert parts.path == "/profiles/download", parts.path
+    assert "%" not in parts.path, f"escape in the advertised path is not decode-safe: {url}"
+    assert unquote(parts.path) == parts.path, f"path decoding is not a no-op: {url}"
+    assert parts.fragment == "", f"id leaked into the fragment: {url}"
+    assert dict(parse_qsl(parts.query, keep_blank_values=True)) == {"model_id": mid}, url
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mid", ROUNDTRIP_PROBE_IDS)
+async def test_advertised_download_url_round_trips_single_decode_transport(probe_app, mid):
+    """DIFFERENTIAL: the same round-trip over a transport that decodes the path
+    ONCE (httpx's ASGITransport — the uvicorn-equivalent count) instead of twice.
+
+    Two transports with different decode counts is what makes this suite an honest
+    oracle: a fix that only satisfies one of them is a fix that depends on a decode
+    count we do not control. Both must pass."""
+    root, expected = probe_app([mid])
+    # ASGITransport does not run lifespan; set state the way lifespan would.
+    app.state.storage = ProfileStorage(profile_dir=str(root), base_url="http://testserver")
+    metas = {m["model_id"]: m for m in app.state.storage.list_profiles()}
+    url = metas[mid]["download_url"]
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+    ) as c:
+        resp = await c.get(url, headers={"Authorization": f"Bearer {VALID_KEY}"})
+    assert resp.status_code == 200, f"advertised {url!r} -> {resp.status_code} (single-decode)"
+    assert resp.content == expected[mid]
+
+
+def test_advertised_download_url_round_trips_over_real_uvicorn(probe_app, monkeypatch):
+    """HIGHEST-FIDELITY oracle: every probe id round-trips over a REAL uvicorn
+    server on a real socket — the server this service actually ships with — with
+    ONE server for the whole probe set.
+
+    This is the check that settles which layer was at fault: HEAD's path-form URL
+    passes here (uvicorn decodes the path once) and fails under TestClient (twice).
+    The advertised query form passes under both."""
+    uvicorn = pytest.importorskip("uvicorn")
+    import socket
+    import threading
+    import time
+
+    root, expected = probe_app(ROUNDTRIP_PROBE_IDS)
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    monkeypatch.setenv("ARKHEIA_REGISTRY_BASE_URL", f"http://127.0.0.1:{port}")
+
+    server = uvicorn.Server(
+        uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 20
+        while not server.started and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert server.started, "uvicorn did not start"
+
+        auth = {"Authorization": f"Bearer {VALID_KEY}"}
+        with httpx.Client(timeout=10.0) as c:
+            listing = c.get(f"http://127.0.0.1:{port}/profiles", headers=auth).json()
+            rows = {p["model_id"]: p for p in listing["profiles"]}
+            missing = [m for m in ROUNDTRIP_PROBE_IDS if m not in rows]
+            assert missing == [], f"ids not emitted: {missing}"
+            bad = []
+            for mid in ROUNDTRIP_PROBE_IDS:
+                url = rows[mid]["download_url"]
+                resp = c.get(url, headers=auth)
+                if resp.status_code != 200 or resp.content != expected[mid]:
+                    bad.append((mid, url, resp.status_code))
+        assert bad == [], f"advertised URLs that did NOT serve their bytes: {bad}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+
+
+@pytest.mark.parametrize("mid", _PATH_SAFE_PROBE_IDS)
+def test_legacy_path_download_route_still_resolves(probe_app, mid):
+    """DON'T BREAK WHAT WORKS: the legacy `/profiles/{model_id:path}/download`
+    alias still serves every id whose escaped path is decode-idempotent — the
+    slash (`deepseek-ai/DeepSeek-V3.1`) and colon (`qwen3:8b`) ids this branch
+    exists to fix included."""
+    from urllib.parse import quote
+
+    _root, expected = probe_app([mid])
+    with TestClient(app) as c:
+        resp = c.get(
+            f"/profiles/{quote(mid)}/download",
+            headers={"Authorization": f"Bearer {VALID_KEY}"},
+        )
+    assert resp.status_code == 200, f"legacy path route regressed for {mid!r}"
+    assert resp.content == expected[mid]
+
+
+@pytest.mark.parametrize("vector", ALL_TRAVERSAL_VECTORS)
+def test_download_query_route_rejects_traversal(client_ext_secret, vector):
+    """SECURITY parity for the NEW surface: the query-form download route routes
+    through the same `get_profile_bytes` chokepoint, so no traversal / absolute /
+    encoded vector ever returns 200 or echoes the out-of-root secret."""
+    resp = client_ext_secret.get(
+        "/profiles/download",
+        params={"model_id": vector},
+        headers={"Authorization": f"Bearer {VALID_KEY}"},
+    )
+    assert resp.status_code != 200, f"query route served {vector!r}"
+    assert "SUPER_SECRET" not in resp.text
+    assert "root:" not in resp.text
+
+
+@pytest.mark.parametrize(
+    "mid",
+    ["qwen3:8b", "gemma4:latest", "granite4.1:30b",
+     "deepseek-ai/DeepSeek-V3.1", "zoecohn4/Ouro:latest"],
+)
+def test_storage_colon_and_slash_ids_downloadable(mid):
+    """Explicit witnesses for the regression: `:`/`/` registry ids resolve via
+    the scan branch (RED on the over-strict-charset head, GREEN after)."""
+    storage, ids = _shipped_storage_and_emitted_ids()
+    if storage is None:
+        pytest.skip("profiles/ directory not present in this checkout")
+    if mid not in ids:
+        pytest.skip(f"{mid} not shipped in this checkout")
+    assert storage.get_profile_bytes(mid) is not None
+
+
+def test_is_safe_model_id_accepts_all_emitted_ids():
+    """CONTRACT: the syntactic pre-filter accepts every EMITTED registry id (the
+    `model:` values, not filename stems) so no legit id is dropped before
+    resolution. RED on the over-strict-charset head (it rejected `:`/`/`)."""
+    _storage, ids = _shipped_storage_and_emitted_ids()
+    if not ids:
+        pytest.skip("profiles/ directory not present in this checkout")
+    bad = [i for i in ids if not _is_safe_model_id(i)]
+    assert bad == [], f"emitted registry ids rejected by pre-filter: {bad}"
+
+
+@pytest.mark.parametrize(
+    "mid",
+    ["qwen3:8b", "deepseek-ai/DeepSeek-V3.1", "zoecohn4/Ouro:latest",
+     "claude-opus-4-8", "gpt-5.2-codex"],
+)
+def test_is_safe_model_id_accepts_registry_ids(mid):
+    """The pre-filter ACCEPTS real registry ids, including `:`/`/` forms —
+    containment, not a charset, is what confines them."""
+    assert _is_safe_model_id(mid) is True
+
+
+@pytest.mark.parametrize(
+    "mid", ["../x", "..", "a/../../b", "..%2fx", "x\x00y", "back\\slash", ""]
+)
+def test_is_safe_model_id_rejects_dangerous_tokens(mid):
+    """The pre-filter drops ids that can never name a legitimate profile: a `..`
+    traversal token, a NUL byte, a backslash, or empty."""
+    assert _is_safe_model_id(mid) is False
+
+
+@pytest.mark.parametrize("mid", ALL_TRAVERSAL_VECTORS)
+def test_storage_traversal_returns_none(storage_with_secret, mid):
+    """SECURITY: no traversal / absolute / encoded / in-root-junk id ever yields
+    bytes — an escape (the planted out-of-root secret) is contained away, and an
+    in-root non-existent filename is simply not found. Either way: None."""
+    storage, _root, _vault = storage_with_secret
+    assert storage.get_profile_bytes(mid) is None
+
+
+def test_storage_absolute_path_returns_none(storage_with_secret):
+    """An absolute path to a real *.yaml secret must not be served."""
+    storage, _root, vault = storage_with_secret
+    abs_id = str(vault / "creds")  # -> <vault>/creds.yaml exists on disk
+    assert storage.get_profile_bytes(abs_id) is None
+
+
+def test_storage_symlink_escape_returns_none(storage_with_secret):
+    """CONTAINMENT BACKSTOP: a charset-valid id whose file is a symlink
+    pointing OUTSIDE the root must not be read (realpath containment), and it
+    must not surface in list_profiles either."""
+    storage, tmp_path, _vault = storage_with_secret
+    secret = tmp_path / "SECRET_outside.yaml"
+    link = Path(storage.profile_dir) / "evillink.yaml"
+    link.symlink_to(secret)
+    # id passes the syntactic pre-filter, but the resolved path escapes the root:
+    assert _is_safe_model_id("evillink") is True
+    assert storage.get_profile_bytes("evillink") is None
+    listed = {p["model_id"] for p in storage.list_profiles()}
+    assert "api_key" not in listed  # secret content never parsed into listing
+    # only the legit profile is listed
+    assert listed == {"claude-opus-4-8"}
+
+
+def test_storage_legit_still_served(storage_with_secret):
+    """A legitimate model_id is still served after hardening."""
+    storage, _root, _vault = storage_with_secret
+    out = storage.get_profile_bytes("claude-opus-4-8")
+    assert out is not None
+    assert yaml.safe_load(out)["model"] == "claude-opus-4-8"
+
+
+@pytest.fixture()
+def client_ext_secret(monkeypatch, tmp_path):
+    """TestClient whose profiles root has a secret *.yaml planted OUTSIDE it
+    (sibling of the root) — so a working traversal WOULD leak `SUPER_SECRET`."""
+    root = tmp_path / "profiles"
+    root.mkdir()
+    (root / "claude-opus-4-8.yaml").write_text(
+        "model: claude-opus-4-8\nversion: '1.0'\n", encoding="utf-8"
+    )
+    (tmp_path / "SECRET_outside.yaml").write_text(
+        "api_key: SUPER_SECRET\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("ARKHEIA_REGISTRY_KEYS", VALID_KEY)
+    monkeypatch.setenv("ARKHEIA_REGISTRY_PROFILE_DIR", str(root))
+    monkeypatch.setenv("ARKHEIA_REGISTRY_BASE_URL", "http://testserver")
+    with TestClient(app) as c:
+        yield c
+
+
+# NOTE (honesty): the download route now uses the `{model_id:path}` converter
+# (so a legitimate `/` id — deepseek-ai/DeepSeek-V3.1 — whose advertised
+# download_url the single-segment `[^/]+` route used to 404 now resolves). That
+# makes THIS test load-bearing: with `:path`, Starlette decodes `%2f`/`%2e`
+# BEFORE the handler, so `..%2f..%2fX` reaches storage as `../../X` and a literal
+# `/etc/passwd` reaches it verbatim — i.e. the traversal vectors now DO hit
+# `get_profile_bytes`, and it is storage containment (the `..` pre-filter +
+# realpath) that must reject them. `:path` is safe ONLY because that containment
+# holds; this test is the surface guard that proves it (any regression that let a
+# vector through would 200 / leak here). The storage fix is ALSO exercised
+# directly, genuinely RED on base, by `test_storage_*` above and
+# `test_storage_download_never_leaks_secret` below.
+@pytest.mark.parametrize(
+    "vector",
+    [
+        "..%2f..%2fSECRET_outside",
+        "..%2fSECRET_outside",
+        "../../SECRET_outside",
+        "%2e%2e%2fSECRET_outside",
+        "..\\SECRET_outside",
+        "/etc/passwd",
+    ],
+)
+def test_download_route_rejects_url_traversal(client_ext_secret, vector):
+    """HTTP SURFACE guard (route matcher, not the storage fix): the download
+    route never returns 200 for URL-shaped traversal vectors and never echoes
+    the planted secret. See the note above for why this does not, by itself,
+    exercise the storage containment."""
+    resp = client_ext_secret.get(
+        f"/profiles/{vector}/download",
+        headers={"Authorization": f"Bearer {VALID_KEY}"},
+    )
+    assert resp.status_code != 200
+    # `SUPER_SECRET` only appears in the out-of-root secret file's *content*,
+    # never in a vector string, so this catches an actual leak precisely.
+    assert "SUPER_SECRET" not in resp.text
+    assert "root:" not in resp.text  # /etc/passwd marker
+
+
+@pytest.mark.parametrize(
+    "vector",
+    [
+        "../SECRET_outside",      # relative parent -> sibling of the root
+        "../../SECRET_outside",
+        "..\\SECRET_outside",     # backslash separator variant
+    ],
+)
+def test_storage_download_never_leaks_secret(storage_with_secret, vector):
+    """STORAGE containment (genuinely RED on base): the actual fix locus.
+
+    Drives `get_profile_bytes` directly — the method the download route calls —
+    with vectors that DO escape the profiles root on the unpatched storage
+    (base reads the planted `SUPER_SECRET`). Post-fix each returns None and the
+    out-of-root secret's *content* is never surfaced. Unlike the HTTP test above
+    this bypasses Starlette's `[^/]+` matcher, so it fails on pre-fix storage."""
+    storage, _root, _vault = storage_with_secret
+    out = storage.get_profile_bytes(vector)
+    assert out is None
+    # Belt-and-braces: even if a future regression returned bytes, they must
+    # never be the planted secret's content.
+    assert out is None or b"SUPER_SECRET" not in out

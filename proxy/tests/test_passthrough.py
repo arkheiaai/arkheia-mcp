@@ -199,6 +199,45 @@ def test_grok_passthrough_low_risk(mock_client_cls):
 
 
 @patch("proxy.endpoints.passthrough.httpx.AsyncClient")
+def test_grok_passthrough_screens_hard_empty_output(mock_client_cls):
+    """content='' plus completion_tokens=0 reaches the shared empty-output gate."""
+    hard_empty = {
+        **OPENAI_RESPONSE,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": ""},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 0, "total_tokens": 10},
+    }
+    response_body = json.dumps(hard_empty).encode()
+    mock_client = AsyncMock()
+    mock_client.request = AsyncMock(return_value=_make_mock_response(response_body))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    mock_client_cls.return_value = mock_client
+
+    app = _make_app("LOW")
+    client = TestClient(app, raise_server_exceptions=True)
+
+    resp = client.post(
+        "/proxy/grok/v1/chat/completions",
+        json=OPENAI_REQUEST,
+        headers={"Authorization": "Bearer xai-test-key"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.headers["x-arkheia-risk"] == "LOW"
+    app.state.engine.verify.assert_called_once()
+    assert app.state.engine.verify.call_args.args[:3] == (
+        "What is 2+2?",
+        "",
+        "grok-4-fast-non-reasoning",
+    )
+    assert app.state.engine.verify.call_args.kwargs == {"output_tokens": 0}
+
+
+@patch("proxy.endpoints.passthrough.httpx.AsyncClient")
 def test_grok_passthrough_upstream_4xx(mock_client_cls):
     """Upstream 4xx → relayed as-is with X-Arkheia-Risk: SKIP."""
     error_body = json.dumps({"error": {"message": "invalid model"}}).encode()
