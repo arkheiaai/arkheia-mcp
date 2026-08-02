@@ -204,6 +204,10 @@ class TestStatusDoesNotOverclaim:
         """
         The response may say ``enqueued`` only after the production writer has
         drained and the surfaced id is findable in that writer's JSONL file.
+
+        ``AuditWriter.write()`` now reports queue saturation itself, but that
+        only covers the enqueue step: ``_writer_loop`` still swallows every
+        later I/O error, so read-back remains the thing that earns the word.
         """
         probe, responses = await drive(n=1, tmp_path=tmp_path)
         response = responses[0]
@@ -227,13 +231,26 @@ class TestStatusDoesNotOverclaim:
         assert json.loads(with_rail[0].content)["receipt"] == "enqueued"
         assert json.loads(without_rail.content)["receipt"] == "no_audit_writer"
 
-    async def test_a_full_queue_is_not_reported_as_enqueued_when_no_row_lands(
+    async def test_a_full_queue_reports_queue_full_and_never_enqueued(
         self, tmp_path
     ):
         """
-        ``AuditWriter.write()`` catches its own ``QueueFull`` and drops the
-        record, returning normally. A response must therefore read the rail back
-        rather than treating a non-raising write call as proof of a receipt.
+        Queue saturation is a visible receipt status, not a delivered claim.
+
+        On a genuinely saturated rail — no monkeypatch, no stand-in, the
+        shipped class with its real 10,000-slot queue filled — the caller is
+        told ``queue_full`` for a record that was dropped before the background
+        writer could ever see it.
+
+        The pinned invariant is unchanged and asserted explicitly below: a full
+        queue is NEVER reported as ``enqueued`` when no row lands. ``write()``
+        reporting its own ``QueueFull`` is what lets the response name the cause
+        instead of collapsing it into the generic ``write_failed`` — the drop is
+        known at the enqueue step, so read-back was never going to find it.
+
+        The writer's drain loop is deliberately NOT started, so the saturation
+        is a fact for the whole test rather than a race against a drainer — the
+        first draft of this test raced and said so, which is why it says this.
         """
         log = tmp_path / "audit.jsonl"
         writer = AuditWriter(str(log))
@@ -247,15 +264,23 @@ class TestStatusDoesNotOverclaim:
             n += 1
         assert n >= 1000, f"the queue accepted only {n} records; wrong premise"
 
+        # No monkeypatch: this is the production method on a saturated queue.
+        assert await writer.write({
+            "detection_id": "dropped-on-the-floor",
+        }) == "queue_full"
+
         app, _ = build(risk="HIGH", action="block", gate_action="block",
                        audit=writer)
         async with client(app) as c:
             r = await c.post("/v1/chat/completions", json=REQ)
         surfaced = r.headers["x-arkheia-detection-id"]
-        assert r.headers["x-arkheia-receipt"] == "write_failed"
-        assert json.loads(r.content)["receipt"] == "write_failed"
+        assert r.headers["x-arkheia-receipt"] == "queue_full"
+        assert json.loads(r.content)["receipt"] == "queue_full"
+        # The invariant this test has always pinned, kept literal so a future
+        # edit cannot quietly relax it into an overclaim.
+        assert json.loads(r.content)["receipt"] != "enqueued"
         assert ReceiptProbe(log).find(surfaced) is None, (
-            "the response reported write_failed, but the surfaced id landed"
+            "the response reported queue_full, but the surfaced id landed"
         )
 
     async def test_a_real_filesystem_failure_reports_write_failed_and_blocks(

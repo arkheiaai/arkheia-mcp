@@ -54,7 +54,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from proxy.audit.writer import AuditWriter
+from proxy.audit.writer import (
+    AUDIT_WRITE_ENQUEUED,
+    AUDIT_WRITE_QUEUE_FULL,
+    AuditWriter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -164,12 +168,25 @@ async def emit(record: dict) -> None:
         )
         return
     try:
-        await writer.write(record)
+        write_status = await writer.write(record)
     except Exception as exc:  # pragma: no cover — defensive; write() is itself guarded
         logger.error(
             "Registry auth receipt FAILED to enqueue (%s): decision=%s receipt_id=%s "
             "— this decision is UNRECORDED",
             exc, record.get("decision"), record.get("receipt_id"),
+        )
+        return
+    if write_status == AUDIT_WRITE_QUEUE_FULL:
+        logger.error(
+            "Registry auth receipt DROPPED (audit queue full): decision=%s receipt_id=%s "
+            "— this decision is UNRECORDED",
+            record.get("decision"), record.get("receipt_id"),
+        )
+    elif write_status not in (None, AUDIT_WRITE_ENQUEUED):
+        logger.error(
+            "Registry auth receipt returned unknown audit write status %s: "
+            "decision=%s receipt_id=%s — this decision is UNRECORDED",
+            write_status, record.get("decision"), record.get("receipt_id"),
         )
 
 
