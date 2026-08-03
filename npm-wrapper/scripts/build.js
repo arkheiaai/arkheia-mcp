@@ -449,9 +449,14 @@ function toPosix(relativePath) {
   return relativePath.split(path.sep).join("/");
 }
 
-function resolveFileUnder(root, relativePath, label) {
-  const normalised = assertContainedUnder(relativePath, root, label);
-  const resolved = path.resolve(root, normalised);
+function resolveBundleFile(relativePath, label) {
+  const normalised = assertContainedUnder(relativePath, BUNDLE_ROOT, label);
+  const resolvedRoot = path.resolve(BUNDLE_ROOT);
+  const resolved = path.resolve(resolvedRoot, normalised);
+  const relative = path.relative(resolvedRoot, resolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    fail(`${label} is not contained within the bundle root`);
+  }
   let stat;
   try {
     stat = fs.lstatSync(resolved);
@@ -464,9 +469,34 @@ function resolveFileUnder(root, relativePath, label) {
   return resolved;
 }
 
-function resolveWritableFileUnder(root, relativePath, label) {
-  const normalised = assertContainedUnder(relativePath, root, label);
-  const resolved = path.resolve(root, normalised);
+function resolvePackageFile(relativePath, label) {
+  const normalised = assertContainedUnder(relativePath, PACKAGE_ROOT, label);
+  const resolvedRoot = path.resolve(PACKAGE_ROOT);
+  const resolved = path.resolve(resolvedRoot, normalised);
+  const relative = path.relative(resolvedRoot, resolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    fail(`${label} is not contained within the package root`);
+  }
+  let stat;
+  try {
+    stat = fs.lstatSync(resolved);
+  } catch (err) {
+    fail(`${label} is missing at ${resolved}: ${err.message}`);
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    fail(`${label} is not a regular file at ${resolved}`);
+  }
+  return resolved;
+}
+
+function resolveWritableBundleFile(relativePath, label) {
+  const normalised = assertContainedUnder(relativePath, BUNDLE_ROOT, label);
+  const resolvedRoot = path.resolve(BUNDLE_ROOT);
+  const resolved = path.resolve(resolvedRoot, normalised);
+  const relative = path.relative(resolvedRoot, resolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    fail(`${label} is not contained within the bundle root`);
+  }
   if (fs.existsSync(resolved)) {
     const stat = fs.lstatSync(resolved);
     if (stat.isSymbolicLink() || !stat.isFile()) {
@@ -476,11 +506,39 @@ function resolveWritableFileUnder(root, relativePath, label) {
   return resolved;
 }
 
-function writeTextFileUnder(root, relativePath, label, data) {
-  const resolved = resolveWritableFileUnder(root, relativePath, label);
+function resolveWritablePackageFile(relativePath, label) {
+  const normalised = assertContainedUnder(relativePath, PACKAGE_ROOT, label);
+  const resolvedRoot = path.resolve(PACKAGE_ROOT);
+  const resolved = path.resolve(resolvedRoot, normalised);
+  const relative = path.relative(resolvedRoot, resolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    fail(`${label} is not contained within the package root`);
+  }
+  if (fs.existsSync(resolved)) {
+    const stat = fs.lstatSync(resolved);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      fail(`${label} is not a regular file at ${resolved}`);
+    }
+  }
+  return resolved;
+}
+
+function writeBundleTextFile(relativePath, label, data) {
+  const resolved = resolveWritableBundleFile(relativePath, label);
   const dir = path.dirname(resolved);
-  if (!inside(dir, root)) {
-    fail(`${label} parent resolves outside ${root}: ${dir}`);
+  if (!inside(dir, BUNDLE_ROOT)) {
+    fail(`${label} parent resolves outside ${BUNDLE_ROOT}: ${dir}`);
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(resolved, data, "utf-8");
+  return resolved;
+}
+
+function writePackageTextFile(relativePath, label, data) {
+  const resolved = resolveWritablePackageFile(relativePath, label);
+  const dir = path.dirname(resolved);
+  if (!inside(dir, PACKAGE_ROOT)) {
+    fail(`${label} parent resolves outside ${PACKAGE_ROOT}: ${dir}`);
   }
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(resolved, data, "utf-8");
@@ -488,7 +546,7 @@ function writeTextFileUnder(root, relativePath, label, data) {
 }
 
 function sha256BundleFile(relativePath) {
-  const resolved = resolveFileUnder(BUNDLE_ROOT, relativePath, "bundle file to hash");
+  const resolved = resolveBundleFile(relativePath, "bundle file to hash");
   return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
 }
 
@@ -538,7 +596,7 @@ function collectBundleFiles(dir, relative = "") {
 }
 
 function packageManifest() {
-  const manifestPath = resolveFileUnder(PACKAGE_ROOT, "package.json", "package manifest");
+  const manifestPath = resolvePackageFile("package.json", "package manifest");
   try {
     return JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
   } catch (err) {
@@ -572,8 +630,7 @@ function writeProvenanceManifest() {
     })),
   };
 
-  const provenancePath = writeTextFileUnder(
-    BUNDLE_ROOT,
+  const provenancePath = writeBundleTextFile(
     PROVENANCE_FILE,
     "bundle provenance manifest",
     JSON.stringify(manifest, null, 2) + "\n",
@@ -595,8 +652,7 @@ function writeBundleTrustRoot(provenancePath) {
     provenance_path: `${toPosix(path.relative(PACKAGE_ROOT, BUNDLE_ROOT))}/${PROVENANCE_FILE}`,
     provenance_sha256: sha256BundleFile(PROVENANCE_FILE),
   };
-  writeTextFileUnder(
-    PACKAGE_ROOT,
+  writePackageTextFile(
     TRUST_ROOT_FILE,
     "bundle provenance trust root",
     JSON.stringify(trustRoot, null, 2) + "\n",
