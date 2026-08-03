@@ -838,13 +838,24 @@ def test_memory_relate_does_not_persist_secrets_unredacted(tmp_path):
     """
     from mcp_server.tools import memory as mem
 
-    content = _drive_memory_write_path(
-        tmp_path,
-        lambda: mem.store_relation(
+    async def relate_after_creating_endpoints():
+        # Both endpoints must exist BEFORE the relate: store_relation resolves each side
+        # to an entity id and refuses an unknown one.
+        await mem.store_entity(
+            f"{MEMORY_SENTINEL} -- service-A",
+            "service",
+            ["relation source"],
+        )
+        await mem.store_entity(_MEM_RELATION_SECRET, "credential", ["relation target"])
+        await mem.store_relation(
             from_entity=f"{MEMORY_SENTINEL} -- service-A",
             relation_type="uses_credential",
             to_entity=_MEM_RELATION_SECRET,
-        ),
+        )
+
+    content = _drive_memory_write_path(
+        tmp_path,
+        relate_after_creating_endpoints,
     )
 
     assert MEMORY_SENTINEL.encode() in content, (
@@ -874,6 +885,25 @@ def test_memory_store_functions_call_redact_before_insert():
     """
     src = (ROOT / "mcp_server/tools/memory.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
+    scrubber = next(
+        (n for n in ast.walk(tree)
+         if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+         and n.name == "_redact_memory_text"),
+        None,
+    )
+    assert scrubber is not None, (
+        "mcp_server.tools.memory._redact_memory_text is missing — the memory "
+        "write scrubber wrapper disappeared and this invariant no longer knows "
+        "which helper gates sqlite writes."
+    )
+    assert any(
+        isinstance(n, ast.Call)
+        and (
+            (isinstance(n.func, ast.Name) and n.func.id == "redact")
+            or (isinstance(n.func, ast.Attribute) and n.func.attr == "redact")
+        )
+        for n in ast.walk(scrubber)
+    ), "_redact_memory_text must call the shared redact() helper."
 
     for fn_name in ("store_entity", "store_relation"):
         fn = next(
@@ -888,19 +918,20 @@ def test_memory_store_functions_call_redact_before_insert():
             f"observes its subject."
         )
 
-        redact_lines, execute_lines = [], []
+        scrub_lines, execute_lines = [], []
         for node in ast.walk(fn):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if name == "redact":
-                redact_lines.append(node.lineno)
+            if name in {"redact", "_redact_memory_text"}:
+                scrub_lines.append(node.lineno)
             elif name == "execute":
                 execute_lines.append(node.lineno)
 
-        assert redact_lines, (
-            f"mcp_server.tools.memory.{fn_name} contains NO call to redact() — "
+        assert scrub_lines, (
+            f"mcp_server.tools.memory.{fn_name} contains NO call to redact() or "
+            f"_redact_memory_text() — "
             f"the memory write path no longer scrubs secrets before writing to "
             f"disk."
         )
@@ -908,8 +939,8 @@ def test_memory_store_functions_call_redact_before_insert():
             f"no conn.execute() call found in {fn_name} — this invariant lost "
             f"its subject and would pass vacuously."
         )
-        assert min(redact_lines) < min(execute_lines), (
-            f"{fn_name}: redact() at line {min(redact_lines)} does not precede "
+        assert min(scrub_lines) < min(execute_lines), (
+            f"{fn_name}: scrubber at line {min(scrub_lines)} does not precede "
             f"the first conn.execute() at line {min(execute_lines)}: a value "
             f"can be written to sqlite before it is scrubbed."
         )
@@ -957,9 +988,15 @@ DISK_SINKS: dict[str, tuple[str, str]] = {
         "NO_CALLER_DATA",
         "registry-supplied profile YAML, checksum- and schema-validated; not an audit record",
     ),
+    "proxy/registry/client.py:_restore_profile": (
+        "NO_CALLER_DATA",
+        "restores prior profile bytes or prior backup bytes after a failed registry apply",
+    ),
     "proxy/endpoints/admin.py:rollback_profile": (
         "NO_CALLER_DATA",
-        "copies a .bak of a profile we previously persisted back over the live profile",
+        "validates the live profile and .bak with ProfileValidator before atomically "
+        "replacing profile YAML; rollback decisions go through the audit rail, not "
+        "this disk sink",
     ),
     "proxy/crypto/profile_crypto.py:_save_cache": (
         "SECRET_BY_DESIGN",
@@ -974,6 +1011,26 @@ DISK_SINKS: dict[str, tuple[str, str]] = {
         "test_memory_relate_does_not_persist_secrets_unredacted and "
         "test_memory_store_functions_call_redact_before_insert",
     ),
+    "mcp_server/receipts.py:_append_record_and_confirm": (
+        "REDACTED",
+        "the tool-gate receipt record passes through the shared redact() before "
+        "json.dumps/open(..., 'a') writes it; emit() confirms the redacted row by "
+        "receipt_id before reporting recorded",
+    ),
+    "mcp_server/receipts.py:_exclusive_file_lock": (
+        "NO_CALLER_DATA",
+        "creates/appends only the sidecar flock file used for serialization; no "
+        "caller/model payload is written to that file",
+    ),
+    "mcp_server/receipts.py:_ensure_receipt_file": (
+        "NO_CALLER_DATA",
+        "os.open(O_CREAT|O_EXCL|O_WRONLY, 0o600) then os.close(fd): it CREATES the "
+        "receipt log 0600 from its first byte and writes ZERO bytes through that fd. "
+        "Every byte that lands in the file is written by _append_record_and_confirm, "
+        "which is classified REDACTED above. Newly visible to this scan because "
+        "_os_open_is_write() now sees raw-fd sinks that the string-mode heuristic "
+        "could not; the sink itself predates it",
+    ),
 }
 
 # The ratchet bound on UNREDACTED_GAP. Reduce it when a gap is closed; it must
@@ -983,6 +1040,39 @@ DISK_SINKS: dict[str, tuple[str, str]] = {
 MAX_UNREDACTED_GAPS = 0
 
 _WRITE_MODES = ("w", "a", "x", "+")
+
+# os.open() flags (os.O_WRONLY, os.O_RDWR, os.O_CREAT, os.O_TRUNC, os.O_APPEND)
+# that mean the call can put bytes on disk, however the flags expression is
+# built (a single name, or a chain of bitwise-ORs).
+_OS_OPEN_WRITE_FLAGS = ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND")
+
+
+def _os_open_is_write(node: ast.Call) -> bool:
+    """
+    True if a call is ``os.open(path, flags, ...)`` with a write-implying flag.
+
+    The builtin ``open(path, "wb")`` heuristic below reads a string-literal
+    mode argument, which ``os.open``'s integer ``flags`` (``os.O_WRONLY |
+    os.O_CREAT | ...``) never is — so a raw fd write via ``os.open``/``os.write``
+    (the pattern that replaced ``Path.write_bytes()`` in
+    ``proxy/crypto/profile_crypto.py::_save_cache`` precisely so the file could
+    be created 0600 from its first byte) was invisible to the scan. Walked
+    rather than pattern-matched on a fixed BinOp shape, so it does not care
+    whether the flags are combined with one ``|`` or several.
+    """
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and func.attr == "open"):
+        return False
+    if not (isinstance(func.value, ast.Name) and func.value.id == "os"):
+        return False
+    if len(node.args) < 2:
+        return False
+    for sub in ast.walk(node.args[1]):
+        if isinstance(sub, ast.Attribute) and sub.attr in _OS_OPEN_WRITE_FLAGS:
+            return True
+        if isinstance(sub, ast.Name) and sub.id in _OS_OPEN_WRITE_FLAGS:
+            return True
+    return False
 
 
 def _production_py_files() -> list[Path]:
@@ -1040,7 +1130,7 @@ def _discover_disk_sinks() -> dict[str, list[int]]:
                 for kw in node.keywords:
                     if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
                         mode = str(kw.value.value)
-                hit = any(m in mode for m in _WRITE_MODES)
+                hit = any(m in mode for m in _WRITE_MODES) or _os_open_is_write(node)
             elif name in ("write_text", "write_bytes"):
                 hit = True
             elif name == "connect":

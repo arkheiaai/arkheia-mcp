@@ -198,15 +198,23 @@ class TestChain:
 
 class TestStatusDoesNotOverclaim:
 
-    async def test_the_caller_is_told_enqueued_not_recorded(self, tmp_path):
+    async def test_enqueued_is_only_reported_for_a_findable_block_receipt(
+        self, tmp_path
+    ):
         """
-        ``AuditWriter.write()`` drops silently when the queue is full and
-        ``_writer_loop`` swallows every I/O error, so the endpoint cannot
-        truthfully say a record LANDED. It says ``enqueued``, which is the most
-        it can support. (Same correction PR #31 made on the sibling flow.)
+        The response may say ``enqueued`` only after the production writer has
+        drained and the surfaced id is findable in that writer's JSONL file.
+
+        ``AuditWriter.write()`` now reports queue saturation itself, but that
+        only covers the enqueue step: ``_writer_loop`` still swallows every
+        later I/O error, so read-back remains the thing that earns the word.
         """
         probe, responses = await drive(n=1, tmp_path=tmp_path)
-        assert json.loads(responses[0].content)["receipt"] == "enqueued"
+        response = responses[0]
+        surfaced = response.headers["x-arkheia-detection-id"]
+        assert response.headers["x-arkheia-receipt"] == "enqueued"
+        assert json.loads(response.content)["receipt"] == "enqueued"
+        assert probe.require(surfaced)["action_taken"] == "block"
 
     async def test_the_status_is_derived_from_the_call_not_asserted(self, tmp_path):
         """
@@ -223,21 +231,22 @@ class TestStatusDoesNotOverclaim:
         assert json.loads(with_rail[0].content)["receipt"] == "enqueued"
         assert json.loads(without_rail.content)["receipt"] == "no_audit_writer"
 
-    async def test_a_full_queue_still_reports_enqueued_and_that_gap_is_pinned(
+    async def test_a_full_queue_reports_queue_full_and_never_enqueued(
         self, tmp_path
     ):
         """
-        THE REMAINING GAP, MEASURED AND PINNED RATHER THAN CLAIMED CLOSED.
+        Queue saturation is a visible receipt status, not a delivered claim.
 
-        ``AuditWriter.write()`` catches its own ``QueueFull`` and drops the
-        record, returning normally. So on a genuinely saturated rail — no
-        monkeypatch, no stand-in, the shipped class with its real 10,000-slot
-        queue filled — the caller is told ``enqueued`` for a record that was
-        dropped on the floor.
+        On a genuinely saturated rail — no monkeypatch, no stand-in, the
+        shipped class with its real 10,000-slot queue filled — the caller is
+        told ``queue_full`` for a record that was dropped before the background
+        writer could ever see it.
 
-        Closing this needs ``AuditWriter.write()`` to report its own outcome,
-        which is a change to a rail CO-OWNED with another branch. Not taken
-        here; reported, and pinned so it cannot be mistaken for solved.
+        The pinned invariant is unchanged and asserted explicitly below: a full
+        queue is NEVER reported as ``enqueued`` when no row lands. ``write()``
+        reporting its own ``QueueFull`` is what lets the response name the cause
+        instead of collapsing it into the generic ``write_failed`` — the drop is
+        known at the enqueue step, so read-back was never going to find it.
 
         The writer's drain loop is deliberately NOT started, so the saturation
         is a fact for the whole test rather than a race against a drainer — the
@@ -255,32 +264,36 @@ class TestStatusDoesNotOverclaim:
             n += 1
         assert n >= 1000, f"the queue accepted only {n} records; wrong premise"
 
-        # The shipped write() swallows its own QueueFull and returns normally.
         # No monkeypatch: this is the production method on a saturated queue.
-        await writer.write({"detection_id": "dropped-on-the-floor"})
+        assert await writer.write({
+            "detection_id": "dropped-on-the-floor",
+        }) == "queue_full"
 
         app, _ = build(risk="HIGH", action="block", gate_action="block",
                        audit=writer)
         async with client(app) as c:
             r = await c.post("/v1/chat/completions", json=REQ)
         surfaced = r.headers["x-arkheia-detection-id"]
-        assert json.loads(r.content)["receipt"] == "enqueued", (
-            "if this now reports a dropped write, the gap is CLOSED and this "
-            "test should be replaced by the assertion that it is"
-        )
+        assert r.headers["x-arkheia-receipt"] == "queue_full"
+        assert json.loads(r.content)["receipt"] == "queue_full"
+        # The invariant this test has always pinned, kept literal so a future
+        # edit cannot quietly relax it into an overclaim.
+        assert json.loads(r.content)["receipt"] != "enqueued"
         assert ReceiptProbe(log).find(surfaced) is None, (
-            "the record landed after all — the premise of this gap is wrong"
+            "the response reported queue_full, but the surfaced id landed"
         )
 
-    async def test_a_real_filesystem_failure_does_not_break_the_block(self, tmp_path):
+    async def test_a_real_filesystem_failure_reports_write_failed_and_blocks(
+        self, tmp_path
+    ):
         """
-        The gap the wording admits to, pinned with a GENUINE filesystem failure
-        — the log path is a DIRECTORY, so every ``open(..., "a")`` inside the
-        production writer loop raises ``IsADirectoryError`` — not a
-        monkeypatched exception.
+        A GENUINE filesystem failure: the log path is a DIRECTORY, so every
+        ``open(..., "a")`` inside the production writer loop raises
+        ``IsADirectoryError``. ``write_failed`` must be reachable on that real
+        path while the transport block still holds.
 
-        A receipt failure must never turn into a served fabrication: the block
-        still holds, and the honest thing is that no row lands.
+        This is the board finding's negative half: no durable row means no
+        ``enqueued`` header/status.
         """
         log = tmp_path / "audit.jsonl"
         log.mkdir()
@@ -296,6 +309,9 @@ class TestStatusDoesNotOverclaim:
                 await writer.stop()
             except Exception:
                 pass
+        payload = json.loads(r.content)
+        assert r.headers["x-arkheia-receipt"] == "write_failed"
+        assert payload["receipt"] == "write_failed"
         assert b"arkheia_blocked" in r.content, (
             "a failed audit write suppressed the block — the halt must not "
             "depend on the receipt landing"
@@ -333,6 +349,7 @@ class TestScopeOfReceipting:
         assert len(rows) == 2
         assert {r["action_taken"] for r in rows} == {"warn"}
         for r in responses:
+            assert r.headers["x-arkheia-receipt"] == "enqueued"
             probe.require(r.headers["x-arkheia-detection-id"])
 
 

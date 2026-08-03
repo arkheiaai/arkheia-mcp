@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from arkheia_common.egress import egress_async_client
 from mcp_server.provider_key_custody import provider_api_key
 from mcp_server.tool_registry import PolicyViolation, REGISTRY, require_network_egress
 
@@ -174,7 +175,7 @@ async def call_grok(
         return _err_response(model, prompt, "XAI_API_KEY not set")
 
     try:
-        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        async with egress_async_client(timeout=_DEFAULT_TIMEOUT) as client:
             resp = await _provider_post(
                 "xai",
                 client,
@@ -232,7 +233,7 @@ async def call_gemini(
         f"/models/{model}:generateContent"
     )
     try:
-        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        async with egress_async_client(timeout=_DEFAULT_TIMEOUT) as client:
             resp = await _provider_post(
                 "google",
                 client,
@@ -291,7 +292,7 @@ async def call_together(
         return _err_response(model, prompt, "TOGETHER_API_KEY not set")
 
     try:
-        async with httpx.AsyncClient(timeout=_DEFAULT_TIMEOUT) as client:
+        async with egress_async_client(timeout=_DEFAULT_TIMEOUT) as client:
             resp = await _provider_post(
                 "together",
                 client,
@@ -347,7 +348,7 @@ async def call_ollama(
         return _err_response(model, prompt, "ollama_base_url_not_local")
 
     try:
-        async with httpx.AsyncClient(timeout=_OLLAMA_TIMEOUT, trust_env=False) as client:
+        async with egress_async_client(timeout=_OLLAMA_TIMEOUT) as client:
             resp = await _provider_post(
                 "ollama",
                 client,

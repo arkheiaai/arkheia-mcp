@@ -40,6 +40,7 @@ WHOLE_ENV_CONSTRUCTORS = {"dict", "list", "tuple", "set", "frozenset"}
 KNOWN_NON_MCP_PROVIDER_EGRESS = {PROXY_PASSTHROUGH}
 NON_RUNTIME_WHOLE_ENV_READ_COUNTS = {
     ROOT / "scripts" / "pilot_validate.py": 2,
+    ROOT / "scripts" / "mutate_detection_adapter.py": 1,
     ROOT / "tools" / "mutate_f10_interception.py": 1,
 }
 
@@ -626,7 +627,12 @@ def test_ollama_base_url_is_loopback_validated_before_post() -> None:
     call_ollama = funcs["call_ollama"]
     validator_lines = _call_lines(call_ollama, "_local_ollama_base_url")
     post_lines = _call_lines(call_ollama, "_provider_post")
-    client_calls = [
+    egress_client_calls = [
+        node
+        for node in ast.walk(call_ollama)
+        if isinstance(node, ast.Call) and _call_name(node) == "egress_async_client"
+    ]
+    raw_client_calls = [
         node
         for node in ast.walk(call_ollama)
         if isinstance(node, ast.Call) and _call_name(node) == "AsyncClient"
@@ -638,20 +644,14 @@ def test_ollama_base_url_is_loopback_validated_before_post() -> None:
         "call_ollama must validate the base URL before opening the HTTP path; "
         f"got validator={validator_lines}, post={post_lines}"
     )
-    assert len(client_calls) == 1, (
-        "call_ollama must open exactly one local HTTP client; got "
-        f"{len(client_calls)}"
+    assert len(egress_client_calls) == 1, (
+        "call_ollama must open exactly one local HTTP client through the shared "
+        f"egress custody helper; got {len(egress_client_calls)}"
     )
-    trust_env_keywords = [
-        kw.value
-        for kw in client_calls[0].keywords
-        if kw.arg == "trust_env"
-    ]
-    assert (
-        len(trust_env_keywords) == 1
-        and isinstance(trust_env_keywords[0], ast.Constant)
-        and trust_env_keywords[0].value is False
-    ), "call_ollama must disable proxy/env transport inheritance with trust_env=False"
+    assert raw_client_calls == [], (
+        "call_ollama must not construct httpx.AsyncClient directly; the shared "
+        "egress custody helper owns trust_env=False"
+    )
 
 
 def test_ollama_loopback_validator_resolves_hostname_addresses() -> None:

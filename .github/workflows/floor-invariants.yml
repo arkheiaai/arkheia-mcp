@@ -6,6 +6,14 @@ name: Floor Invariants
 # of this repo. Collection is restricted to test_*_floor.py / test_floor_*.py.
 
 on:
+  # merge_group ADDED 2026-07-30 — `master` has `strict: true` (branches must be up to date before
+  # merging), so every merge voids every other open PR and the green count cannot advance. A GitHub
+  # merge queue fixes that, but the queue dispatches CI on the `merge_group` event against a
+  # `gh-readonly-queue/master/**` branch, and `push` below is filtered to `branches: [master]`. Without
+  # this trigger the REQUIRED context would never post on a queued PR: it would sit at
+  # "Expected — waiting" until GitHub's status-check timeout evicted it.
+  merge_group:
+    branches: [master]
   push:
     branches: [master]
   pull_request:
@@ -59,6 +67,88 @@ jobs:
         run: |
           node --version
           npm --version
+
+      - name: Confirm floor discovery count
+        # A floor file deleted or renamed out of discovery must fail loudly. Re-measured on
+        # PR #64 after expanding tests/test_mcp_httpx_custody_floor.py from mcp_server-only
+        # to mcp_server+proxy outbound custody, then reconciling with PR #60's
+        # shared egress factory floor:
+        # 214 collected.
+        # Re-measured on PR #69 when master was merged in: master had since landed
+        # tests/test_memory_db_path_floor.py, tests/test_tool_gate_floor.py,
+        # tests/test_merge_queue_triggers_floor.py, tests/test_admin_audit_auth_floor.py,
+        # tests/test_proxy_dotenv_secret_source_floor.py and a rewritten, repo-rooted
+        # tests/test_mcp_httpx_custody_floor.py. The count is raised to the measured
+        # value, which is what this guard's own error message instructs; the guard
+        # itself is unchanged and still fails loudly on any future drift:
+        # 248 collected.
+        # Re-measured on PR #31 (F11 passthrough) when master was merged in: this
+        # branch adds tests/test_passthrough_ssrf_floor.py (the SSRF containment
+        # invariants, including one new discovery self-test proving INV-3 still
+        # finds the client construction now that it is spelled through
+        # arkheia_common.egress_async_client). Measured with a bare pytest-only
+        # interpreter, the same way this job runs it, and raised to the measured
+        # value as the guard's own error message instructs; the guard is unchanged
+        # and still fails loudly on any future drift:
+        # 310 collected.
+        # Re-measured on PR #65 after PR #29 raised master to 321: this branch adds
+        # tests/test_egress_custody_floor.py (5 node IDs, the credentialed-egress
+        # custody census) and one new INV-2 negative self-test in
+        # tests/test_interception_ssrf_floor.py proving the redirect scan also
+        # flags the shared factory spelling. 321 + 5 + 1, every added node
+        # accounted for by name and NO master node lost, measured with a bare
+        # pytest-only interpreter the same way this job runs it and raised to the
+        # measured value as the guard's own error message instructs; the guard
+        # itself is unchanged and still fails loudly on any future drift:
+        # 327 collected.
+        # Re-measured on PR #27 after merging current master: master already
+        # collected 327 and this branch adds tests/test_declared_dependency_floor.py
+        # with 31 node IDs. 327 + 31, no current master node lost, measured with
+        # the same pytest-only floor command this job uses:
+        # 358 collected.
+        run: |
+          COUNT="$(pytest tests \
+            -o python_files="test_*_floor.py test_floor_*.py" \
+            -p no:cacheprovider --collect-only -q 2>/dev/null | grep -c '::' || true)"
+          EXPECTED=374
+          if [ "$COUNT" -ne "$EXPECTED" ]; then
+            echo "::error::floor discovery count changed (collected $COUNT, expected $EXPECTED). If intentional, update EXPECTED in this workflow in the same commit."
+            exit 1
+          fi
+
+      - name: Confirm egress custody floor node IDs are collected
+        # Set-shaped guard for the egress-custody floor. This catches deleting or
+        # renaming the floor without turning unrelated floor additions into an
+        # EXPECTED-count conflict. It complements, and does not replace, the count
+        # guard above: the count catches silent LOSS anywhere in the tier, this
+        # catches loss of these specific invariants by name.
+        run: |
+          pytest tests \
+            -o python_files="test_*_floor.py test_floor_*.py" \
+            -p no:cacheprovider --collect-only -q > /tmp/floor-nodeids.txt
+          python - <<'PY'
+          from pathlib import Path
+
+          manifest = Path(".github/floor-egress-custody-nodeids.txt")
+          expected = {
+              line.strip()
+              for line in manifest.read_text(encoding="utf-8").splitlines()
+              if line.strip() and not line.startswith("#")
+          }
+          actual = {
+              line.strip()
+              for line in Path("/tmp/floor-nodeids.txt").read_text(encoding="utf-8").splitlines()
+              if "::" in line
+          }
+          if not expected:
+              raise SystemExit("egress custody floor manifest is empty")
+          missing = sorted(expected - actual)
+          if missing:
+              raise SystemExit(
+                  "egress custody floor node IDs were not collected:\n  "
+                  + "\n  ".join(missing)
+              )
+          PY
 
       - name: Run floor invariants
         # Override python_files so ONLY floor tests are collected; a bare pytest

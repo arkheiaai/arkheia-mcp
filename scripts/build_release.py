@@ -15,8 +15,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from proxy.crypto.profile_crypto import encrypt_profile
-from proxy.license.integrity import generate_manifest
+from proxy.crypto.profile_crypto import decrypt_profile, encrypt_profile
+from proxy.license.integrity import COMPILED_ARTIFACT_GLOBS, generate_manifest
 try:
     from setup_cython import COMPILED_MODULES
 except ImportError:
@@ -58,6 +58,23 @@ def resolve_profile_key(profile_key: str | None) -> bytes:
     return master_key
 
 
+def _compiled_artifacts(module_dir: Path) -> list[Path]:
+    artifacts: list[Path] = []
+    for pattern in COMPILED_ARTIFACT_GLOBS:
+        artifacts.extend(sorted(module_dir.glob(pattern)))
+    return artifacts
+
+
+def assert_compiled_artifact_population(module_dirs: Sequence[Path]) -> None:
+    empty_dirs = [module_dir for module_dir in module_dirs if not _compiled_artifacts(module_dir)]
+    if empty_dirs:
+        formatted = ", ".join(str(path) for path in empty_dirs)
+        raise ValueError(
+            "No compiled artifacts found for integrity manifest generation in: "
+            f"{formatted}"
+        )
+
+
 def step_cython_compile(repo_root: Path = REPO_ROOT) -> None:
     print("\n=== Step 1: Cython compile ===")
     subprocess.run(
@@ -84,29 +101,180 @@ def step_encrypt_profiles(master_key: bytes, profile_dir: Path) -> int:
         encrypted = encrypt_profile(plaintext, master_key, profile_name)
         enc_path = profile_dir / f"{profile_name}.yaml.enc"
         enc_path.write_bytes(encrypted)
+
+        # Prove the ciphertext is RECOVERABLE before destroying the only plaintext copy.
+        # Without this, a broken or mis-keyed encrypt_profile writes undecryptable bytes, this
+        # step reports success, and the source YAML is deleted -- unrecoverable data loss that
+        # every existing assertion passes straight through, because they only check that the
+        # plaintext is gone and a .enc exists. Read back from DISK rather than trusting the
+        # in-memory buffer, so a truncated or partial write is caught too.
+        try:
+            recovered = decrypt_profile(enc_path.read_bytes(), master_key, profile_name)
+        except Exception as exc:  # noqa: BLE001 - any failure here must stop the build
+            raise RuntimeError(
+                f"Refusing to delete {yaml_file.name}: the ciphertext written to "
+                f"{enc_path.name} could not be decrypted ({exc!r}). The plaintext has been "
+                f"left in place."
+            ) from exc
+        if recovered != plaintext:
+            raise RuntimeError(
+                f"Refusing to delete {yaml_file.name}: {enc_path.name} decrypts to "
+                f"{len(recovered)} bytes but the source is {len(plaintext)} bytes. The "
+                f"plaintext has been left in place."
+            )
+
         yaml_file.unlink()
         encrypted_count += 1
-        print(f"  Encrypted: {yaml_file.name} -> {enc_path.name}")
+        print(f"  Encrypted: {yaml_file.name} -> {enc_path.name} (round-trip verified)")
 
-    print(f"  Profiles encrypted: {encrypted_count}")
+    if encrypted_count == 0:
+        # A zero count previously printed "Profiles encrypted: 0" and returned success, so a
+        # release could ship with nothing encrypted and nothing to say so.
+        raise RuntimeError(
+            f"Refusing to continue: no profiles were encrypted. Searched {profile_dir} for "
+            f"'*.yaml' (excluding schema.yaml) and found no candidates."
+        )
+
+    print(f"  Profiles encrypted: {encrypted_count} (all round-trip verified)")
     return encrypted_count
 
 
+#: Re-exported from ``proxy.license.integrity`` (see the import above) so the
+#: refusal below can tell an operator what was actually searched for, rather than
+#: reporting an unexplained zero.
+#:
+#: It used to be a SECOND declaration here, documented as "what generate_manifest
+#: globs for". Two constants that must agree eventually will not, and drifting low
+#: on this one would let a compiled artifact exist that the runtime check never
+#: notices — the missing-manifest bypass with extra steps. The runtime owns the
+#: definition; this module imports it.
+__all_globs__ = COMPILED_ARTIFACT_GLOBS
+
+
+class EmptyManifest(ValueError):
+    """A manifest that lists no modules. See ``step_generate_manifest``."""
+
+
 def step_generate_manifest(module_dir: Path, output_path: Path | None = None) -> dict[str, str]:
+    """
+    Write the integrity manifest for ``module_dir`` — the durable record of the
+    build-time decision *"these hashes are the trusted state of this artifact"*.
+
+    REFUSES TO WRITE AN EMPTY MANIFEST.
+    ------------------------------------
+    ``generate_manifest`` globs ``*.so``/``*.pyd``. When a directory contains
+    none — ``--skip-compile`` on a source checkout, or a Cython step that
+    produced nothing — it returned ``{}`` and this function wrote it out, printed
+    ``Manifest written: … (0 modules)``, and the build carried on to exit 0.
+
+    That empty file is not a neutral placeholder, it is a FALSE RECEIPT.
+    Historically, ``proxy/license/integrity.verify_integrity`` treated a manifest
+    that exists as a manifest to check, iterated its zero entries, logged
+    *"Integrity check passed: 0 modules verified"* and returned success. Current
+    ``master`` now rejects that at runtime, but a release build still must not
+    ship an artifact whose integrity record certifies zero modules.
+
+    Worse still, the build did not stop: step 4 then DELETED the compiled Python
+    sources listed in ``COMPILED_MODULES``, so a no-binaries build destroyed the
+    originals and still printed "Release build complete".
+
+    So: compute the manifest, and if it lists nothing, delete the file that was
+    just written and abort. Raising here (step 3) aborts before step 4 removes
+    any source. Per DONE.md floor invariant 9(a) the refusal NAMES THE UNITS —
+    the directory and the globs that found nothing — instead of reporting an
+    aggregate zero.
+    """
     print(f"\n=== Step 3: Generate integrity manifest ({module_dir}) ===")
     manifest_path = output_path or module_dir / "integrity_manifest.json"
     manifest = generate_manifest(module_dir, manifest_path)
+
+    if not manifest:
+        # Remove the false receipt. Leaving it behind is the defect itself: a
+        # release build must not ship a manifest that records zero modules.
+        if manifest_path.exists():
+            manifest_path.unlink()
+        raise EmptyManifest(
+            f"refusing to write an empty integrity manifest for {module_dir}: "
+            f"no {' / '.join(COMPILED_ARTIFACT_GLOBS)} found there, so the "
+            f"manifest would certify ZERO modules. Current verify_integrity() "
+            f"treats that as tamper evidence, and the release build must stop "
+            f"before sources are removed. Run the Cython compile step (drop "
+            f"--skip-compile) or remove {module_dir} from COMPILED_MODULES; "
+            f"do not rely on startup integrity checks to reject a bad release."
+        )
+
     print(f"  Manifest written: {manifest_path} ({len(manifest)} modules)")
+    for name in sorted(manifest):
+        print(f"    - {name}")
     return manifest
 
 
 def compiled_module_dirs(repo_root: Path = REPO_ROOT) -> list[Path]:
+    if not COMPILED_MODULES:
+        raise ValueError("No compiled modules configured; refusing to build a release.")
+
     seen: list[Path] = []
     for module_path in COMPILED_MODULES:
         module_dir = (repo_root / module_path).parent
         if module_dir not in seen:
             seen.append(module_dir)
     return seen
+
+
+class UnrecordedModule(ValueError):
+    """A module in COMPILED_MODULES that no manifest entry covers."""
+
+
+def check_every_module_is_recorded(
+    manifests: dict[str, dict[str, str]],
+    repo_root: Path = REPO_ROOT,
+) -> None:
+    """
+    Require a manifest entry for EVERY module in ``COMPILED_MODULES``.
+
+    A non-empty manifest is not enough, because the manifest is generated
+    per-DIRECTORY while ``COMPILED_MODULES`` is a list of FILES. All three
+    default entries live in two directories, so one compiled artifact makes its
+    whole directory's manifest non-empty — and a module whose Cython build
+    silently produced nothing is then invisible: it is absent from the manifest,
+    ``verify_integrity`` never looks for it, and step 4 deletes its source
+    anyway. The build ships a partially-verified artifact and reports success.
+
+    This is DONE.md floor invariant 9(a): "39 of 44 scored" passes every
+    non-zero assertion while five units go unexamined, so the five must be
+    NAMED. The per-directory count is the aggregate; the per-module check below
+    is the unit.
+
+    Matching is by stem, because the build tool decides the suffix:
+    ``proxy/detection/features.py`` is satisfied by ``features.so``,
+    ``features.pyd`` or ``features.cpython-312-darwin.so``.
+    """
+    recorded_stems: dict[Path, set[str]] = {}
+    for manifest_path, manifest in manifests.items():
+        directory = Path(manifest_path).parent
+        recorded_stems.setdefault(directory, set()).update(
+            name.split(".", 1)[0] for name in manifest
+        )
+
+    missing: list[str] = []
+    for module_path in COMPILED_MODULES:
+        source = repo_root / module_path
+        if source.stem not in recorded_stems.get(source.parent, set()):
+            missing.append(module_path)
+
+    if missing:
+        raise UnrecordedModule(
+            f"{len(missing)} of {len(COMPILED_MODULES)} modules have no compiled "
+            f"artifact in any integrity manifest: {', '.join(missing)}. Their "
+            f"sources would be deleted by step 4 while nothing verifies them. "
+            f"A per-directory manifest count hides this — one sibling that did "
+            f"compile makes the directory look covered."
+        )
+
+    print(
+        f"\n=== Step 3b: Integrity coverage ===\n"
+        f"  {len(COMPILED_MODULES)} of {len(COMPILED_MODULES)} modules recorded."
+    )
 
 
 def step_remove_source(repo_root: Path = REPO_ROOT) -> list[Path]:
@@ -152,15 +320,21 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         master_key = resolve_profile_key(args.profile_key)
+        module_dirs = compiled_module_dirs(REPO_ROOT)
         if not args.skip_compile:
             step_cython_compile(REPO_ROOT)
+
+        assert_compiled_artifact_population(module_dirs)
 
         encrypted_count = step_encrypt_profiles(master_key, REPO_ROOT / "profiles")
 
         manifests: dict[str, dict[str, str]] = {}
-        for module_dir in compiled_module_dirs(REPO_ROOT):
+        for module_dir in module_dirs:
             manifest_path = module_dir / "integrity_manifest.json"
             manifests[str(manifest_path)] = step_generate_manifest(module_dir, manifest_path)
+
+        # Before anything is deleted: every module must be covered by a record.
+        check_every_module_is_recorded(manifests, REPO_ROOT)
 
         removed = step_remove_source(REPO_ROOT)
         print_summary(
@@ -170,7 +344,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             removed=removed,
             repo_root=REPO_ROOT,
         )
-    except (FileNotFoundError, ValueError, subprocess.CalledProcessError) as exc:
+    except (FileNotFoundError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 

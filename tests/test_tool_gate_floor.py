@@ -510,3 +510,251 @@ def test_inv4_no_ungated_mcp_server_module():
         f"the documented Windows install at it. Fix: re-export the gated server "
         f"(`from mcp_server.server import mcp`) rather than redefining tools."
     )
+
+
+# ---------------------------------------------------------------------------
+# INV-6 — orchestrator dispatch goes through the receipted gate
+# ---------------------------------------------------------------------------
+
+def _fastmcp_subclasses(tree: ast.Module) -> dict[str, ast.ClassDef]:
+    out: dict[str, ast.ClassDef] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        base_names = {
+            b.id if isinstance(b, ast.Name) else getattr(b, "attr", None)
+            for b in node.bases
+        }
+        if "FastMCP" in base_names:
+            out[node.name] = node
+    return out
+
+
+def _calls_named(fn: ast.AST, callee: str) -> list[ast.Call]:
+    out: list[ast.Call] = []
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+        if name == callee:
+            out.append(node)
+    return out
+
+
+def _func(tree: ast.Module, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    return None
+
+
+def test_inv6_dispatch_is_gated_by_the_receipted_check():
+    tree = _parse(SERVER_MODULE)
+    subclasses = _fastmcp_subclasses(tree)
+    assert subclasses, (
+        f"{SERVER_MODULE.name} defines no FastMCP subclass. Bare FastMCP dispatch "
+        "can resolve late-registered or aliased tools before the tool-registry "
+        "gate records a decision."
+    )
+
+    instance = _module_assignments(tree).get("mcp")
+    assert isinstance(instance, ast.Call), "no module-level mcp = ...(...) construction found"
+    built_with = instance.func.id if isinstance(instance.func, ast.Name) else getattr(instance.func, "attr", None)
+    assert built_with in subclasses, (
+        f"mcp is constructed with {built_with!r}, not a gated FastMCP subclass "
+        f"from {sorted(subclasses)}"
+    )
+
+    methods = {
+        n.name: n
+        for n in subclasses[built_with].body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert "call_tool" in methods, (
+        f"{built_with} does not override call_tool, the dispatch method every "
+        "orchestrator-driven tools/call reaches."
+    )
+    calls = _calls_named(methods["call_tool"], "check_receipted")
+    assert calls, (
+        f"{built_with}.call_tool never calls check_receipted(...). Calling bare "
+        "check() would gate the call but leave the decision unreceipted."
+    )
+    arg0 = calls[0].args[0] if calls[0].args else None
+    assert isinstance(arg0, ast.Name) and arg0.id == "name", (
+        f"{built_with}.call_tool does not pass the dispatched name to "
+        f"check_receipted; got {ast.dump(arg0) if arg0 else 'no positional arg'}"
+    )
+
+
+def test_inv6b_receipted_check_returns_the_allow_decision_not_just_policy():
+    fn = _func(_parse(GATE_MODULE), "check_receipted")
+    assert fn is not None, "check_receipted is missing"
+
+    returns = [n.value for n in ast.walk(fn) if isinstance(n, ast.Return) and n.value]
+    assert returns, "check_receipted has no value return on the allow path"
+    assert any(isinstance(value, ast.Name) and value.id == "decision" for value in returns), (
+        "check_receipted must return the GateDecision it just receipted so the "
+        "allow caller can see receipt_id and receipt_status."
+    )
+
+    policy_returns = [
+        ast.unparse(value)
+        for value in returns
+        if isinstance(value, ast.Attribute) and value.attr == "policy"
+    ]
+    assert not policy_returns, (
+        "check_receipted returned only the ToolPolicy and discarded the receipt "
+        f"status on the allow path: {policy_returns}"
+    )
+
+
+def test_inv6c_dispatch_carries_the_derived_receipt_status_to_the_result():
+    tree = _parse(SERVER_MODULE)
+    subclasses = _fastmcp_subclasses(tree)
+    instance = _module_assignments(tree).get("mcp")
+    assert isinstance(instance, ast.Call), "no module-level mcp = ...(...) construction found"
+    built_with = instance.func.id if isinstance(instance.func, ast.Name) else getattr(instance.func, "attr", None)
+    call_tool = next(
+        n
+        for n in subclasses[built_with].body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "call_tool"
+    )
+
+    receipted_names: set[str] = set()
+    for node in ast.walk(call_tool):
+        if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+            continue
+        target = node.targets[0]
+        value = node.value.value if isinstance(node.value, ast.Await) else node.value
+        if (
+            isinstance(target, ast.Name)
+            and isinstance(value, ast.Call)
+            and (
+                (isinstance(value.func, ast.Name) and value.func.id == "check_receipted")
+                or getattr(value.func, "attr", None) == "check_receipted"
+            )
+        ):
+            receipted_names.add(target.id)
+
+    assert receipted_names, (
+        "GatedFastMCP.call_tool calls check_receipted but does not keep the "
+        "GateDecision; the allow-path receipt status would be discarded."
+    )
+
+    carriers = [
+        call
+        for call in _calls_named(call_tool, "_attach_tool_gate_receipt")
+        if any(isinstance(arg, ast.Name) and arg.id in receipted_names for arg in call.args)
+    ]
+    assert carriers, (
+        "GatedFastMCP.call_tool keeps the receipted decision but never passes it "
+        "to the result-carriage helper."
+    )
+
+    helper = _func(tree, "_attach_tool_gate_receipt")
+    assert helper is not None, "_attach_tool_gate_receipt is missing"
+    decision_attrs = {
+        n.attr
+        for n in ast.walk(helper)
+        if (
+            isinstance(n, ast.Attribute)
+            and isinstance(n.value, ast.Name)
+            and n.value.id == "decision"
+            and isinstance(n.ctx, ast.Load)
+        )
+    }
+    assert {"receipt_id", "receipt_status"} <= decision_attrs, (
+        "result carriage must read receipt_id and receipt_status from the "
+        f"GateDecision; saw decision attributes {sorted(decision_attrs)}"
+    )
+    literal_statuses = []
+    for node in ast.walk(helper):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if (
+                isinstance(key, ast.Constant)
+                and key.value == "receipt_status"
+                and isinstance(value, ast.Constant)
+            ):
+                literal_statuses.append(value.lineno)
+    assert literal_statuses == [], (
+        "receipt_status carriage is hard-coded instead of derived from the "
+        f"GateDecision at line(s) {literal_statuses}."
+    )
+
+
+def test_inv6d_startup_selfcheck_reads_the_unfiltered_tool_list():
+    tree = _parse(SERVER_MODULE)
+    fn = next(
+        (
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name == "startup_policy_selfcheck"
+        ),
+        None,
+    )
+    assert fn is not None, "startup_policy_selfcheck is missing"
+    attrs = {
+        n.attr
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load)
+    }
+    assert "list_tools_ungated" in attrs, (
+        "startup_policy_selfcheck must inspect the unfiltered advertisement. "
+        "Using list_tools() would let the registry filter hide an ungoverned tool "
+        "from the very self-check meant to catch it."
+    )
+
+
+# ---------------------------------------------------------------------------
+# INV-7 — tool-gate receipt decisions are constants
+# ---------------------------------------------------------------------------
+
+DECISION_CONSTANT_PREFIX = "DECISION_"
+
+
+def _is_decision_constant(node: ast.expr | None) -> bool:
+    if isinstance(node, ast.Attribute):
+        return node.attr.startswith(DECISION_CONSTANT_PREFIX)
+    if isinstance(node, ast.Name):
+        return node.id.startswith(DECISION_CONSTANT_PREFIX)
+    return False
+
+
+def test_inv7_tool_gate_build_record_decisions_are_named_constants():
+    tree = _parse(GATE_MODULE)
+    offenders: list[str] = []
+    sites = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        f = node.func
+        name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+        if name != "build_record":
+            continue
+        sites += 1
+        decision = next((kw.value for kw in node.keywords if kw.arg == "decision"), None)
+        if not _is_decision_constant(decision):
+            offenders.append(
+                f"{GATE_MODULE.name}:{node.lineno} decision="
+                f"{ast.dump(decision) if decision is not None else '<missing>'}"
+            )
+
+    assert sites >= 2, (
+        "found fewer than two tool-gate build_record call sites; this invariant "
+        "must see both allow and deny receipt branches."
+    )
+    assert offenders == [], (
+        "tool-gate receipt decisions must be DECISION_* constants, not runtime "
+        f"strings or variables: {offenders}"
+    )
+
+
+def test_inv7_negative_self_test_decision_constant_predicate_rejects_runtime_strings():
+    bad = ast.parse('receipts.build_record(decision="denied")', mode="eval").body
+    assert isinstance(bad, ast.Call)
+    decision = next(kw.value for kw in bad.keywords if kw.arg == "decision")
+    assert not _is_decision_constant(decision)

@@ -13,6 +13,7 @@ COPY proxy/requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application
+COPY arkheia_common/ /app/arkheia_common/
 COPY proxy/ /app/proxy/
 COPY profiles/ /app/profiles/
 

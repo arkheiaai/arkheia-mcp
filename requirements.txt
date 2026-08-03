@@ -18,31 +18,6 @@ PyJWT>=2.13.0  # CVE-2026-32597: crit header validation
 pydantic>=2.10.0  # regex DoS fix
 pydantic-settings>=2.0.0
 
-# AES-256-GCM profile encrypt/decrypt (proxy/crypto/profile_crypto.py), imported
-# unconditionally at module-import time by scripts/build_release.py and
-# scripts/encrypt_profiles.py — both shipped by THIS distribution.
-#
-# It was undeclared here. It did not crash, because `mcp` -> `PyJWT[crypto]`
-# happens to pull it transitively — at a floor of >=3.4.0, forty-five major
-# versions below the CVE floor proxy/requirements.txt already applies. So the
-# real defect was never "import error"; it was that this distribution's only
-# crypto dependency was satisfied by an EXTRA of a transitive dependency, at a
-# version range that permits every CVE the sibling file pins against, and would
-# vanish outright on an `mcp` bump that dropped PyJWT.
-#
-# Enforced by tests/test_f20_profile_key_floor.py INV-6 (no version floor for one
-# package may differ between distributions) and INV-7 (the F20 build path's
-# third-party imports are declared by the distribution that ships it).
-# The GENERAL form of "every distribution declares what it imports" is PR #27
-# (sweep/mcp-declared-dependency-floor), which is open and not merged here.
-cryptography>=48.0.1  # CVE-2026-39892 + CVE-2026-26007 + GHSA-537c-gmf6-5ccf (bundled OpenSSL); matches proxy/requirements.txt
-
-# YAML
-pyyaml>=6.0
-
-# Async file I/O
-aiofiles>=23.0
-
 # Crypto -- AES-256-GCM encrypt/decrypt for profiles.
 # `proxy/crypto/profile_crypto.py` imports `cryptography` DIRECTLY, and
 # `proxy/main.py` imports `dotenv` DIRECTLY, but neither was declared here.
@@ -56,6 +31,12 @@ aiofiles>=23.0
 # real and so an upstream dropping `[crypto]` cannot silently break the proxy.
 cryptography>=48.0.1  # CVE-2026-39892 (buffer overflow) + CVE-2026-26007 (EC key validation) + GHSA-537c-gmf6-5ccf (bundled OpenSSL, high; fixed 48.0.1) fixes -- mirrors proxy/requirements.txt
 python-dotenv>=1.2.2  # CVE-2026-28684 (symlink attack in set_key/unset_key) fix -- imported unconditionally by proxy/main.py; mirrors proxy/requirements.txt
+
+# YAML
+pyyaml>=6.0
+
+# Async file I/O
+aiofiles>=23.0
 
 # Build / compilation dependency for release pipeline
 Cython>=3.0
