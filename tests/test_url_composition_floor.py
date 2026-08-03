@@ -81,11 +81,11 @@ SKIP_DIRS = {
 # KNOWN LIMITATIONS: this is what keeps filesystem paths out of the results.
 URL_HINTS = ("url", "uri", "endpoint", "host", "upstream", "addr", "base")
 
-# The canonical composer/normaliser. A base produced by either is normalised by
+# The canonical composer/normaliser. A base produced by any of these is normalised by
 # construction — this is the "reuse the canonical primitive" path (DONE.md Gate 2
 # registry check), and naming them here is what makes reuse cheaper than a
 # hand-rolled `.rstrip`.
-CANONICAL = ("normalise_base_url", "adapter_target")
+CANONICAL = ("normalise_base_url", "adapter_target", "_local_ollama_base_url")
 
 # Sites whose base cannot be resolved inside its own module AND which have been
 # reviewed by a human. Empty is the goal state; an entry is a promise, not a pass.
