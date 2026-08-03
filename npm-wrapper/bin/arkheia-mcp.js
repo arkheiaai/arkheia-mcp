@@ -116,34 +116,15 @@ function requirePackageOrBundleFile(filePath, label) {
   return resolved;
 }
 
-function readRegularFile(resolved, label, encoding = null) {
-  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
-  let fd;
-  try {
-    fd = fs.openSync(resolved, flags);
-    const stat = fs.fstatSync(fd);
-    if (!stat.isFile()) {
-      fail(`${label} is not a regular file at ${resolved}`);
-    }
-    return fs.readFileSync(fd, encoding || undefined);
-  } catch (err) {
-    fail(`could not read ${label} at ${resolved}: ${err.message}`);
-  } finally {
-    if (fd !== undefined) {
-      fs.closeSync(fd);
-    }
-  }
-}
-
 function sha256File(filePath, label = "file to hash") {
   const resolved = requirePackageOrBundleFile(filePath, label);
-  return crypto.createHash("sha256").update(readRegularFile(resolved, label)).digest("hex");
+  return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
 }
 
 function readJson(filePath, label) {
   const resolved = requirePackageOrBundleFile(filePath, label);
   try {
-    return JSON.parse(readRegularFile(resolved, label, "utf-8"));
+    return JSON.parse(fs.readFileSync(resolved, "utf-8"));
   } catch (err) {
     fail(`could not read ${label} at ${resolved}: ${err.message}`);
   }
@@ -464,7 +445,7 @@ function venvMarkerMatches(bundle) {
   }
   try {
     const markerPath = requireVenvFile(VENV_MARKER, "virtual environment marker");
-    const data = JSON.parse(readRegularFile(markerPath, "virtual environment marker", "utf-8"));
+    const data = JSON.parse(fs.readFileSync(markerPath, "utf-8"));
     return (
       data &&
       data.schema === VENV_SCHEMA &&
@@ -580,7 +561,7 @@ function depsMarkerMatches(marker, bundle) {
   }
   try {
     const markerPath = requireVenvFile(marker, "dependency install marker");
-    const data = JSON.parse(readRegularFile(markerPath, "dependency install marker", "utf-8"));
+    const data = JSON.parse(fs.readFileSync(markerPath, "utf-8"));
     return (
       data &&
       data.schema === "arkheia.npm.deps.v1" &&
