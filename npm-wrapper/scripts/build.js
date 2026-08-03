@@ -511,8 +511,28 @@ function collectBundleFiles(dir, relative = "") {
   return files.sort();
 }
 
+function requirePackageOrBundleFile(filePath, label) {
+  const resolved = path.resolve(filePath);
+  if (!inside(resolved, PACKAGE_ROOT) && !inside(resolved, BUNDLE_ROOT)) {
+    fail(`${label} resolves outside the package bundle at ${filePath}`);
+  }
+  let stat;
+  try {
+    stat = fs.lstatSync(resolved);
+  } catch (err) {
+    fail(`${label} is missing at ${resolved}: ${err.message}`);
+  }
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    fail(`${label} is not a regular file at ${resolved}`);
+  }
+  return resolved;
+}
+
 function packageManifest() {
-  const manifestPath = path.join(PACKAGE_ROOT, "package.json");
+  const manifestPath = requirePackageOrBundleFile(
+    path.join(PACKAGE_ROOT, "package.json"),
+    "package manifest"
+  );
   try {
     return JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
   } catch (err) {

@@ -107,15 +107,26 @@ function resolveBundlePath(relativePath, label) {
   return resolved;
 }
 
-function sha256File(filePath) {
-  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+function requirePackageOrBundleFile(filePath, label) {
+  const resolved = path.resolve(filePath);
+  if (!inside(resolved, PACKAGE_ROOT) && !inside(resolved, BUNDLED_PYTHON_DIR)) {
+    fail(`${label} resolves outside the package bundle at ${filePath}`);
+  }
+  requireRegularFileNoSymlink(resolved, label);
+  return resolved;
+}
+
+function sha256File(filePath, label = "file to hash") {
+  const resolved = requirePackageOrBundleFile(filePath, label);
+  return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
 }
 
 function readJson(filePath, label) {
+  const resolved = requirePackageOrBundleFile(filePath, label);
   try {
-    return JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    return JSON.parse(fs.readFileSync(resolved, "utf-8"));
   } catch (err) {
-    fail(`could not read ${label} at ${filePath}: ${err.message}`);
+    fail(`could not read ${label} at ${resolved}: ${err.message}`);
   }
 }
 
@@ -340,7 +351,7 @@ function verifyBundle() {
   if (typeof trustRoot.provenance_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(trustRoot.provenance_sha256)) {
     fail(`invalid bundle provenance trust root sha256: ${JSON.stringify(trustRoot.provenance_sha256)}`);
   }
-  const provenanceSha256 = sha256File(PROVENANCE_PATH);
+  const provenanceSha256 = sha256File(PROVENANCE_PATH, "bundle provenance manifest");
   if (trustRoot.provenance_sha256 !== provenanceSha256) {
     fail(
       "bundle provenance trust root mismatch: the bundled Python manifest has " +
@@ -367,7 +378,7 @@ function verifyBundle() {
       fail(`bundle provenance path is missing from disk: ${entry.path}`);
     }
     requireRegularFileNoSymlink(filePath, `bundle provenance path ${entry.path}`);
-    const actual = sha256File(filePath);
+    const actual = sha256File(filePath, `bundle provenance path ${entry.path}`);
     if (actual !== entry.sha256) {
       fail(`bundle provenance hash mismatch for ${entry.path}`);
     }
@@ -433,7 +444,8 @@ function venvMarkerMatches(bundle) {
     return false;
   }
   try {
-    const data = JSON.parse(fs.readFileSync(VENV_MARKER, "utf-8"));
+    const markerPath = requireVenvFile(VENV_MARKER, "virtual environment marker");
+    const data = JSON.parse(fs.readFileSync(markerPath, "utf-8"));
     return (
       data &&
       data.schema === VENV_SCHEMA &&
