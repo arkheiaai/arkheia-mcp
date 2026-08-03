@@ -56,10 +56,11 @@ per module and names the ones no record covers — "1 of 2 modules recorded"
 passes every non-zero assertion, which is precisely the case floor invariant
 9(a) exists for.
 
-Closed on current ``master``, and pinned here rather than hidden:
-``verify_integrity`` itself now raises ``TamperDetected`` over a hand-written
-empty manifest. The build guard below is still load-bearing: release builds must
-not ship a false manifest and then rely on startup to reject the artifact.
+Closed by the integrity library since this receipt proof was first written:
+``verify_integrity`` itself now refuses a hand-written empty manifest, raising
+``TamperDetected`` rather than returning ``VERIFIED`` with ``modules_checked=0``.
+The test below pins that stronger contract so this receipt proof cannot regress
+the later integrity fix while rebasing.
 """
 from __future__ import annotations
 
