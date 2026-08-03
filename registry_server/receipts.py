@@ -168,7 +168,7 @@ async def emit(record: dict) -> None:
         )
         return
     try:
-        write_status = await writer.write(record)
+        write_outcome = await writer.write(record)
     except Exception as exc:  # pragma: no cover — defensive; write() is itself guarded
         logger.error(
             "Registry auth receipt FAILED to enqueue (%s): decision=%s receipt_id=%s "
@@ -176,6 +176,7 @@ async def emit(record: dict) -> None:
             exc, record.get("decision"), record.get("receipt_id"),
         )
         return
+    write_status = getattr(write_outcome, "receipt", write_outcome)
     if write_status == AUDIT_WRITE_QUEUE_FULL:
         logger.error(
             "Registry auth receipt DROPPED (audit queue full): decision=%s receipt_id=%s "

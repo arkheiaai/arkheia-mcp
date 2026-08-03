@@ -63,7 +63,7 @@ from pathlib import Path
 
 import pytest
 
-from proxy.audit.writer import AuditWriter
+from proxy.audit.writer import AUDIT_WRITE_NOT_RUNNING, AuditWriter
 from proxy.license.integrity import (
     INTEGRITY_EVENT_TYPE,
     VERDICT_TAMPERED,
@@ -401,10 +401,19 @@ async def test_the_landed_check_is_not_vacuous(tmp_path):
     assert (tmp_path / "written.jsonl").exists()
 
 
+async def test_write_before_start_is_rejected_not_left_in_a_stalled_queue(tmp_path):
+    """A write with no running writer must not create an undrained queue item."""
+    writer = AuditWriter(str(tmp_path / "stalled.jsonl"))
+    outcome = await writer.write({"detection_id": "never-drained"})
+
+    assert outcome.receipt == AUDIT_WRITE_NOT_RUNNING
+    assert writer._queue.qsize() == 0
+
+
 async def test_flush_surfaces_a_stalled_queue_instead_of_swallowing_it(tmp_path):
     """``AuditWriter.flush`` must raise, not return, when the queue does not drain."""
     writer = AuditWriter(str(tmp_path / "stalled.jsonl"))
-    await writer.write({"detection_id": "never-drained"})
+    writer._queue.put_nowait({"detection_id": "never-drained"})
     with pytest.raises(asyncio.TimeoutError):
         await writer.flush(timeout=0.2)
 

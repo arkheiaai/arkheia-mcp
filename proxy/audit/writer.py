@@ -35,6 +35,7 @@ import hashlib
 import json
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -127,10 +128,76 @@ class ChainState(NamedTuple):
 
 AUDIT_WRITE_ENQUEUED = "enqueued"
 AUDIT_WRITE_QUEUE_FULL = "queue_full"
+AUDIT_WRITE_NOT_RUNNING = "not_running"
+AUDIT_WRITE_WRITE_FAILED = "write_failed"
+AUDIT_WRITE_DRAIN_TIMEOUT = "drain_timeout"
 AUDIT_WRITE_STATUSES = frozenset({
     AUDIT_WRITE_ENQUEUED,
     AUDIT_WRITE_QUEUE_FULL,
+    AUDIT_WRITE_NOT_RUNNING,
+    AUDIT_WRITE_WRITE_FAILED,
+    AUDIT_WRITE_DRAIN_TIMEOUT,
 })
+
+RECEIPT_ENQUEUED = AUDIT_WRITE_ENQUEUED
+RECEIPT_QUEUE_FULL = AUDIT_WRITE_QUEUE_FULL
+RECEIPT_NOT_RUNNING = AUDIT_WRITE_NOT_RUNNING
+RECEIPT_WRITE_FAILED = AUDIT_WRITE_WRITE_FAILED
+RECEIPT_DRAIN_TIMEOUT = AUDIT_WRITE_DRAIN_TIMEOUT
+AUDIT_WRITE_RECEIPTS = AUDIT_WRITE_STATUSES
+
+
+@dataclass(frozen=True)
+class AuditWriteOutcome:
+    """Machine-readable result of handing a record to the audit rail."""
+
+    receipt: str
+    accepted: bool
+    detail: str
+    queue_size: int = 0
+
+    @classmethod
+    def enqueued(cls, queue_size: int) -> "AuditWriteOutcome":
+        return cls(
+            receipt=AUDIT_WRITE_ENQUEUED,
+            accepted=True,
+            detail="record accepted by the audit writer queue",
+            queue_size=queue_size,
+        )
+
+    @classmethod
+    def failed(cls, receipt: str, detail: str, queue_size: int = 0) -> "AuditWriteOutcome":
+        if receipt not in AUDIT_WRITE_RECEIPTS:
+            raise ValueError(f"unknown audit receipt outcome: {receipt!r}")
+        return cls(
+            receipt=receipt,
+            accepted=False,
+            detail=detail,
+            queue_size=queue_size,
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, str):
+            return self.receipt == other
+        if isinstance(other, AuditWriteOutcome):
+            return (
+                self.receipt,
+                self.accepted,
+                self.detail,
+                self.queue_size,
+            ) == (
+                other.receipt,
+                other.accepted,
+                other.detail,
+                other.queue_size,
+            )
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return hash((self.receipt, self.accepted, self.detail, self.queue_size))
+
+    def __str__(self) -> str:
+        return self.receipt
 
 
 def _compute_hash(record: dict, prev_hash: str) -> str:
@@ -450,6 +517,9 @@ class AuditWriter:
         self._degraded_since_signal: int = 0
         self._write_failures: int = 0
         self._degraded_writes: int = 0
+        self._dropped_records: int = 0
+        self._drain_timeouts: int = 0
+        self._last_failure: Optional[dict] = None
 
     # ------------------------------------------------------------------
     # Chain health — the "never fail-silent" surface
@@ -473,6 +543,10 @@ class AuditWriter:
             "seq": self._seq,
             "write_failures": self._write_failures,
             "degraded_writes": self._degraded_writes,
+            "dropped_records": self._dropped_records,
+            "drain_timeouts": self._drain_timeouts,
+            "failed_records": self._write_failures,
+            "last_failure": self._last_failure,
             "startup_blocked": False,
         }
 
@@ -588,8 +662,13 @@ class AuditWriter:
             try:
                 await asyncio.wait_for(self._queue.join(), timeout=5.0)
             except asyncio.TimeoutError:
+                self._drain_timeouts += 1
                 logger.warning("AuditWriter: queue drain timed out, %d events lost",
                                self._queue.qsize())
+                self.mark_chain_degraded(
+                    "DRAIN_TIMEOUT",
+                    f"queue drain timed out with {self._queue.qsize()} record(s) still pending",
+                )
             self._task.cancel()
             try:
                 await self._task
@@ -597,27 +676,50 @@ class AuditWriter:
                 pass
         logger.info("AuditWriter stopped  final_seq=%d", self._seq)
 
-    async def write(self, record: dict) -> str:
+    async def write(self, record: dict) -> AuditWriteOutcome:
         """
         Enqueue a record for async write. Returns immediately.
 
-        Returns ``"enqueued"`` when the queue accepted the record and
-        ``"queue_full"`` when the record was dropped before reaching the
-        background writer. The method still never blocks and never raises for
-        saturation, but saturation is an observable outcome rather than a
-        caller-visible success.
+        Returns a structured ``AuditWriteOutcome``. It compares equal to the
+        legacy status strings, so older callers that check ``== "queue_full"``
+        still work, but new callers can distinguish accepted, saturated and
+        not-running states without pretending a receipt landed.
         """
+        if (not self._running or self._task is None or self._task.done()) and self._queue.full():
+            safe_id = _safe_log_detection_id(record)
+            self._dropped_records += 1
+            logger.warning("AuditWriter queue full — dropping audit event")
+            self.mark_chain_degraded(
+                "RECORD_DROPPED",
+                f"queue full before record {safe_id} reached a running audit writer",
+            )
+            return AuditWriteOutcome.failed(
+                AUDIT_WRITE_QUEUE_FULL,
+                "audit writer queue is full",
+                self._queue.qsize(),
+            )
+        if not self._running or self._task is None or self._task.done():
+            return AuditWriteOutcome.failed(
+                AUDIT_WRITE_NOT_RUNNING,
+                "audit writer is not running",
+                self._queue.qsize(),
+            )
         try:
             self._queue.put_nowait(record)
         except asyncio.QueueFull:
             safe_id = _safe_log_detection_id(record)
+            self._dropped_records += 1
             logger.warning("AuditWriter queue full — dropping audit event")
             self.mark_chain_degraded(
                 "RECORD_DROPPED",
                 f"queue full before record {safe_id} reached disk",
             )
-            return AUDIT_WRITE_QUEUE_FULL
-        return AUDIT_WRITE_ENQUEUED
+            return AuditWriteOutcome.failed(
+                AUDIT_WRITE_QUEUE_FULL,
+                "audit writer queue is full",
+                self._queue.qsize(),
+            )
+        return AuditWriteOutcome.enqueued(self._queue.qsize())
 
     async def flush(self, timeout: float = 5.0) -> None:
         """
@@ -765,6 +867,12 @@ class AuditWriter:
                 # counted on chain_status() (and therefore /admin/health), and
                 # the chain is marked degraded so no surface reports healthy.
                 self._write_failures += 1
+                self._last_failure = {
+                    "receipt": AUDIT_WRITE_WRITE_FAILED,
+                    "detection_id": safe_detection_id,
+                    "error_type": type(e).__name__,
+                    "detail": _redacted_diagnostic_text(e),
+                }
                 self.mark_chain_degraded(
                     "WRITE_FAILED",
                     f"record {safe_detection_id} could not be "

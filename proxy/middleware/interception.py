@@ -750,10 +750,11 @@ async def _emit(request: Request, record: dict) -> str:
         )
         return RECEIPT_NO_WRITER
     try:
-        write_status = await audit.write(record)
+        write_outcome = await audit.write(record)
     except Exception as exc:
         logger.error("Interception audit write failed (decision unaffected): %s", exc)
         return RECEIPT_WRITE_FAILED
+    write_status = getattr(write_outcome, "receipt", write_outcome)
     # Saturation is checked BEFORE read-back on purpose. A record the queue
     # refused is never going to be findable, so letting it fall through would
     # relabel a known drop as a generic read-back failure and lose the one

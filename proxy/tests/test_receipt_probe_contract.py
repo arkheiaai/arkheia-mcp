@@ -26,6 +26,7 @@ import pytest
 
 from proxy.audit.writer import AuditWriter
 from proxy.tests._receipt_probe import DEFAULT_ID_FIELD, ReceiptProbe, contains
+from registry_server.tests._auth_receipt_probe import AuthReceiptProbe
 
 # The same construction discipline as the redaction suite: no credential-shaped
 # literal in the source, but an exact match for a redactor pattern at runtime.
@@ -314,3 +315,44 @@ async def test_chain_verification_delegates_and_can_go_false(tmp_path):
     )
 
     assert probe.verify_chain()["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# P10 — nested payload IDs are not top-level receipt evidence
+# ---------------------------------------------------------------------------
+
+def _write_rows(path, rows):
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def test_generic_receipt_probe_does_not_match_payload_only_receipt_id(tmp_path):
+    log = tmp_path / "audit.jsonl"
+    target = "f" * 32
+    real = "a" * 32
+    _write_rows(log, [
+        {"receipt_id": real, "payload": {"receipt_id": target}},
+        {"receipt_id": "b" * 32, "note": f"support mentioned {target} here"},
+    ])
+
+    probe = ReceiptProbe(log, id_field="receipt_id")
+
+    assert probe.find(target) is None
+    assert probe.require(real)["payload"]["receipt_id"] == target
+
+
+def test_registry_auth_probe_does_not_match_payload_only_receipt_id(tmp_path):
+    log = tmp_path / "registry_audit.jsonl"
+    target = "e" * 32
+    real = "c" * 32
+    _write_rows(log, [
+        {"receipt_id": real, "payload": {"receipt_id": target}},
+        {"receipt_id": "d" * 32, "message": f"receipt_id={target}"},
+    ])
+
+    probe = AuthReceiptProbe(log)
+
+    assert probe.find(target) is None
+    assert probe.require(real)["payload"]["receipt_id"] == target
