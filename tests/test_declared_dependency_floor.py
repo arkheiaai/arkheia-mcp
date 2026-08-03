@@ -36,9 +36,10 @@ while the next undeclared import shipped — the same defect class wearing a tes
 clothes. A hand-written "expected dependencies" list is the same defect one level
 up. So nothing here is enumerated:
 
-  * SCOPES are discovered — every `Dockerfile*` in the tree, plus the two
-    distributions the npm launcher creates (the published bundle, and the
-    git-clone fallback it performs when the bundle has no server code);
+  * SCOPES are discovered — every `Dockerfile*` in the tree, plus the npm
+    distribution(s) the launcher creates. Legacy launchers had both a published
+    bundle and a git-clone fallback; package-owned launchers intentionally have
+    only the published bundle.
   * each scope's DECLARED SET is read out of the `pip install` commands that
     scope actually runs — an `-r <path>` is resolved back through that
     Dockerfile's own `COPY` directives and `WORKDIR` to a repo-relative file, so
@@ -526,14 +527,15 @@ def launcher_entry_module(text: str) -> str:
     return match.group(1)
 
 
-def launcher_requirements_candidates(text: str) -> tuple[str, str]:
-    """The launcher's requirements ternary, read out of the launcher itself.
+def launcher_requirements_candidates(text: str) -> tuple[str, ...]:
+    """The launcher's requirements target, read out of the launcher itself.
 
-    `arkheia-mcp.js` resolves REQUIREMENTS as
+    Older `arkheia-mcp.js` resolved REQUIREMENTS as
     `<dir>/mcp_server/requirements.txt` if that exists, else `<dir>/requirements.txt`.
-    Both arms are extracted and asserted against, so a change to either arm
-    breaks this floor loudly instead of leaving the real install target
-    unexamined.
+    Newer package-owned launchers install only from the verified bundled
+    `python/requirements.txt`. Both forms are derived from the launcher instead
+    of assumed, so a change to the install target breaks this floor loudly
+    rather than leaving the npm distribution unchecked.
     """
     block = re.search(
         r"REQUIREMENTS\s*=\s*(.*?);", text, re.DOTALL
@@ -543,12 +545,26 @@ def launcher_requirements_candidates(text: str) -> tuple[str, str]:
             f"{_NPM_LAUNCHER}: no `REQUIREMENTS = …` assignment found; the "
             f"dependency file the bundle installs cannot be derived."
         )
+    direct_relative = re.search(
+        r"REQUIREMENTS_RELATIVE\s*=\s*[\"']([^\"']+)[\"']", text
+    )
+    direct_assignment = re.search(
+        r"REQUIREMENTS\s*=\s*path\.join\(\s*BUNDLED_PYTHON_DIR\s*,\s*"
+        r"REQUIREMENTS_RELATIVE\s*\)",
+        text,
+    )
+    if direct_relative and direct_assignment:
+        return (direct_relative.group(1),)
+
     # Three `path.join(PYTHON_DIR, …)` occurrences appear in the assignment: the
     # `fs.existsSync(...)` probe, then the two ternary arms. The probe comes first,
     # so first-seen is the PREFERRED candidate and the remaining distinct one is
     # the fallback — derived from the launcher's own control flow rather than
     # assumed.
-    joins = re.findall(r"path\.join\(\s*PYTHON_DIR\s*,([^)]*)\)", block.group(1))
+    joins = re.findall(
+        r"path\.join\(\s*(?:PYTHON_DIR|BUNDLED_PYTHON_DIR)\s*,([^)]*)\)",
+        block.group(1),
+    )
     ordered: list[str] = []
     for args in joins:
         segments = re.findall(r"[\"']([^\"']+)[\"']", args)
@@ -567,8 +583,16 @@ def launcher_requirements_candidates(text: str) -> tuple[str, str]:
     return ordered[0], ordered[1]
 
 
-def resolve_launcher_requirements(python_dir: Path, candidates: tuple[str, str]) -> Path:
+def resolve_launcher_requirements(python_dir: Path, candidates: tuple[str, ...]) -> Path:
     """Mirror the launcher's own existence check for a given PYTHON_DIR."""
+    if len(candidates) == 1:
+        resolved = python_dir / candidates[0]
+        if not (_ROOT / resolved).is_file():
+            raise AssertionError(
+                f"{_NPM_LAUNCHER}: expected package-owned dependency manifest "
+                f"{resolved}, but it does not exist."
+            )
+        return resolved
     preferred, fallback = candidates
     if (_ROOT / python_dir / preferred).is_file():
         return python_dir / preferred
@@ -736,6 +760,26 @@ def dockerfile_paths() -> list[Path]:
     return sorted(found)
 
 
+def workflow_requirements_files() -> set[Path]:
+    """Every repo requirements file explicitly installed by a GitHub workflow."""
+    found: set[Path] = set()
+    for wf in (_ROOT / ".github" / "workflows").glob("*.yml"):
+        text = wf.read_text(encoding="utf-8")
+        for match in re.finditer(r"\bpip\s+install\b([^\n]*)", text):
+            tokens = shlex.split(match.group(1), comments=False, posix=True)
+            index = 0
+            while index < len(tokens):
+                token = tokens[index]
+                if token in ("-r", "--requirement") and index + 1 < len(tokens):
+                    target = Path(tokens[index + 1])
+                    if not target.is_absolute() and (_ROOT / target).is_file():
+                        found.add(target)
+                    index += 2
+                    continue
+                index += 1
+    return found
+
+
 def _requirements_from_pip_commands(facts: DockerfileFacts) -> list[Path]:
     """Resolve every `-r <path>` a Dockerfile installs back to a repo file."""
     reverse_copy = {dest: src for src, dest in facts.copies}
@@ -830,20 +874,22 @@ def discover_scopes() -> list[Scope]:
     bundle.copied_requirements = []  # type: ignore[attr-defined]
     scopes.append(bundle)
 
-    # (2) the clone fallback the launcher performs when the bundle has no server
-    #     code: the WHOLE repo on PYTHONPATH, with only the resolved requirements
-    #     file installed. Shipped set is the repo; the checked set is still only
-    #     what the entry module reaches, which is what keeps `proxy`'s deps out.
-    clone = Scope(
-        f"{_NPM_LAUNCHER.as_posix()} (git-clone fallback)",
-        entry,
-        [resolve_launcher_requirements(Path("."), candidates)],
-        ["."],
-        note="launcher clones the repo to ~/.arkheia/mcp and runs it in place",
-    )
-    clone.inline_dists = set()  # type: ignore[attr-defined]
-    clone.copied_requirements = []  # type: ignore[attr-defined]
-    scopes.append(clone)
+    if "git clone" in launcher_text:
+        # (2) the legacy clone fallback the launcher performed when the bundle had
+        #     no server code: the WHOLE repo on PYTHONPATH, with only the resolved
+        #     requirements file installed. Package-owned launchers intentionally
+        #     removed this path; in that shape there is no clone distribution to
+        #     discover.
+        clone = Scope(
+            f"{_NPM_LAUNCHER.as_posix()} (git-clone fallback)",
+            entry,
+            [resolve_launcher_requirements(Path("."), candidates)],
+            ["."],
+            note="launcher clones the repo to ~/.arkheia/mcp and runs it in place",
+        )
+        clone.inline_dists = set()  # type: ignore[attr-defined]
+        clone.copied_requirements = []  # type: ignore[attr-defined]
+        scopes.append(clone)
 
     return scopes
 
@@ -901,21 +947,28 @@ def test_the_discovery_reached_every_distribution_on_disk():
         f"{sorted(set(dockerfiles) - set(names))}"
     )
     npm_scopes = [n for n in names if "npm-wrapper" in n]
-    assert len(npm_scopes) == 2, (
-        f"expected two npm distributions (published bundle + git-clone fallback), "
-        f"found {npm_scopes}"
+    launcher_text = (_ROOT / _NPM_LAUNCHER).read_text(encoding="utf-8")
+    expected_npm_scopes = 2 if "git clone" in launcher_text else 1
+    expected_npm_label = (
+        "published bundle + git-clone fallback"
+        if expected_npm_scopes == 2
+        else "published bundle only; no launcher clone fallback"
     )
-    assert len(names) == len(dockerfiles) + 2, (
+    assert len(npm_scopes) == expected_npm_scopes, (
+        f"expected {expected_npm_scopes} npm distribution(s) "
+        f"({expected_npm_label}), found {npm_scopes}"
+    )
+    assert len(names) == len(dockerfiles) + expected_npm_scopes, (
         f"scope count {len(names)} does not match {len(dockerfiles)} Dockerfile(s) "
-        f"+ 2 npm distributions: {names}"
+        f"+ {expected_npm_scopes} npm distribution(s): {names}"
     )
 
 
 def test_every_requirements_file_governs_a_discovered_scope():
     """
-    A requirements file no scope installs is either dead weight or — the dangerous
-    case — the file someone will edit believing it governs a deployment. Both are
-    reported by name rather than assumed harmless.
+    A requirements file no distribution scope or workflow installs is either dead
+    weight or — the dangerous case — the file someone will edit believing it
+    governs a deployment. Both are reported by name rather than assumed harmless.
     """
     # `*requirements*.txt`, not `requirements*.txt`: the narrower glob silently
     # missed `dev-requirements.txt`-style names, which was caught by running this
@@ -929,14 +982,16 @@ def test_every_requirements_file_governs_a_discovered_scope():
     installed = {
         req.as_posix() for scope in SCOPES for req in scope.requirements
     }
+    installed_by_workflow = {req.as_posix() for req in workflow_requirements_files()}
     assert on_disk, "no requirements file found anywhere in the repo"
-    orphans = sorted(set(on_disk) - installed)
+    orphans = sorted(set(on_disk) - installed - installed_by_workflow)
     assert not orphans, (
-        f"requirements file(s) that NO discovered scope installs: {orphans}. Either "
-        f"a distribution was missed by discovery (this floor is then checking less "
-        f"than it claims), or the file is dead and should be deleted — an unowned "
-        f"dependency file is a trap for the next editor. Installed by some scope: "
-        f"{sorted(installed)}"
+        f"requirements file(s) that NO discovered scope or workflow installs: "
+        f"{orphans}. Either a distribution/workflow was missed by discovery "
+        f"(this floor is then checking less than it claims), or the file is dead "
+        f"and should be deleted — an unowned dependency file is a trap for the "
+        f"next editor. Installed by runtime scope: {sorted(installed)}. "
+        f"Installed by workflow: {sorted(installed_by_workflow)}"
     )
 
 

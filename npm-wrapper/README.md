@@ -26,17 +26,21 @@ Add to your agent config (Claude Code, Claude Desktop, Cursor, or any MCP-compat
 {
   "mcpServers": {
     "arkheia": {
-      "command": "python",
-      "args": ["-m", "mcp_server.server"],
-      "cwd": "~/.arkheia/mcp",
-      "env": {
-        "PYTHONPATH": "~/.arkheia/mcp",
-        "ARKHEIA_API_KEY": "ak_live_your_key_here"
-      }
+      "command": "npx",
+      "args": ["-y", "@arkheia/mcp-server"]
     }
   }
 }
 ```
+
+The npm launcher runs the Python server bundled in the package. It verifies the
+bundle before creating `~/.arkheia/venv` and installs dependencies only from the
+package-owned `python/requirements.txt`; it does not clone the GitHub repo at
+runtime.
+
+Launch your MCP client with `ARKHEIA_API_KEY` already present in its process
+environment. The launcher does not read or write `~/.arkheia/config.json` for
+runtime credentials.
 
 Restart your agent. Then ask it:
 
