@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from proxy.crypto.profile_crypto import encrypt_profile
+from proxy.crypto.profile_crypto import decrypt_profile, encrypt_profile
 from proxy.license.integrity import COMPILED_ARTIFACT_GLOBS, generate_manifest
 try:
     from setup_cython import COMPILED_MODULES
@@ -101,11 +101,41 @@ def step_encrypt_profiles(master_key: bytes, profile_dir: Path) -> int:
         encrypted = encrypt_profile(plaintext, master_key, profile_name)
         enc_path = profile_dir / f"{profile_name}.yaml.enc"
         enc_path.write_bytes(encrypted)
+
+        # Prove the ciphertext is RECOVERABLE before destroying the only plaintext copy.
+        # Without this, a broken or mis-keyed encrypt_profile writes undecryptable bytes, this
+        # step reports success, and the source YAML is deleted -- unrecoverable data loss that
+        # every existing assertion passes straight through, because they only check that the
+        # plaintext is gone and a .enc exists. Read back from DISK rather than trusting the
+        # in-memory buffer, so a truncated or partial write is caught too.
+        try:
+            recovered = decrypt_profile(enc_path.read_bytes(), master_key, profile_name)
+        except Exception as exc:  # noqa: BLE001 - any failure here must stop the build
+            raise RuntimeError(
+                f"Refusing to delete {yaml_file.name}: the ciphertext written to "
+                f"{enc_path.name} could not be decrypted ({exc!r}). The plaintext has been "
+                f"left in place."
+            ) from exc
+        if recovered != plaintext:
+            raise RuntimeError(
+                f"Refusing to delete {yaml_file.name}: {enc_path.name} decrypts to "
+                f"{len(recovered)} bytes but the source is {len(plaintext)} bytes. The "
+                f"plaintext has been left in place."
+            )
+
         yaml_file.unlink()
         encrypted_count += 1
-        print(f"  Encrypted: {yaml_file.name} -> {enc_path.name}")
+        print(f"  Encrypted: {yaml_file.name} -> {enc_path.name} (round-trip verified)")
 
-    print(f"  Profiles encrypted: {encrypted_count}")
+    if encrypted_count == 0:
+        # A zero count previously printed "Profiles encrypted: 0" and returned success, so a
+        # release could ship with nothing encrypted and nothing to say so.
+        raise RuntimeError(
+            f"Refusing to continue: no profiles were encrypted. Searched {profile_dir} for "
+            f"'*.yaml' (excluding schema.yaml) and found no candidates."
+        )
+
+    print(f"  Profiles encrypted: {encrypted_count} (all round-trip verified)")
     return encrypted_count
 
 
@@ -314,7 +344,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             removed=removed,
             repo_root=REPO_ROOT,
         )
-    except (FileNotFoundError, ValueError, subprocess.CalledProcessError) as exc:
+    except (FileNotFoundError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 
