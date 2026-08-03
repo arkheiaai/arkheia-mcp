@@ -103,16 +103,13 @@ jobs:
         # 327 collected.
         # Re-measured on PR #27 after merging current master: master already
         # collected 327 and this branch adds tests/test_declared_dependency_floor.py
-        # with 31 node IDs. 327 + 31, no current master node lost, measured with
-        # the same pytest-only floor command this job uses:
-        # 358 collected.
-        # Re-measured on #63 after merging current master. The guard is unchanged
-        # and still fails loudly on any future drift.
+        # Re-measured on #63 after merging current master and #55. The guard is
+        # unchanged and still fails loudly on any future drift.
         run: |
           COUNT="$(pytest tests \
             -o python_files="test_*_floor.py test_floor_*.py" \
             -p no:cacheprovider --collect-only -q 2>/dev/null | grep -c '::' || true)"
-          EXPECTED=394
+          EXPECTED=405
           if [ "$COUNT" -ne "$EXPECTED" ]; then
             echo "::error::floor discovery count changed (collected $COUNT, expected $EXPECTED). If intentional, update EXPECTED in this workflow in the same commit."
             exit 1

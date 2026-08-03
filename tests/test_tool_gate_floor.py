@@ -69,21 +69,6 @@ PROD_ROOT_FILES = ("server.py",)
 # ---------------------------------------------------------------------------
 POLICY_CONTROL_FIELDS = ("permissions", "network_egress", "requires_human_confirm")
 
-# Controls that are declared but deliberately NOT yet enforced, each with the
-# reason. This set is asserted EXACTLY, in both directions: adding a new
-# unenforced control is RED, and enforcing one of these without removing it from
-# here is also RED. An allowlist that can grow silently is not a floor.
-KNOWN_UNENFORCED: dict[str, str] = {
-    "network_egress": (
-        "No egress chokepoint exists in mcp_server: mcp_server/tools/providers.py "
-        "opens its own httpx client per provider, so there is nothing for the gate "
-        "to deny. Enforcing it needs a design decision on WHERE the chokepoint "
-        "lives (provider factory vs process-level cap) — deferred to David, "
-        "explicitly named in the PR that added this floor rather than left silent."
-    ),
-}
-
-
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -308,36 +293,15 @@ def test_inv3_declared_policy_controls_have_a_production_read_site():
 
     unenforced = sorted(f for f in POLICY_CONTROL_FIELDS if read_counts.get(f, 0) == 0)
 
-    assert unenforced == sorted(KNOWN_UNENFORCED), (
+    assert unenforced == [], (
         f"ToolPolicy policy-control enforcement drifted from the declared floor.\n"
         f"  unenforced now : {unenforced}\n"
-        f"  expected       : {sorted(KNOWN_UNENFORCED)}\n"
+        f"  expected       : []\n"
         f"  read counts    : { {f: read_counts.get(f, 0) for f in POLICY_CONTROL_FIELDS} }\n"
         f"A control declared on ToolPolicy but never read by production code is "
-        f"DECORATIVE — it enforces nothing however well it is documented. If you "
-        f"enforced one of the expected-unenforced controls, remove it from "
-        f"KNOWN_UNENFORCED. If you added a new unenforced control, wire it or "
-        f"record it there WITH A REASON — this assertion is exact in both "
-        f"directions precisely so neither can happen silently."
-    )
-
-
-def test_inv3_known_unenforced_entries_each_carry_a_reason():
-    """A deferral without a stated reason is an unnamed residual — the exact
-    defect class this sweep exists to remove."""
-    assert KNOWN_UNENFORCED, (
-        "KNOWN_UNENFORCED is empty; if every control is now enforced, delete this "
-        "test along with the dict rather than leaving a check that checks nothing."
-    )
-    thin = sorted(k for k, v in KNOWN_UNENFORCED.items() if len(v.strip()) < 40)
-    assert not thin, f"KNOWN_UNENFORCED entries with no substantive reason: {thin}"
-
-    # Each deferred control must still be a real ToolPolicy field, or the dict is
-    # silently excusing a name that no longer exists.
-    stale = sorted(set(KNOWN_UNENFORCED) - set(POLICY_CONTROL_FIELDS))
-    assert not stale, (
-        f"KNOWN_UNENFORCED names control(s) that are not in POLICY_CONTROL_FIELDS: "
-        f"{stale}. A stale excuse silently widens the allowlist."
+        f"DECORATIVE — it enforces nothing however well it is documented. If a "
+        f"future deferral is genuinely needed, it must add a named, reasoned "
+        f"allowlist in the same change rather than inheriting an empty one."
     )
 
 
