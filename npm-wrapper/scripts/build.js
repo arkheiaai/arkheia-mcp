@@ -488,6 +488,15 @@ function writeTextFileUnder(root, relativePath, label, data) {
 }
 
 function sha256BundleFile(relativePath) {
+  if (typeof relativePath !== "string" || relativePath.includes("\0")) {
+    fail("bundle file to hash is not a safe relative path");
+  }
+  if (path.isAbsolute(relativePath) || /^[A-Za-z]:/.test(relativePath)) {
+    fail(`bundle file to hash is absolute: ${relativePath}`);
+  }
+  if (path.normalize(relativePath).split(/[\\/]/).includes("..")) {
+    fail(`bundle file to hash escapes the bundle root: ${relativePath}`);
+  }
   const resolved = resolveFileUnder(BUNDLE_ROOT, relativePath, "bundle file to hash");
   return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
 }
@@ -538,7 +547,8 @@ function collectBundleFiles(dir, relative = "") {
 }
 
 function packageManifest() {
-  const manifestPath = resolveFileUnder(PACKAGE_ROOT, "package.json", "package manifest");
+  const manifestRelative = "package.json";
+  const manifestPath = resolveFileUnder(PACKAGE_ROOT, manifestRelative, "package manifest");
   try {
     return JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
   } catch (err) {

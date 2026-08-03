@@ -132,11 +132,29 @@ function resolveFileUnder(root, relativePath, label) {
 }
 
 function sha256FileUnder(root, relativePath, label = "file to hash") {
+  if (typeof relativePath !== "string" || relativePath.includes("\0")) {
+    fail(`${label} is not a safe relative path`);
+  }
+  if (path.isAbsolute(relativePath) || /^[A-Za-z]:/.test(relativePath)) {
+    fail(`${label} is absolute: ${relativePath}`);
+  }
+  if (path.normalize(relativePath).split(/[\\/]/).includes("..")) {
+    fail(`${label} escapes its root: ${relativePath}`);
+  }
   const resolved = resolveFileUnder(root, relativePath, label);
   return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
 }
 
 function readJsonUnder(root, relativePath, label) {
+  if (typeof relativePath !== "string" || relativePath.includes("\0")) {
+    fail(`${label} is not a safe relative path`);
+  }
+  if (path.isAbsolute(relativePath) || /^[A-Za-z]:/.test(relativePath)) {
+    fail(`${label} is absolute: ${relativePath}`);
+  }
+  if (path.normalize(relativePath).split(/[\\/]/).includes("..")) {
+    fail(`${label} escapes its root: ${relativePath}`);
+  }
   const resolved = resolveFileUnder(root, relativePath, label);
   try {
     return JSON.parse(fs.readFileSync(resolved, "utf-8"));
@@ -475,8 +493,7 @@ function venvMarkerMatches(bundle) {
     return false;
   }
   try {
-    const markerPath = resolveVenvFile(VENV_MARKER_RELATIVE, "virtual environment marker");
-    const data = JSON.parse(fs.readFileSync(markerPath, "utf-8"));
+    const data = readJsonUnder(VENV_DIR, VENV_MARKER_RELATIVE, "virtual environment marker");
     return (
       data &&
       data.schema === VENV_SCHEMA &&
@@ -598,8 +615,7 @@ function depsMarkerMatches(bundle) {
     return false;
   }
   try {
-    const markerPath = resolveVenvFile(DEPS_MARKER_RELATIVE, "dependency install marker");
-    const data = JSON.parse(fs.readFileSync(markerPath, "utf-8"));
+    const data = readJsonUnder(VENV_DIR, DEPS_MARKER_RELATIVE, "dependency install marker");
     return (
       data &&
       data.schema === "arkheia.npm.deps.v1" &&
