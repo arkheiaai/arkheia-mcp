@@ -290,6 +290,14 @@ class PushOutcome:
     REJECTED = "rejected"       # receiver answered, with a non-2xx
     FAILED = "failed"           # never got an answer (network, timeout, ...)
 
+    status: str
+    http_status: Optional[int]
+    error: Optional[str]
+    event_id: Optional[str]
+    receipt: str
+    accepted: bool
+    detail: str
+
     def __init__(
         self,
         status: str,
@@ -305,6 +313,18 @@ class PushOutcome:
     @property
     def delivered(self) -> bool:
         return self.status == self.DELIVERED
+
+    @property
+    def receipt(self) -> str:
+        return self.status
+
+    @property
+    def accepted(self) -> bool:
+        return self.delivered
+
+    @property
+    def detail(self) -> str:
+        return self.error or self.status
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
         return (
@@ -452,11 +472,17 @@ async def _receipt(audit, record: dict) -> None:
     if audit is None:
         return
     try:
-        await audit.write(record)
+        outcome = await audit.write(record)
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "%s could not receipt governance push event_id=%s: %s",
             FAILURE_MARKER, record.get("detection_id"), exc,
+        )
+        return
+    if getattr(outcome, "accepted", outcome == "enqueued") is False:
+        logger.error(
+            "%s could not receipt governance push event_id=%s: audit writer returned %s",
+            FAILURE_MARKER, record.get("detection_id"), getattr(outcome, "receipt", outcome),
         )
 
 

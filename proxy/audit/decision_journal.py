@@ -488,7 +488,7 @@ async def emit(writer: Any, record: dict) -> str:
         return RECEIPT_UNAVAILABLE
 
     try:
-        write_status = await writer.write(out)
+        write_outcome = await writer.write(out)
     except Exception as exc:
         logger.error(
             "Governance decision NOT RECEIPTED (audit write raised %s): "
@@ -497,6 +497,7 @@ async def emit(writer: Any, record: dict) -> str:
         )
         return RECEIPT_UNAVAILABLE
 
+    write_status = getattr(write_outcome, "receipt", write_outcome)
     if write_status == AUDIT_WRITE_QUEUE_FULL:
         logger.error(
             "Governance decision NOT RECEIPTED (audit queue full): "
