@@ -836,12 +836,35 @@ async def health(request: Request, _: str = Depends(require_auth)):
                   "the compiled detection modules as UNVERIFIED",
     }
 
+    # Audit hash-chain health, read LIVE from the writer on every request (not a
+    # boot-time snapshot), so a chain that degrades while the process runs shows
+    # up here too. Codex adversarial review of PR #37: startup detected a broken
+    # chain, logged one line, and every operator surface still said "ok" — while
+    # the writer silently dropped every subsequent record. Posture is loudly
+    # degraded rather than fail-closed (see proxy/main.py step 0 for why), which
+    # only works if "degraded" is actually visible somewhere durable.
+    writer = getattr(request.app.state, "audit_writer", None)
+    if writer is not None and hasattr(writer, "chain_status"):
+        audit_chain = writer.chain_status()
+    else:
+        audit_chain = getattr(request.app.state, "audit_chain", None) or {
+            "ok": False,
+            "status": "NOT_CHECKED",
+            "detail": "no audit chain self-check result was recorded; treat the "
+                      "audit log as UNVERIFIED",
+            "startup_blocked": False,
+        }
+
     return {
-        "status": "ok",
+        # A corrupt audit chain must not be reportable as a healthy service.
+        # Fail-open on availability (we are up and still recording), but this
+        # top-level value is what a probe or a human actually reads.
+        "status": "ok" if audit_chain.get("ok", False) else "degraded",
         "profiles_loaded": profiles_loaded,
         "profile_ids": profile_ids,
         "last_registry_pull": last_pull,
         "integrity": integrity,
+        "audit_chain": audit_chain,
     }
 
 

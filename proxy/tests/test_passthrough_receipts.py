@@ -264,7 +264,13 @@ async def test_the_refusal_row_is_chained_and_the_chain_verifies(probe):
     assert probe.recompute_this_hash(row) == row["this_hash"]
 
     chain = probe.verify_chain()
-    assert chain == {"ok": True, "verified": 1, "breaks": [], "error": None}
+    assert chain["ok"] is True
+    assert chain["complete"] is True
+    assert chain["verified"] == 1
+    assert chain["breaks"] == []
+    assert chain["gaps"] == []
+    assert chain["seq_errors"] == []
+    assert chain["error"] is None
 
 
 async def test_refusals_and_detections_share_one_unbroken_chain(probe):
@@ -306,7 +312,14 @@ async def test_refusals_and_detections_share_one_unbroken_chain(probe):
     assert [r["action_taken"] for r in rows] == ["refuse", "pass", "refuse"]
     for receipt_id in ids:
         assert probe.require(receipt_id)["action_taken"] == "refuse"
-    assert probe.verify_chain() == {"ok": True, "verified": 3, "breaks": [], "error": None}
+    chain = probe.verify_chain()
+    assert chain["ok"] is True
+    assert chain["complete"] is True
+    assert chain["verified"] == 3
+    assert chain["breaks"] == []
+    assert chain["gaps"] == []
+    assert chain["seq_errors"] == []
+    assert chain["error"] is None
 
 
 async def test_baseline_four_hundred_refusals_now_leave_four_hundred_rows(probe):
@@ -405,8 +418,11 @@ async def test_a_real_filesystem_failure_does_not_change_the_decision(tmp_path, 
     assert resp.status == 400
     assert log.count == 0
     assert not (blocker / "audit.jsonl").exists()
-    # The loop swallowed the error and logged it — see the disclosed gap below.
-    assert any("failed to write record" in r.getMessage() for r in caplog.records)
+    # The loop swallowed the error and logged the degraded status. The detailed
+    # failure reason is intentionally kept off the log sink and exposed via
+    # chain_status(), where it has passed through diagnostic redaction.
+    assert any("audit hash chain is WRITE_FAILED" in r.getMessage() for r in caplog.records)
+    assert "could not be written" in writer.chain_status()["detail"]
 
     writer._running = False
     if writer._task:

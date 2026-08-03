@@ -45,6 +45,14 @@ class _RegistryClient:
         return None
 
 
+HEALTHY_AUDIT_CHAIN = {
+    "ok": True,
+    "status": "OK",
+    "detail": None,
+    "startup_blocked": False,
+}
+
+
 @pytest.fixture(autouse=True)
 def auth_floor_env(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", "admin-audit-auth-floor-secret-32chars!!")
@@ -59,6 +67,7 @@ def client():
     app.include_router(admin_router)
     app.include_router(audit_router)
     app.state.audit_writer = _Audit()
+    app.state.audit_chain = dict(HEALTHY_AUDIT_CHAIN)
     app.state.registry_client = _RegistryClient()
     return TestClient(app, raise_server_exceptions=False), app
 
@@ -132,6 +141,19 @@ def test_admin_json_endpoint_accepts_valid_jwt(client):
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_admin_health_without_audit_chain_is_not_reported_healthy(client):
+    test_client, app = client
+    del app.state.audit_chain
+
+    response = test_client.get("/admin/health", headers=_bearer())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert body["audit_chain"]["ok"] is False
+    assert body["audit_chain"]["status"] == "NOT_CHECKED"
 
 
 def test_admin_ui_redirects_without_valid_session_cookie(client):
