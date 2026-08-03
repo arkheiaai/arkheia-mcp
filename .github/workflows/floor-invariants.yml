@@ -110,7 +110,7 @@ jobs:
           COUNT="$(pytest tests \
             -o python_files="test_*_floor.py test_floor_*.py" \
             -p no:cacheprovider --collect-only -q 2>/dev/null | grep -c '::' || true)"
-          EXPECTED=358
+          EXPECTED=374
           if [ "$COUNT" -ne "$EXPECTED" ]; then
             echo "::error::floor discovery count changed (collected $COUNT, expected $EXPECTED). If intentional, update EXPECTED in this workflow in the same commit."
             exit 1

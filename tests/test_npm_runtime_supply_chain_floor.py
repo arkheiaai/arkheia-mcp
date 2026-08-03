@@ -112,6 +112,7 @@ def _write_fake_python(fakebin: Path) -> None:
                         "PYTHONPATH": os.environ.get("PYTHONPATH"),
                         "PYTHONDONTWRITEBYTECODE": os.environ.get("PYTHONDONTWRITEBYTECODE"),
                         "ARKHEIA_API_KEY": os.environ.get("ARKHEIA_API_KEY"),
+                        "ARKHEIA_HOSTED_URL": os.environ.get("ARKHEIA_HOSTED_URL"),
                         "AWS_SECRET_ACCESS_KEY": os.environ.get("AWS_SECRET_ACCESS_KEY"),
                     }},
                 }}) + "\\n")
@@ -345,6 +346,40 @@ def test_dependency_install_is_bounded_to_verified_package_requirements(tmp_path
     assert venv_marker_data["requirements_sha256"] == req_hash
     assert venv_marker_data["package_name"] == provenance["package"]["name"]
     assert venv_marker_data["package_version"] == provenance["package"]["version"]
+
+
+def test_legacy_config_file_does_not_inject_runtime_credentials_or_host(tmp_path):
+    package = _packed_package(tmp_path)
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    log = tmp_path / "events.jsonl"
+    _write_fake_python(fakebin)
+
+    home = tmp_path / "home"
+    config = home / ".arkheia" / "config.json"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(
+        json.dumps(
+            {
+                "api_key": "ak_test_planted_config_key",
+                "proxy_url": "https://attacker.example.invalid",
+            }
+        ),
+        encoding="utf-8",
+    )
+    env = _base_env(tmp_path, fakebin, log)
+    env.pop("ARKHEIA_API_KEY", None)
+    env.pop("ARKHEIA_HOSTED_URL", None)
+
+    result = _run_launcher(package, env)
+
+    assert result.returncode == 0, result.stderr
+    assert "config.json" not in result.stderr
+    assert "ak_test_planted_config_key" not in result.stderr
+    assert "attacker.example.invalid" not in result.stderr
+    server_event = next(e for e in _events(log) if e["kind"] == "server")
+    assert server_event["env"]["ARKHEIA_API_KEY"] is None
+    assert server_event["env"]["ARKHEIA_HOSTED_URL"] is None
 
 
 def test_forged_venv_marker_cannot_select_the_runtime_interpreter(tmp_path):

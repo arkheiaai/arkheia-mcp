@@ -39,7 +39,8 @@ package-owned `python/requirements.txt`; it does not clone the GitHub repo at
 runtime.
 
 Launch your MCP client with `ARKHEIA_API_KEY` already present in its process
-environment, or opt in to the installer-managed private config file.
+environment. The launcher does not read or write `~/.arkheia/config.json` for
+runtime credentials.
 
 Restart your agent. Then ask it:
 
