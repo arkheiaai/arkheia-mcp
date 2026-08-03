@@ -38,6 +38,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_REQUIRE_ENCRYPTED_PROFILES_ENV = "ARKHEIA_REQUIRE_ENCRYPTED_PROFILES"
+_ALLOW_PLAINTEXT_PROFILES_ENV = "ARKHEIA_ALLOW_PLAINTEXT_PROFILES"
+
+
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
 
 def _preconfigured_profile_key() -> Optional[bytes]:
     """
@@ -286,9 +293,22 @@ async def lifespan(app: FastAPI):
     #    went dark" — for a startup that then fetched the key and authenticated
     #    every surface. See _resolve_profile_key's docstring.
     # ----------------------------------------------------------------
+    # Hold onto the pre-key-load inventory result. The router will scan again,
+    # and an attacker-controlled profile directory can change between the two
+    # scans; seeing encrypted inventory at either point keeps plaintext under
+    # encrypted-profile custody.
+    encrypted_inventory_seen = any(profiles_dir.glob("*.yaml.enc"))
+    preconfigured_key = _preconfigured_profile_key()
     decryption_key, _key_receipt_status = await _resolve_profile_key(
-        audit_writer, profiles_dir, preconfigured_key=_preconfigured_profile_key(),
+        audit_writer, profiles_dir, preconfigured_key=preconfigured_key,
     )
+    encrypted_profile_policy = (
+        _truthy_env(_REQUIRE_ENCRYPTED_PROFILES_ENV)
+        or preconfigured_key is not None
+        or decryption_key is not None
+        or encrypted_inventory_seen
+    )
+    plaintext_development_mode = _truthy_env(_ALLOW_PLAINTEXT_PROFILES_ENV)
 
     # 2. Profile router -- loads all YAML profiles, ONCE, holding the key the
     #    step above concluded on.
@@ -301,6 +321,8 @@ async def lifespan(app: FastAPI):
         # receipt_deferred_ms so the gap between deciding and enqueueing is a
         # number a reader can see, not a claim they have to take on trust.
         audit_writer=audit_writer,
+        encrypted_profile_policy=encrypted_profile_policy,
+        plaintext_development_mode=plaintext_development_mode,
     )
     await profile_router.flush_decision_journal()
     logger.info("Loaded %d profiles from %s",

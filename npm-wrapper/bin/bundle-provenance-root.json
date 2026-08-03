@@ -7,5 +7,5 @@
   "entry_module": "mcp_server.server",
   "bundle_root": "python",
   "provenance_path": "python/.arkheia-bundle-provenance.json",
-  "provenance_sha256": "a67eed92d5c191a6055a8cb581bb043b9f2743e71951d8576744381d464b0644"
+  "provenance_sha256": "4e72adc67d73ca223cb0e4e1969ed5b5f73655669d25943bebf05fd0112fccaf"
 }

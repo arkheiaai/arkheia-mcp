@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import secrets
 from datetime import date, timedelta
 
@@ -51,7 +50,7 @@ from proxy.audit.decision_journal import (
     PROFILE_AUTH_MALFORMED,
     PROFILE_AUTH_NOT_YAML,
     PROFILE_AUTH_NO_MODEL_ID,
-    PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
+    PROFILE_AUTH_PLAINTEXT_REJECTED,
     PROFILE_AUTH_SKIPPED_NO_KEY,
     RECEIPT_ENQUEUED,
     RISK_LEVEL,
@@ -486,19 +485,27 @@ async def test_the_profile_auth_taxonomy_admits_its_own_members():
     assert record["outcome"] == PROFILE_AUTH_AUTHENTICATED
     assert record["ciphertext_sha256"] == hashlib.sha256(b"abc").hexdigest()
 
+    rejected = build_profile_auth_record(
+        outcome=PROFILE_AUTH_PLAINTEXT_REJECTED,
+        skipped_profile_names=["plain.yaml"],
+        plaintext_policy_state="encrypted_profile_inventory",
+    )
+    assert rejected["outcome"] == PROFILE_AUTH_PLAINTEXT_REJECTED
+    assert rejected["skipped_profile_names"] == ["plain.yaml"]
 
-async def test_plaintext_profiles_produce_no_authentication_rows(profiles, probe):
+
+async def test_plaintext_profiles_without_a_writer_keep_the_local_developer_path(profiles):
     """
-    Negative control for the whole file. A ``.yaml`` profile is not authenticated
-    by anything, so claiming an authentication verdict for one would be a false
-    positive that makes every other row less trustworthy.
+    Negative control for the whole file. Direct no-writer router use stays usable
+    for local unit/developer callers, but audited startup must mark plaintext
+    explicitly and receipt it.
     """
     (profiles / "plain.yaml").write_text(yaml.dump({"model": "plain", "version": "1"}))
 
-    router = await _build(profiles, probe, key=None)
+    router = ProfileRouter(str(profiles), decryption_key=None)
     assert router.loaded_count == 1
-    assert _rows(probe) == []
-    assert json.dumps(probe.rows()) == "[]"
+    assert router.get("plain") is not None
+    assert router.decision_journal.drain() == ([], 0)
 
 
 async def test_plaintext_profile_in_encrypted_dir_is_refused_and_receipted(
@@ -517,9 +524,11 @@ async def test_plaintext_profile_in_encrypted_dir_is_refused_and_receipted(
 
     assert router.loaded_count == 0
     assert router.get("victim") is None
-    plaintext_rows = _rows(probe, PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR)
+    plaintext_rows = _rows(probe, PROFILE_AUTH_PLAINTEXT_REJECTED)
     assert len(plaintext_rows) == 1
-    assert plaintext_rows[0]["profile_name"] == "attacker"
+    assert plaintext_rows[0]["profile_name"] is None
+    assert plaintext_rows[0]["skipped_profile_names"] == ["attacker.yaml"]
+    assert plaintext_rows[0]["plaintext_policy_state"] == "encrypted_profile_inventory"
     assert plaintext_rows[0]["ciphertext_sha256"] is None
     assert plaintext_rows[0]["key_id"] is None
     assert _rows(probe, PROFILE_AUTH_SKIPPED_NO_KEY)

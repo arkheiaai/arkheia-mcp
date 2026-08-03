@@ -298,7 +298,13 @@ def test_a_build_that_produced_no_binaries_aborts_before_deleting_the_sources(
     )
 
     key = "A" * 43 + "="  # 32 bytes once base64-decoded
-    rc = build_release.main(["--skip-compile", "--profile-key", key])
+    # The key goes through ARKHEIA_PROFILE_MASTER_KEY, not argv. This branch makes
+    # `--profile-key` a HARD REFUSAL -- a master key on the command line is visible in `ps`
+    # output and shell history to every user on the box -- so passing it that way makes
+    # main() return 1 at step 0 and this test never reaches the manifest behaviour it exists
+    # to pin. The subject here is what the manifest RECORDS; argv was only ever the plumbing.
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", key)
+    rc = build_release.main(["--skip-compile"])
 
     assert rc == 1, "a build that compiled nothing reported success"
 
@@ -341,7 +347,13 @@ def test_a_partly_compiled_build_names_the_modules_no_record_covers(
     )
 
     key = "A" * 43 + "="
-    rc = build_release.main(["--skip-compile", "--profile-key", key])
+    # The key goes through ARKHEIA_PROFILE_MASTER_KEY, not argv. This branch makes
+    # `--profile-key` a HARD REFUSAL -- a master key on the command line is visible in `ps`
+    # output and shell history to every user on the box -- so passing it that way makes
+    # main() return 1 at step 0 and this test never reaches the manifest behaviour it exists
+    # to pin. The subject here is what the manifest RECORDS; argv was only ever the plumbing.
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", key)
+    rc = build_release.main(["--skip-compile"])
     out = capsys.readouterr()
 
     assert rc == 1, "a build missing one module's binary reported success"
@@ -378,7 +390,13 @@ def test_the_abort_is_specific_not_a_blanket_failure(tmp_path, monkeypatch, caps
     )
 
     key = "A" * 43 + "="
-    rc = build_release.main(["--skip-compile", "--profile-key", key])
+    # The key goes through ARKHEIA_PROFILE_MASTER_KEY, not argv. This branch makes
+    # `--profile-key` a HARD REFUSAL -- a master key on the command line is visible in `ps`
+    # output and shell history to every user on the box -- so passing it that way makes
+    # main() return 1 at step 0 and this test never reaches the manifest behaviour it exists
+    # to pin. The subject here is what the manifest RECORDS; argv was only ever the plumbing.
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", key)
+    rc = build_release.main(["--skip-compile"])
     out = capsys.readouterr()
 
     assert rc == 0, out.err

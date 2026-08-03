@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.util
+import base64
 import json
 import secrets
 import shutil
@@ -21,6 +22,7 @@ else:
     setup_cython = None
 
 from scripts import build_release
+from scripts import encrypt_profiles
 from proxy.license.integrity import (
     MANIFEST_FILE,
     TamperDetected,
@@ -155,8 +157,9 @@ def test_build_release_main_refuses_unrecoverable_profile_before_source_removal(
         "encrypt_profile",
         lambda plaintext, master_key, profile_name: b"not-a-valid-aes-gcm-profile",
     )
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", release_key())
 
-    rc = build_release.main(["--skip-compile", "--profile-key", release_key()])
+    rc = build_release.main(["--skip-compile"])
     out = capsys.readouterr()
 
     assert rc == 1
@@ -179,6 +182,146 @@ def test_build_release_encrypt_step_refuses_a_zero_profile_release():
             build_release.step_encrypt_profiles(secrets.token_bytes(32), profiles_dir)
     finally:
         shutil.rmtree(case_dir, ignore_errors=True)
+
+
+def test_build_release_rejects_command_line_profile_key_without_echo():
+    secret = base64.b64encode(secrets.token_bytes(32)).decode()
+    with pytest.raises(ValueError) as exc:
+        build_release.resolve_profile_key(profile_key_cli=secret)
+
+    message = str(exc.value)
+    assert "command line" in message
+    assert secret not in message
+
+
+def test_build_release_main_rejects_command_line_profile_key_without_echo(capsys):
+    secret = base64.b64encode(secrets.token_bytes(32)).decode()
+
+    rc = build_release.main(["--profile-key", secret, "--skip-compile"])
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert rc == 1
+    assert "command line" in captured.err
+    assert secret not in rendered
+    assert "Traceback" not in rendered
+
+
+def test_build_release_fails_closed_without_profile_key(monkeypatch):
+    monkeypatch.delenv("ARKHEIA_PROFILE_MASTER_KEY", raising=False)
+
+    with pytest.raises(ValueError) as exc:
+        build_release.resolve_profile_key()
+
+    assert "Profile key missing" in str(exc.value)
+
+
+def test_build_release_main_fails_closed_without_profile_key(monkeypatch, capsys):
+    monkeypatch.delenv("ARKHEIA_PROFILE_MASTER_KEY", raising=False)
+
+    rc = build_release.main(["--skip-compile"])
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert rc == 1
+    assert "Profile key missing" in captured.err
+    assert "Traceback" not in rendered
+
+
+def test_build_release_reads_profile_key_file(tmp_path):
+    raw = secrets.token_bytes(32)
+    key_file = tmp_path / "profile-key"
+    key_file.write_text(base64.b64encode(raw).decode(), encoding="utf-8")
+
+    assert build_release.resolve_profile_key(profile_key_file=str(key_file)) == raw
+
+
+def test_build_release_missing_profile_key_file_is_clean_error(tmp_path, capsys):
+    missing = tmp_path / "missing-profile-key"
+
+    rc = build_release.main(["--skip-compile", "--profile-key-file", str(missing)])
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert rc == 1
+    assert "ERROR: Could not read profile key file." in captured.err
+    assert "Traceback" not in rendered
+    assert str(missing) not in rendered
+
+
+def test_encrypt_profiles_rejects_command_line_key_without_echo():
+    secret = base64.b64encode(secrets.token_bytes(32)).decode()
+    with pytest.raises(ValueError) as exc:
+        encrypt_profiles.resolve_master_key(key_cli=secret)
+
+    message = str(exc.value)
+    assert "command line" in message
+    assert secret not in message
+
+
+def test_encrypt_profiles_main_rejects_command_line_key_without_echo(tmp_path, capsys):
+    secret = base64.b64encode(secrets.token_bytes(32)).decode()
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+    (profiles_dir / "gpt-4o.yaml").write_text("model: gpt-4o\n", encoding="utf-8")
+
+    rc = encrypt_profiles.main(["--key", secret, "--profile-dir", str(profiles_dir)])
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert rc == 1
+    assert "command line" in captured.err
+    assert secret not in rendered
+    assert "Traceback" not in rendered
+    assert (profiles_dir / "gpt-4o.yaml").exists()
+    assert not (profiles_dir / "gpt-4o.yaml.enc").exists()
+
+
+def test_encrypt_profiles_fails_closed_without_profile_key(monkeypatch):
+    monkeypatch.delenv("ARKHEIA_PROFILE_MASTER_KEY", raising=False)
+
+    with pytest.raises(ValueError) as exc:
+        encrypt_profiles.resolve_master_key()
+
+    assert "Profile key missing" in str(exc.value)
+
+
+def test_encrypt_profiles_main_fails_closed_without_profile_key(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("ARKHEIA_PROFILE_MASTER_KEY", raising=False)
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+    (profiles_dir / "gpt-4o.yaml").write_text("model: gpt-4o\n", encoding="utf-8")
+
+    rc = encrypt_profiles.main(["--profile-dir", str(profiles_dir)])
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert rc == 1
+    assert "Profile key missing" in captured.err
+    assert "Traceback" not in rendered
+    assert (profiles_dir / "gpt-4o.yaml").exists()
+    assert not (profiles_dir / "gpt-4o.yaml.enc").exists()
+
+
+def test_encrypt_profiles_reads_profile_key_file(tmp_path):
+    raw = secrets.token_bytes(32)
+    key_file = tmp_path / "profile-key"
+    key_file.write_text(base64.b64encode(raw).decode(), encoding="utf-8")
+
+    assert encrypt_profiles.resolve_master_key(key_file=str(key_file)) == raw
+
+
+def test_encrypt_profiles_missing_key_file_is_clean_error(tmp_path, capsys):
+    missing = tmp_path / "missing-profile-key"
+
+    rc = encrypt_profiles.main(["--key-file", str(missing)])
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert rc == 1
+    assert "ERROR: Could not read profile key file." in captured.err
+    assert "Traceback" not in rendered
+    assert str(missing) not in rendered
 
 
 def test_build_release_manifest_step(capsys):
@@ -246,8 +389,9 @@ def test_build_release_refuses_manifest_dirs_with_zero_compiled_artifacts(
         monkeypatch.setattr(build_release, "COMPILED_MODULES", [
             "proxy/detection/features.py",
         ])
+        monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", release_key())
 
-        rc = build_release.main(["--skip-compile", "--profile-key", release_key()])
+        rc = build_release.main(["--skip-compile"])
 
         captured = capsys.readouterr()
         assert rc == 1
@@ -364,7 +508,13 @@ def test_build_with_no_binaries_aborts_before_deleting_sources(tmp_path, monkeyp
         ["proxy/detection/features.py", "proxy/detection/engine.py"],
     )
 
-    rc = build_release.main(["--skip-compile", "--profile-key", PROFILE_KEY])
+    # The key goes through ARKHEIA_PROFILE_MASTER_KEY, not argv. This branch makes
+    # `--profile-key` a HARD REFUSAL -- a master key on the command line is visible in `ps`
+    # output to every user on the box -- so passing it that way makes main() return 1 at
+    # step 0 and this test never reaches the manifest behaviour it exists to pin. The subject
+    # here is what the manifest RECORDS; argv was only ever the plumbing.
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", PROFILE_KEY)
+    rc = build_release.main(["--skip-compile"])
     out = capsys.readouterr()
 
     assert rc == 1
@@ -389,7 +539,13 @@ def test_partly_compiled_build_names_modules_no_record_covers(
         ["proxy/detection/features.py", "proxy/detection/engine.py"],
     )
 
-    rc = build_release.main(["--skip-compile", "--profile-key", PROFILE_KEY])
+    # The key goes through ARKHEIA_PROFILE_MASTER_KEY, not argv. This branch makes
+    # `--profile-key` a HARD REFUSAL -- a master key on the command line is visible in `ps`
+    # output to every user on the box -- so passing it that way makes main() return 1 at
+    # step 0 and this test never reaches the manifest behaviour it exists to pin. The subject
+    # here is what the manifest RECORDS; argv was only ever the plumbing.
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", PROFILE_KEY)
+    rc = build_release.main(["--skip-compile"])
     out = capsys.readouterr()
 
     assert rc == 1
@@ -414,7 +570,13 @@ def test_complete_compiled_build_records_every_module_then_removes_sources(
         ["proxy/detection/features.py", "proxy/detection/engine.py"],
     )
 
-    rc = build_release.main(["--skip-compile", "--profile-key", PROFILE_KEY])
+    # The key goes through ARKHEIA_PROFILE_MASTER_KEY, not argv. This branch makes
+    # `--profile-key` a HARD REFUSAL -- a master key on the command line is visible in `ps`
+    # output to every user on the box -- so passing it that way makes main() return 1 at
+    # step 0 and this test never reaches the manifest behaviour it exists to pin. The subject
+    # here is what the manifest RECORDS; argv was only ever the plumbing.
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", PROFILE_KEY)
+    rc = build_release.main(["--skip-compile"])
     out = capsys.readouterr()
 
     assert rc == 0, out.err

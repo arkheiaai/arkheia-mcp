@@ -176,7 +176,10 @@ def audit():
 @pytest.fixture
 def client(tmp_path, audit):
     """A REAL DetectionEngine over the REAL shipped profiles directory."""
-    with patch("proxy.main.settings") as s:
+    with (
+        patch.dict("os.environ", {"ARKHEIA_ALLOW_PLAINTEXT_PROFILES": "true"}),
+        patch("proxy.main.settings") as s,
+    ):
         s.detection.profile_dir = str(_REPO_ROOT / "profiles")
         # Real STRING policy values. A MagicMock here reaches the push payload as
         # `action_taken` and blows the push up — see

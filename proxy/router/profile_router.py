@@ -1,7 +1,11 @@
 """
 Multi-profile router with atomic reload, license enforcement, and encrypted profile support.
 
-Loads YAML profiles at startup. Supports both plaintext (.yaml) and encrypted (.yaml.enc) files.
+Loads YAML profiles at startup. Supports plaintext-only development directories
+and encrypted (.yaml.enc) release directories. If a directory contains encrypted
+profiles, plaintext siblings are refused unless explicitly opted in.
+If the router is placed in encrypted-profile policy, plaintext is refused even
+when no encrypted sibling remains on disk.
 Encrypted profiles require a decryption key fetched dynamically from the hosted endpoint.
 Reload is copy-and-swap -- zero dropped requests during update.
 
@@ -40,8 +44,15 @@ from proxy.audit.decision_journal import (
     PROFILE_AUTH_MALFORMED,
     PROFILE_AUTH_NOT_YAML,
     PROFILE_AUTH_NO_MODEL_ID,
+    PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
+    PROFILE_AUTH_PLAINTEXT_REJECTED,
     PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
     PROFILE_AUTH_SKIPPED_NO_KEY,
+    PLAINTEXT_POLICY_DEVELOPMENT,
+    PLAINTEXT_POLICY_ENCRYPTED_INVENTORY,
+    PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY,
+    PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY,
+    PLAINTEXT_POLICY_UNMARKED_PLAINTEXT_DIRECTORY,
     DecisionJournal,
     build_profile_auth_record,
     flush_journal,
@@ -240,7 +251,8 @@ class ProfileRouter:
     """
     Thread-safe (asyncio-safe) profile dispatch table.
 
-    Supports both plaintext (.yaml) and encrypted (.yaml.enc) profiles.
+    Supports plaintext-only (.yaml) development directories and encrypted
+    (.yaml.enc) release directories.
     Encrypted profiles require a decryption key (set via set_decryption_key).
 
     Lookup priority:
@@ -260,6 +272,8 @@ class ProfileRouter:
         require_license: Optional[bool] = None,
         allow_unsigned_license: Optional[bool] = None,
         allow_plaintext_profiles: Optional[bool] = None,
+        encrypted_profile_policy: Optional[bool] = None,
+        plaintext_development_mode: Optional[bool] = None,
     ):
         self._profiles: dict[str, dict] = {}
         self._lock = asyncio.Lock()
@@ -272,6 +286,17 @@ class ProfileRouter:
         # whether each encrypted profile authenticated, and before this change no
         # writer existed when it decided.
         self._audit_writer = audit_writer
+        # ``True`` means this installation is in encrypted-profile custody even
+        # if the encrypted files have been removed or renamed before this load.
+        self._encrypted_profile_policy = bool(encrypted_profile_policy)
+        # Audited plaintext loading must be explicitly marked. Direct, no-writer
+        # router use keeps the historical developer path; production startup
+        # passes the env-derived value explicitly.
+        self._plaintext_development_mode = (
+            audit_writer is None
+            if plaintext_development_mode is None
+            else bool(plaintext_development_mode)
+        )
         self.decision_journal = journal or DecisionJournal()
         self._license_key = (
             os.getenv("ARKHEIA_LICENSE_KEY", "") if license_key is None else license_key
@@ -346,8 +371,38 @@ class ProfileRouter:
         self._schedule_flush()
         return self.last_load_report
 
+    def _plaintext_policy_state(self, enc_files: list[Path]) -> str:
+        """
+        Explain why plaintext needs an explicit opt-in for this load.
+
+        The encrypted inventory is the weakest signal and deliberately last. A
+        directory listing is attacker-mutable; a configured policy or trusted key
+        remains true even if every ``*.yaml.enc`` has just been unlinked or
+        renamed.
+        """
+        if self._encrypted_profile_policy:
+            return PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY
+        if self._decryption_key is not None:
+            return PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY
+        if enc_files:
+            return PLAINTEXT_POLICY_ENCRYPTED_INVENTORY
+        if self._plaintext_development_mode:
+            return PLAINTEXT_POLICY_DEVELOPMENT
+        return PLAINTEXT_POLICY_UNMARKED_PLAINTEXT_DIRECTORY
+
+    @staticmethod
+    def _plaintext_requires_opt_in(policy_state: str) -> bool:
+        return policy_state != PLAINTEXT_POLICY_DEVELOPMENT
+
     def load_all(self) -> None:
-        """Load all YAML profiles from profile_dir. Supports .yaml and .yaml.enc."""
+        """Load all profiles from profile_dir.
+
+        Plaintext YAML is allowed in development plaintext posture. Once policy
+        or trust state says encrypted-profile custody is active, plaintext is
+        refused by default even if the encrypted files have been removed from the
+        directory. ``ARKHEIA_ALLOW_PLAINTEXT_PROFILES`` is an auditable migration
+        override, not a silent bypass.
+        """
         profiles: dict[str, dict] = {}
         report = ProfileLoadReport(key_present=self._decryption_key is not None)
         self.last_load_report = report
@@ -363,7 +418,17 @@ class ProfileRouter:
             if f.resolve().parent == path  # aikido-ignore
         ]
         report.encrypted_present = len(enc_files)
-        plaintext_blocked = bool(enc_files) and not self._allow_plaintext_profiles
+        plaintext_allowed = self._allow_plaintext_profiles
+        plaintext_policy_state = self._plaintext_policy_state(enc_files)
+        plaintext_requires_opt_in = self._plaintext_requires_opt_in(plaintext_policy_state)
+        refusing_plaintext = plaintext_requires_opt_in and not plaintext_allowed
+        receipting_development_opt_in = (
+            plaintext_policy_state == PLAINTEXT_POLICY_DEVELOPMENT
+            and plaintext_allowed
+            and self._audit_writer is not None
+        )
+        plaintext_candidate_names: list[str] = []
+        refused_plaintext_names: list[str] = []
 
         # Load plaintext .yaml profiles
         #
@@ -381,20 +446,17 @@ class ProfileRouter:
             if f.name == "schema.yaml":
                 continue
             report.plaintext_present += 1
-            if plaintext_blocked:
+            plaintext_candidate_names.append(f.name)
+            if refusing_plaintext:
                 logger.error(
-                    "Skipping plaintext profile %s because encrypted profiles are "
-                    "present in %s; set ARKHEIA_ALLOW_PLAINTEXT_PROFILES=true only "
-                    "for explicit local/dev mixed estates",
+                    "Skipping plaintext profile %s in governed profile directory %s "
+                    "(policy_state=%s); set ARKHEIA_ALLOW_PLAINTEXT_PROFILES=true "
+                    "only for an intentional migration or development window",
                     f.name,
                     path,
+                    plaintext_policy_state,
                 )
-                self._journal_auth(
-                    PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
-                    f.stem,
-                    b"",
-                    None,
-                )
+                refused_plaintext_names.append(f.name)
                 report.plaintext_rejected.append(f.name)
                 continue
             data = self._load_plaintext(f)
@@ -405,6 +467,38 @@ class ProfileRouter:
                     report.plaintext_loaded += 1
                     continue
             report.plaintext_rejected.append(f.name)
+
+        if refused_plaintext_names:
+            self.decision_journal.record(build_profile_auth_record(
+                outcome=PROFILE_AUTH_PLAINTEXT_REJECTED,
+                skipped_profile_names=refused_plaintext_names,
+                plaintext_policy_state=plaintext_policy_state,
+            ))
+        elif plaintext_allowed and plaintext_requires_opt_in and plaintext_candidate_names:
+            logger.warning(
+                "Plaintext profile loading explicitly enabled by "
+                "ARKHEIA_ALLOW_PLAINTEXT_PROFILES in %s (policy_state=%s).",
+                self.profile_dir,
+                plaintext_policy_state,
+            )
+            self.decision_journal.record(build_profile_auth_record(
+                outcome=PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
+                plaintext_profile_names=plaintext_candidate_names,
+                plaintext_opt_in_env="ARKHEIA_ALLOW_PLAINTEXT_PROFILES",
+                plaintext_policy_state=plaintext_policy_state,
+            ))
+        elif receipting_development_opt_in and plaintext_candidate_names:
+            logger.warning(
+                "Development plaintext profile loading explicitly enabled by "
+                "ARKHEIA_ALLOW_PLAINTEXT_PROFILES in %s.",
+                self.profile_dir,
+            )
+            self.decision_journal.record(build_profile_auth_record(
+                outcome=PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
+                plaintext_profile_names=plaintext_candidate_names,
+                plaintext_opt_in_env="ARKHEIA_ALLOW_PLAINTEXT_PROFILES",
+                plaintext_policy_state=plaintext_policy_state,
+            ))
 
         # Load encrypted .yaml.enc profiles (if decryption key available)
         if enc_files and not self._decryption_key:
