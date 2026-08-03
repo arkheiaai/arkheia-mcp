@@ -463,7 +463,7 @@ function sha256File(filePath) {
   if (stat.isSymbolicLink() || !stat.isFile()) {
     fail(`refusing to hash non-regular file ${resolved}`);
   }
-  return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
+  return crypto.createHash("sha256").update(readRegularFile(resolved, "file to hash")).digest("hex");
 }
 
 function requireDirectoryNoSymlink(dirPath, label) {
@@ -528,13 +528,32 @@ function requirePackageOrBundleFile(filePath, label) {
   return resolved;
 }
 
+function readRegularFile(resolved, label, encoding = null) {
+  const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0);
+  let fd;
+  try {
+    fd = fs.openSync(resolved, flags);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) {
+      fail(`${label} is not a regular file at ${resolved}`);
+    }
+    return fs.readFileSync(fd, encoding || undefined);
+  } catch (err) {
+    fail(`could not read ${label} at ${resolved}: ${err.message}`);
+  } finally {
+    if (fd !== undefined) {
+      fs.closeSync(fd);
+    }
+  }
+}
+
 function packageManifest() {
   const manifestPath = requirePackageOrBundleFile(
     path.join(PACKAGE_ROOT, "package.json"),
     "package manifest"
   );
   try {
-    return JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+    return JSON.parse(readRegularFile(manifestPath, "package manifest", "utf-8"));
   } catch (err) {
     fail(`could not read package manifest at ${manifestPath}: ${err.message}`);
   }
