@@ -20,6 +20,8 @@ set -euo pipefail
 RUNTIME_KEY_ENV="ARKHEIA""_API_KEY"
 # Do not leak runtime credentials to prerequisite or package-install subprocesses.
 unset "$RUNTIME_KEY_ENV"
+HOSTED_URL="${ARKHEIA_HOSTED_URL:-https://arkheia-proxy-production.up.railway.app}"
+VALIDATE_HOSTED_URL_ONLY=0
 DRY_RUN=0
 
 # ---------------------------------------------------------------------------
@@ -71,6 +73,7 @@ while [[ $# -gt 0 ]]; do
             DRY_RUN=1
             shift
             ;;
+        --validate-hosted-url-only) VALIDATE_HOSTED_URL_ONLY=1; shift ;;
         --help|-h)
             echo "Usage: curl -fsSL https://arkheia.ai/install-mcp | bash"
             echo ""
@@ -94,24 +97,26 @@ fi
 # ---------------------------------------------------------------------------
 info "Checking prerequisites..."
 
-# Node.js 18+
-if ! command -v node &>/dev/null; then
-    fail "Node.js is required but not found. Install from https://nodejs.org"
-fi
-NODE_VERSION_RAW=$(node -v)
-NODE_MAJOR=${NODE_VERSION_RAW#v}
-NODE_MAJOR=${NODE_MAJOR%%.*}
-if ! [[ "$NODE_MAJOR" =~ ^[0-9]+$ ]]; then
-    fail "Could not parse Node.js version: ${NODE_VERSION_RAW}"
-fi
-if [ "$NODE_MAJOR" -lt 18 ]; then
-    fail "Node.js 18+ required (found ${NODE_VERSION_RAW}). Update from https://nodejs.org"
-fi
-ok "Node.js ${NODE_VERSION_RAW}"
+if [ "$VALIDATE_HOSTED_URL_ONLY" -eq 0 ]; then
+    # Node.js 18+
+    if ! command -v node &>/dev/null; then
+        fail "Node.js is required but not found. Install from https://nodejs.org"
+    fi
+    NODE_VERSION_RAW=$(node -v)
+    NODE_MAJOR=${NODE_VERSION_RAW#v}
+    NODE_MAJOR=${NODE_MAJOR%%.*}
+    if ! [[ "$NODE_MAJOR" =~ ^[0-9]+$ ]]; then
+        fail "Could not parse Node.js version: ${NODE_VERSION_RAW}"
+    fi
+    if [ "$NODE_MAJOR" -lt 18 ]; then
+        fail "Node.js 18+ required (found ${NODE_VERSION_RAW}). Update from https://nodejs.org"
+    fi
+    ok "Node.js ${NODE_VERSION_RAW}"
 
-# npx
-if ! command -v npx &>/dev/null; then
-    fail "npx is required but not found. It should come with Node.js."
+    # npx
+    if ! command -v npx &>/dev/null; then
+        fail "npx is required but not found. It should come with Node.js."
+    fi
 fi
 
 # Python 3.10+
@@ -133,6 +138,131 @@ if [ -z "$PYTHON_CMD" ]; then
     fail "Python 3.10+ is required but not found. Install from https://python.org"
 fi
 ok "Python $($PYTHON_CMD --version 2>&1)"
+
+authorize_hosted_url() {
+    "$PYTHON_CMD" - "$HOSTED_URL" "${ARKHEIA_ALLOW_UNSAFE_HOSTED_URL:-}" <<'PY'
+import ipaddress
+import socket
+import sys
+from urllib.parse import urlsplit, urlunsplit
+
+DEFAULT = "https://arkheia-proxy-production.up.railway.app"
+TRUE_VALUES = {"1", "true", "yes", "on"}
+SELF_HOSTED_NETWORKS = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "169.254.0.0/16",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+    )
+)
+
+
+def fail(message):
+    print(message, file=sys.stderr)
+    raise SystemExit(2)
+
+
+def default_port(scheme):
+    return 80 if scheme == "http" else 443
+
+
+def resolve_host_addresses(host):
+    if host == "localhost" or host.endswith(".localhost"):
+        return (ipaddress.ip_address("127.0.0.1"),)
+    try:
+        return (ipaddress.ip_address(host),)
+    except ValueError:
+        pass
+
+    addresses = set()
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return ()
+
+    for _family, _socktype, _proto, _canonname, sockaddr in infos:
+        if not sockaddr:
+            continue
+        try:
+            addresses.add(ipaddress.ip_address(sockaddr[0]))
+        except ValueError:
+            continue
+    return tuple(addresses)
+
+
+def normalize_mapped(addr):
+    mapped = getattr(addr, "ipv4_mapped", None)
+    return mapped if mapped is not None else addr
+
+
+def loopback(host):
+    addresses = resolve_host_addresses(host)
+    return bool(addresses) and all(normalize_mapped(addr).is_loopback for addr in addresses)
+
+
+def self_hosted(host):
+    addresses = resolve_host_addresses(host)
+    return bool(addresses) and all(
+        any(normalize_mapped(addr) in network for network in SELF_HOSTED_NETWORKS)
+        for addr in addresses
+    )
+
+
+raw = (sys.argv[1] or DEFAULT).strip() or DEFAULT
+allow_unsafe = sys.argv[2].strip().lower() in TRUE_VALUES
+parsed = urlsplit(raw)
+scheme = parsed.scheme.lower()
+host = (parsed.hostname or "").lower()
+
+if scheme not in {"http", "https"} or not host:
+    fail("hosted URL must be an absolute http(s) URL")
+if parsed.username or parsed.password:
+    fail("hosted URL must not contain userinfo")
+if parsed.query or parsed.fragment:
+    fail("hosted URL must not contain query or fragment")
+try:
+    port = parsed.port
+except ValueError:
+    fail("hosted URL contains an invalid port")
+
+netloc = host
+if port is not None and port != default_port(scheme):
+    netloc = f"{netloc}:{port}"
+path = parsed.path.rstrip("/")
+base_url = urlunsplit((scheme, netloc, path, "", ""))
+origin = urlunsplit((scheme, netloc, "", "", ""))
+needs_self_hosted_check = not allow_unsafe and origin != DEFAULT
+is_self_hosted = self_hosted(host) if needs_self_hosted_check else False
+needs_loopback_check = not allow_unsafe and scheme != "https"
+is_loopback = loopback(host) if needs_loopback_check else False
+
+if not allow_unsafe and origin != DEFAULT and not is_self_hosted:
+    fail(
+        "hosted URL is not the approved Arkheia production authority; "
+        "set ARKHEIA_ALLOW_UNSAFE_HOSTED_URL=1 only for trusted custom endpoints"
+    )
+if not allow_unsafe and scheme != "https" and not is_loopback:
+    fail("hosted URL must use HTTPS unless it is loopback-local")
+
+print(base_url)
+PY
+}
+
+AUTHORIZED_HOSTED_URL=$(authorize_hosted_url) || fail "Refusing ARKHEIA_HOSTED_URL=${HOSTED_URL}"
+if [ "$VALIDATE_HOSTED_URL_ONLY" -eq 1 ]; then
+    echo "$AUTHORIZED_HOSTED_URL"
+    exit 0
+fi
+
+hosted_curl() {
+    curl --noproxy '*' "$@"
+}
 
 # ---------------------------------------------------------------------------
 # Install the npm package (this also sets up the Python venv on first run)

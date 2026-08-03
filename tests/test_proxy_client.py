@@ -352,6 +352,38 @@ class TestHostedFallback:
         assert result["source"] == "hosted"
 
     @pytest.mark.asyncio
+    async def test_hosted_fallback_receives_structural_usage_metadata(self, client_with_key):
+        """Local failure must not strand the zero-output signal before hosted scoring."""
+        client_with_key._local_available = False
+
+        hosted_response = MagicMock()
+        hosted_response.json.return_value = {
+            "risk": "LOW",
+            "confidence": 0.0,
+            "features_triggered": [],
+            "detection_id": "det_empty_hosted",
+            "detection_method": "empty_output_suppressed",
+            "evidence_depth_limited": True,
+        }
+        hosted_response.raise_for_status = MagicMock()
+
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock,
+                   return_value=hosted_response) as post:
+            await client_with_key.verify(
+                "prompt",
+                "",
+                "gpt-4o",
+                usage={"completion_tokens": 0},
+                output_tokens=0,
+                is_function_call=False,
+            )
+
+        payload = post.call_args.kwargs["json"]
+        assert payload["usage"] == {"completion_tokens": 0}
+        assert payload["output_tokens"] == 0
+        assert payload["is_function_call"] is False
+
+    @pytest.mark.asyncio
     async def test_hosted_auth_failure(self, client_with_key):
         """Hosted API returns 401 → auth error."""
         client_with_key._local_available = False
@@ -400,6 +432,48 @@ class TestAuditLog:
         assert len(result["events"]) == 1
 
     @pytest.mark.asyncio
+    async def test_audit_log_uses_proxy_auth_token_bearer_header(self, monkeypatch):
+        """Audit retrieval authenticates to the local Enterprise Proxy auth rail."""
+        monkeypatch.delenv("ARKHEIA_PROXY_AUTH_TOKEN", raising=False)
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"events": [], "summary": {}}
+        mock_response.raise_for_status = MagicMock()
+
+        client = ProxyClient(
+            base_url="http://localhost:8098",
+            api_key="ak_live_hosted_key_must_not_be_used_here",
+            proxy_auth_token="proxy-session-token",
+        )
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_response) as mock_get:
+            await client.get_audit_log(limit=25)
+
+        call_kwargs = mock_get.call_args.kwargs
+        assert call_kwargs["headers"] == {"Authorization": "Bearer proxy-session-token"}
+        assert call_kwargs["params"] == {"limit": 25}
+
+    @pytest.mark.asyncio
+    async def test_audit_log_does_not_reuse_hosted_api_key_as_proxy_auth(self, monkeypatch):
+        """Hosted API keys are not valid proxy JWTs and must not be leaked to /audit/log."""
+        monkeypatch.delenv("ARKHEIA_PROXY_AUTH_TOKEN", raising=False)
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {"events": [], "summary": {}}
+        mock_response.raise_for_status = MagicMock()
+
+        client = ProxyClient(
+            base_url="http://localhost:8098",
+            api_key="ak_live_hosted_key_must_stay_hosted_only",
+        )
+
+        with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=mock_response) as mock_get:
+            await client.get_audit_log()
+
+        call_kwargs = mock_get.call_args.kwargs
+        assert "headers" not in call_kwargs
+
+    @pytest.mark.asyncio
     async def test_audit_log_unavailable(self, client_with_key):
         async def mock_get(url, **kwargs):
             raise httpx.ConnectError("Connection refused")
@@ -409,6 +483,58 @@ class TestAuditLog:
 
         assert result["events"] == []
         assert result["error"] == "proxy_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_audit_log_auth_failure_returns_bounded_error(self, monkeypatch):
+        monkeypatch.delenv("ARKHEIA_PROXY_AUTH_TOKEN", raising=False)
+        response_401 = httpx.Response(
+            401,
+            request=httpx.Request("GET", "http://localhost:8098/audit/log"),
+        )
+
+        async def mock_get(url, **kwargs):
+            raise httpx.HTTPStatusError(
+                "Unauthorized",
+                request=response_401.request,
+                response=response_401,
+            )
+
+        client = ProxyClient(
+            base_url="http://localhost:8098",
+            proxy_auth_token="proxy-session-token",
+        )
+
+        with patch("httpx.AsyncClient.get", side_effect=mock_get):
+            result = await client.get_audit_log()
+
+        assert result["events"] == []
+        assert result["error"] == "proxy_auth_failed"
+
+
+class TestMCPServerAuditAuthWiring:
+    def test_server_passes_proxy_auth_token_env_to_proxy_client(self):
+        import ast
+        from pathlib import Path
+
+        server_path = Path(__file__).resolve().parents[1] / "mcp_server" / "server.py"
+        tree = ast.parse(server_path.read_text(encoding="utf-8"), str(server_path))
+        proxy_client_calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "ProxyClient"
+        ]
+
+        assert proxy_client_calls, "mcp_server.server no longer constructs ProxyClient"
+        assert any(
+            keyword.arg == "proxy_auth_token"
+            and isinstance(keyword.value, ast.Name)
+            and keyword.value.id == "ARKHEIA_PROXY_AUTH_TOKEN"
+            for call in proxy_client_calls
+            for keyword in call.keywords
+        ), (
+            "mcp_server.server must pass ARKHEIA_PROXY_AUTH_TOKEN into ProxyClient; "
+            "otherwise arkheia_audit_log still sends no auth in normal MCP use."
+        )
 
 
 class TestNeverRaises:

@@ -2,8 +2,13 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir fastapi uvicorn[standard] pyyaml httpx
+# Dependencies come from registry_server/requirements.txt so that a scanner can
+# read them and the pins match the sibling services. This previously COPYed the
+# ROOT requirements.txt and then installed a hardcoded inline list instead --
+# the copied file was never installed, so the image's real dependency set was a
+# Dockerfile literal invisible to pip-audit / Snyk / Aikido.
+COPY registry_server/requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY registry_server/ ./registry_server/
 COPY profiles/ ./profiles/

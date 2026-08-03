@@ -17,6 +17,7 @@
  *   ARKHEIA_API_KEY     — API key for hosted detection (required)
  *   ARKHEIA_PROXY_URL   — Local proxy URL (optional, for enterprise)
  *   ARKHEIA_HOSTED_URL  — Hosted API URL (default: https://arkheia-proxy-production.up.railway.app)
+ *   ARKHEIA_ALLOW_UNSAFE_HOSTED_URL — Set to 1 only for trusted public custom hosted URLs
  */
 
 const { spawn, execFileSync } = require("child_process");

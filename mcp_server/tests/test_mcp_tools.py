@@ -154,6 +154,33 @@ class TestProxyClientVerify:
             payload = mock_client.post.call_args.kwargs["json"]
             assert payload.get("session_id") == "session-xyz"
 
+    @pytest.mark.asyncio
+    async def test_verify_passes_structural_usage_metadata(self):
+        """Provider usage metadata reaches /detect/verify so output_tokens=0 is a live signal."""
+        with patch("httpx.AsyncClient") as mock_cls:
+            mock_client = AsyncMock()
+            mock_cls.return_value.__aenter__.return_value = mock_client
+            mock_resp = MagicMock()
+            mock_resp.json.return_value = {"risk_level": "LOW", "confidence": 0.0,
+                                           "features_triggered": [], "detection_id": "x"}
+            mock_resp.raise_for_status = MagicMock()
+            mock_client.post.return_value = mock_resp
+
+            client = ProxyClient("http://localhost:8099")
+            await client.verify(
+                "q",
+                "",
+                "gpt-4o",
+                usage={"completion_tokens": 0},
+                output_tokens=0,
+                is_function_call=True,
+            )
+
+            payload = mock_client.post.call_args.kwargs["json"]
+            assert payload["usage"] == {"completion_tokens": 0}
+            assert payload["output_tokens"] == 0
+            assert payload["is_function_call"] is True
+
 
 class TestProxyClientAuditLog:
 
@@ -228,6 +255,40 @@ class TestMCPToolBehaviour:
             mcp_server_module.proxy = original_proxy
 
     @pytest.mark.asyncio
+    async def test_arkheia_verify_tool_forwards_empty_output_metadata(self):
+        """Direct verify can prove a hard-empty output; it is not structurally text-only."""
+        from mcp_server import server as mcp_server_module
+
+        expected = {"risk_level": "LOW", "confidence": 0.0,
+                    "features_triggered": [], "detection_id": "uuid-test"}
+
+        original_proxy = mcp_server_module.proxy
+        mock_proxy = AsyncMock(spec=ProxyClient)
+        mock_proxy.verify.return_value = expected
+        mcp_server_module.proxy = mock_proxy
+
+        try:
+            result = await mcp_server_module.arkheia_verify(
+                prompt="test",
+                response="",
+                model="gpt-4o",
+                usage={"completion_tokens": 0},
+                output_tokens=0,
+                is_function_call=False,
+            )
+            assert result == expected
+            mock_proxy.verify.assert_called_once_with(
+                prompt="test",
+                response="",
+                model_id="gpt-4o",
+                usage={"completion_tokens": 0},
+                output_tokens=0,
+                is_function_call=False,
+            )
+        finally:
+            mcp_server_module.proxy = original_proxy
+
+    @pytest.mark.asyncio
     async def test_arkheia_verify_returns_unknown_on_proxy_failure(self):
         """CRITERION 7: Tool never raises -- UNKNOWN returned on proxy failure."""
         from mcp_server import server as mcp_server_module
@@ -265,6 +326,106 @@ class TestMCPToolBehaviour:
             await mcp_server_module.arkheia_audit_log(limit=9999)
             call_kwargs = mock_proxy.get_audit_log.call_args.kwargs
             assert call_kwargs["limit"] <= 500
+        finally:
+            mcp_server_module.proxy = original_proxy
+
+    @pytest.mark.parametrize(
+        "tool_name,provider_name,provider_result,expected_verify_kwargs",
+        [
+            (
+                "run_grok",
+                "call_grok",
+                {
+                    "response": "",
+                    "model": "grok-4-fast-non-reasoning",
+                    "prompt_hash": "hash",
+                    "usage": {"completion_tokens": 0},
+                    "error": None,
+                },
+                {
+                    "model_id": "grok-4-fast-non-reasoning",
+                    "usage": {"completion_tokens": 0},
+                },
+            ),
+            (
+                "run_gemini",
+                "call_gemini",
+                {
+                    "response": "",
+                    "model": "gemini-2.5-flash",
+                    "prompt_hash": "hash",
+                    "usage": {"candidatesTokenCount": 0},
+                    "error": None,
+                },
+                {
+                    "model_id": "gemini-2.5-flash",
+                    "usage": {"candidatesTokenCount": 0},
+                },
+            ),
+            (
+                "run_ollama",
+                "call_ollama",
+                {
+                    "response": "",
+                    "model": "phi4:14b",
+                    "prompt_hash": "hash",
+                    "eval_count": 0,
+                    "error": None,
+                },
+                {
+                    "model_id": "phi4:14b",
+                    "output_tokens": 0,
+                },
+            ),
+            (
+                "run_together",
+                "call_together",
+                {
+                    "response": "",
+                    "model": "moonshotai/Kimi-K2.5",
+                    "prompt_hash": "hash",
+                    "usage": {"completion_tokens": 0},
+                    "error": None,
+                },
+                {
+                    "model_id": "moonshotai/Kimi-K2.5",
+                    "usage": {"completion_tokens": 0},
+                },
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_provider_wrapper_forwards_output_metadata_to_screening(
+        self,
+        tool_name,
+        provider_name,
+        provider_result,
+        expected_verify_kwargs,
+    ):
+        """Provider wrappers must forward their native zero-output metadata to F7 screening."""
+        from mcp_server import server as mcp_server_module
+
+        original_proxy = mcp_server_module.proxy
+        mock_proxy = AsyncMock(spec=ProxyClient)
+        mock_proxy.verify.return_value = {"risk_level": "LOW", "confidence": 0.0,
+                                          "features_triggered": [], "detection_id": "uuid-test"}
+        mcp_server_module.proxy = mock_proxy
+
+        try:
+            with patch.object(mcp_server_module, "check", lambda _tool: None), \
+                 patch.object(
+                     mcp_server_module,
+                     provider_name,
+                     AsyncMock(return_value=provider_result),
+                 ):
+                result = await getattr(mcp_server_module, tool_name)("prompt")
+
+            assert result["arkheia"]["risk_level"] == "LOW"
+            mock_proxy.verify.assert_called_once_with(
+                prompt="prompt",
+                response="",
+                **expected_verify_kwargs,
+            )
         finally:
             mcp_server_module.proxy = original_proxy
 
@@ -418,7 +579,25 @@ class TestMemoryTools:
 
     @pytest.mark.asyncio
     async def test_retrieve_limit_capped_at_50(self):
-        """memory_retrieve: limit is capped at 50 in server.py."""
+        """
+        memory_retrieve: limit is capped at 50 in server.py.
+
+        PERMISSIVE ASSERTION REPLACED (2026-07-26). This test previously read:
+
+            result = await mcp_server_module.memory_retrieve(query="anything", limit=9999)
+            assert "entities" in result
+            assert "total" in result
+
+        against an EMPTY graph. Both assertions hold for any implementation that returns
+        a dict with those two keys — including one with no cap at all — so the cap it is
+        named for was never observed, and no mutation of the cap could have failed it.
+        It was nevertheless cited as the covering evidence for this flow's `floor` and
+        `enforced` axes. It now stores 55 entities and pins the returned count exactly:
+        uncapped returns 55, capped returns 50.
+
+        The wider version of this invariant, plus the limit/total split, lives in
+        mcp_server/tests/test_memory_knowledge_graph.py::TestRetrieveLimit.
+        """
         from mcp_server import server as mcp_server_module
 
         for i in range(55):

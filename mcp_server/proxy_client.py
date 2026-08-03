@@ -10,14 +10,22 @@ Failures surface as UNKNOWN risk with error field set.
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 import httpx
+
+from arkheia_common.egress import egress_async_client
+from arkheia_common.hosted_authority import (
+    DEFAULT_HOSTED_API_URL,
+    HostedAuthorityError,
+    authorize_hosted_base_url,
+    hosted_key_egress_client,
+)
 
 logger = logging.getLogger(__name__)
 
 # Hosted API defaults
-HOSTED_API_URL = "https://arkheia-proxy-production.up.railway.app"
+HOSTED_API_URL = DEFAULT_HOSTED_API_URL
 
 _LOCAL_TRANSPORT_ERRORS = frozenset({
     "proxy_unavailable",
@@ -47,12 +55,20 @@ class ProxyClient:
         timeout: float = 10.0,
         hosted_url: Optional[str] = None,
         api_key: Optional[str] = None,
+        proxy_auth_token: Optional[str] = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.hosted_url = (hosted_url or HOSTED_API_URL).rstrip("/")
         self.api_key = api_key or os.environ.get("ARKHEIA_API_KEY")
+        self.proxy_auth_token = proxy_auth_token or os.environ.get("ARKHEIA_PROXY_AUTH_TOKEN")
         self._local_available = True  # optimistic; flips on ConnectError
+
+    def _proxy_auth_headers(self) -> dict[str, str]:
+        """Headers for Enterprise Proxy endpoints protected by proxy.auth.require_auth."""
+        if not self.proxy_auth_token:
+            return {}
+        return {"Authorization": f"Bearer {self.proxy_auth_token}"}
 
     async def verify(
         self,
@@ -60,6 +76,9 @@ class ProxyClient:
         response: str,
         model_id: str,
         session_id: Optional[str] = None,
+        usage: Optional[dict[str, Any]] = None,
+        output_tokens: Any = None,
+        is_function_call: Any = None,
     ) -> dict:
         """
         Detect fabrication in a model response.
@@ -78,7 +97,15 @@ class ProxyClient:
         # Try local proxy first (if last attempt didn't fail with ConnectError)
         if self._local_available:
             attempted_sources.append("local")
-            local_result = await self._verify_local(prompt, response, model_id, session_id)
+            local_result = await self._verify_local(
+                prompt,
+                response,
+                model_id,
+                session_id,
+                usage=usage,
+                output_tokens=output_tokens,
+                is_function_call=is_function_call,
+            )
             local_error = local_result.get("error")
             if local_error:
                 route_errors.append(local_error)
@@ -115,7 +142,14 @@ class ProxyClient:
         # Fallback: hosted API
         if self.api_key:
             attempted_sources.append("hosted")
-            hosted_result = await self._verify_hosted(prompt, response, model_id)
+            hosted_result = await self._verify_hosted(
+                prompt,
+                response,
+                model_id,
+                usage=usage,
+                output_tokens=output_tokens,
+                is_function_call=is_function_call,
+            )
             hosted_error = hosted_result.get("error")
             if hosted_error:
                 route_errors.append(hosted_error)
@@ -211,6 +245,9 @@ class ProxyClient:
         response: str,
         model_id: str,
         session_id: Optional[str] = None,
+        usage: Optional[dict[str, Any]] = None,
+        output_tokens: Any = None,
+        is_function_call: Any = None,
     ) -> dict:
         """POST /detect/verify on local Enterprise Proxy."""
         payload = {
@@ -220,9 +257,15 @@ class ProxyClient:
         }
         if session_id:
             payload["session_id"] = session_id
+        if usage is not None:
+            payload["usage"] = usage
+        if output_tokens is not None:
+            payload["output_tokens"] = output_tokens
+        if is_function_call is not None:
+            payload["is_function_call"] = is_function_call
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with egress_async_client(timeout=self.timeout) as client:
                 resp = await client.post(
                     f"{self.base_url}/detect/verify",
                     json=payload,
@@ -264,6 +307,9 @@ class ProxyClient:
         prompt: str,
         response: str,
         model_id: str,
+        usage: Optional[dict[str, Any]] = None,
+        output_tokens: Any = None,
+        is_function_call: Any = None,
     ) -> dict:
         """POST /v1/detect on hosted Arkheia API (arkheia-proxy-production.up.railway.app)."""
         payload = {
@@ -271,12 +317,19 @@ class ProxyClient:
             "response": response,
             "prompt": prompt,
         }
-        headers = {"X-Arkheia-Key": self.api_key}
+        if usage is not None:
+            payload["usage"] = usage
+        if output_tokens is not None:
+            payload["output_tokens"] = output_tokens
+        if is_function_call is not None:
+            payload["is_function_call"] = is_function_call
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            authorized = authorize_hosted_base_url(self.hosted_url)
+            headers = {"X-Arkheia-Key": self.api_key}
+            async with hosted_key_egress_client(timeout=self.timeout) as client:
                 resp = await client.post(
-                    f"{self.hosted_url}/v1/detect",
+                    f"{authorized.base_url}/v1/detect",
                     json=payload,
                     headers=headers,
                 )
@@ -293,6 +346,9 @@ class ProxyClient:
                     source="hosted",
                     error=data.get("error"),
                 )
+        except HostedAuthorityError as e:
+            logger.error("ProxyClient: hosted API authority rejected: %s", e)
+            return _unavailable("hosted_authority_rejected")
         except httpx.TimeoutException:
             logger.warning("ProxyClient: hosted /v1/detect timed out for model=%s", model_id)
             return _unavailable("hosted_timeout")
@@ -329,10 +385,14 @@ class ProxyClient:
             params["session_id"] = session_id
 
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with egress_async_client(timeout=self.timeout) as client:
+                kwargs: dict = {"params": params}
+                headers = self._proxy_auth_headers()
+                if headers:
+                    kwargs["headers"] = headers
                 resp = await client.get(
                     f"{self.base_url}/audit/log",
-                    params=params,
+                    **kwargs,
                 )
                 resp.raise_for_status()
                 return resp.json()
@@ -342,6 +402,13 @@ class ProxyClient:
         except httpx.ConnectError:
             logger.warning("ProxyClient: cannot connect to proxy at %s", self.base_url)
             return _empty_log("proxy_unavailable")
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            if status in (401, 403):
+                logger.warning("ProxyClient: /audit/log authentication failed with status %d", status)
+                return _empty_log("proxy_auth_failed")
+            logger.error("ProxyClient: /audit/log HTTP error status=%d", status)
+            return _empty_log(f"proxy_http_error_{status}")
         except Exception as e:
             logger.error("ProxyClient: /audit/log unexpected error: %s", e)
             return _empty_log("proxy_error")
