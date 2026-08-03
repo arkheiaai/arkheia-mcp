@@ -81,11 +81,11 @@ SKIP_DIRS = {
 # KNOWN LIMITATIONS: this is what keeps filesystem paths out of the results.
 URL_HINTS = ("url", "uri", "endpoint", "host", "upstream", "addr", "base")
 
-# The canonical composer/normaliser. A base produced by either is normalised by
+# The canonical composer/normaliser. A base produced by any of these is normalised by
 # construction — this is the "reuse the canonical primitive" path (DONE.md Gate 2
 # registry check), and naming them here is what makes reuse cheaper than a
 # hand-rolled `.rstrip`.
-CANONICAL = ("normalise_base_url", "adapter_target")
+CANONICAL = ("normalise_base_url", "adapter_target", "_local_ollama_base_url")
 
 # Sites whose base cannot be resolved inside its own module AND which have been
 # reviewed by a human. Empty is the goal state; an entry is a promise, not a pass.
@@ -117,6 +117,12 @@ REVIEWED_UNRESOLVED: dict[str, str] = {
     # anywhere in its lineage.
     "proxy/tests/test_egress_proxy_runtime.py::url":
         "f\"{target_server.url}/...\"; _Server.url is a @property returning "
+        "f\"http://{host}:{port}\" from a live socket address, never an env read",
+    # Same blind spot 2, same construct, second copy: PR #65 added a repo-root
+    # tests/test_egress_proxy_runtime.py whose _Server.url is likewise a
+    # @property returning f"http://{host}:{port}" off a bound socket.
+    "tests/test_egress_proxy_runtime.py::url":
+        "f\"{target.url}/...\"; _Server.url is a @property returning "
         "f\"http://{host}:{port}\" from a live socket address, never an env read",
     # Blind spot 1 again, one hop through a frozen dataclass field rather than a
     # helper: `candidate = f"{provider.base}/{path}"` in `_resolve_upstream`.

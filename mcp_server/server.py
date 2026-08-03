@@ -39,6 +39,7 @@ from mcp_server.tool_registry import (
     check,
     check_receipted,
     PolicyViolation,
+    require_network_egress,
 )
 from mcp_server.tools.providers import call_grok, call_gemini, call_ollama, call_together
 from mcp_server.tools.memory import store_entity, retrieve_entities, store_relation
@@ -50,6 +51,7 @@ logger = logging.getLogger(__name__)
 ARKHEIA_PROXY_URL = os.environ.get("ARKHEIA_PROXY_URL", "http://localhost:8098")
 ARKHEIA_HOSTED_URL = os.environ.get("ARKHEIA_HOSTED_URL", "https://arkheia-proxy-production.up.railway.app")
 ARKHEIA_API_KEY = os.environ.get("ARKHEIA_API_KEY")
+ARKHEIA_PROXY_AUTH_TOKEN = os.environ.get("ARKHEIA_PROXY_AUTH_TOKEN")
 
 TOOL_GATE_RECEIPT_META_KEY = "arkheia_tool_gate_receipt"
 
@@ -107,6 +109,7 @@ proxy = ProxyClient(
     base_url=ARKHEIA_PROXY_URL,
     hosted_url=ARKHEIA_HOSTED_URL,
     api_key=ARKHEIA_API_KEY,
+    proxy_auth_token=ARKHEIA_PROXY_AUTH_TOKEN,
 )
 
 
@@ -291,7 +294,8 @@ async def run_grok(
                             which means the request itself was bad.
     """
     try:
-        check("run_grok")
+        policy = check("run_grok")
+        require_network_egress(policy, provider="xai")
     except PolicyViolation as e:
         return {"error": str(e), "risk_level": "UNKNOWN"}
 
@@ -340,7 +344,8 @@ async def run_gemini(
         error:        Set if provider call failed
     """
     try:
-        check("run_gemini")
+        policy = check("run_gemini")
+        require_network_egress(policy, provider="google")
     except PolicyViolation as e:
         return {"error": str(e), "risk_level": "UNKNOWN"}
 
@@ -446,7 +451,8 @@ async def run_together(
     before producing output. max_tokens is set to 2048 automatically.
     """
     try:
-        check("run_together")
+        policy = check("run_together")
+        require_network_egress(policy, provider="together")
     except PolicyViolation as e:
         return {"error": str(e), "risk_level": "UNKNOWN"}
 

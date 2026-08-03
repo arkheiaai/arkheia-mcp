@@ -373,6 +373,20 @@ MUTANTS: list[Mutant] = [
                    "        profile_router.set_decryption_key(decryption_key)\n"
                    "        await profile_router.flush_decision_journal()\n"
                    '    logger.info("Loaded %d profiles from %s",'),)),
+
+    # -- plaintext custody (Claude PARTIAL blockers on PR #63) --------------
+    Mutant("M54", ROUTER, "plaintext refusal is keyed only to glob('*.yaml.enc') again",
+           "        plaintext_policy_state = self._plaintext_policy_state(enc_files)\n"
+           "        plaintext_requires_opt_in = self._plaintext_requires_opt_in(plaintext_policy_state)\n"
+           "        refusing_plaintext = plaintext_requires_opt_in and not plaintext_allowed",
+           "        plaintext_policy_state = self._plaintext_policy_state(enc_files)\n"
+           "        plaintext_requires_opt_in = bool(enc_files)\n"
+           "        refusing_plaintext = plaintext_requires_opt_in and not plaintext_allowed",
+           "plaintext_custody"),
+    Mutant("M55", ROUTER, "explicit plaintext opt-in is not receipted",
+           "        elif plaintext_allowed and plaintext_requires_opt_in and plaintext_candidate_names:",
+           "        elif False and plaintext_allowed and plaintext_requires_opt_in and plaintext_candidate_names:",
+           "plaintext_custody"),
 ]
 
 

@@ -50,12 +50,21 @@ import respx
 
 from mcp_server import server as server_module
 from mcp_server.screening import annotate_screening, is_screened, unscreened_warning
+from mcp_server.tools import providers
 
 XAI_URL = "https://api.x.ai/v1/chat/completions"
 GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta"
     "/models/gemini-2.5-flash:generateContent"
 )
+
+
+def _use_provider_key(monkeypatch, provider: str, key: str) -> None:
+    monkeypatch.setattr(
+        providers,
+        "provider_api_key",
+        lambda requested: key if requested == provider else "",
+    )
 
 # The EXACT body /detect/verify returns for the fleet default, measured against the real
 # engine + real profiles/ dir on 2026-07-26 (see module docstring). Not a paraphrase.
@@ -141,7 +150,7 @@ class TestTheCallerIsToldItWasNotScreened:
     @respx.mock
     @pytest.mark.asyncio
     async def test_run_grok_on_its_default_says_NOT_SCREENED_at_the_top_level(self, monkeypatch):
-        monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+        _use_provider_key(monkeypatch, "xai", "xai-test-key")
         respx.post(XAI_URL).mock(
             return_value=httpx.Response(
                 200,
@@ -177,7 +186,7 @@ class TestTheCallerIsToldItWasNotScreened:
         `arkheia_screened = False` would pass that test and be a worse defect than the one
         being fixed: a permanent warning is ignored within a day.
         """
-        monkeypatch.setenv("GOOGLE_API_KEY", "google-test-key")
+        _use_provider_key(monkeypatch, "google", "google-test-key")
         respx.post(GEMINI_URL).mock(
             return_value=httpx.Response(
                 200,

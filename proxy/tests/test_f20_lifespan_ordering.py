@@ -44,9 +44,14 @@ from proxy.audit.decision_journal import (
     KEY_LOAD_FETCHED_HOSTED,
     KEY_LOAD_NO_API_KEY,
     KEY_LOAD_NO_ENCRYPTED_PROFILES,
+    KEY_LOAD_UNAVAILABLE,
     PROFILE_AUTH_AUTHENTICATED,
+    PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
     PROFILE_AUTH_FAILED,
+    PROFILE_AUTH_PLAINTEXT_REJECTED,
     PROFILE_AUTH_SKIPPED_NO_KEY,
+    PLAINTEXT_POLICY_DEVELOPMENT,
+    PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY,
 )
 from proxy.crypto.profile_crypto import encrypt_profile
 from proxy.tests._receipt_probe import ReceiptProbe, assert_decision_identity
@@ -99,25 +104,101 @@ def _seal(profiles, name: str, key: bytes) -> bytes:
     return blob
 
 
-def test_a_real_boot_with_no_encrypted_profiles_still_records_its_key_posture(
+def test_a_real_boot_with_explicit_plaintext_development_records_the_opt_in(
     booted, tmp_path, monkeypatch
 ):
     """
-    The production branch. 0 of 60 profiles in this repo are encrypted, so this
-    is what a real proxy actually does at startup — and it now says so on the
-    rail instead of saying nothing at all.
+    The legitimate development branch is explicit and visible on the rail. A
+    plaintext-only directory must not be byte-identical to an attacker plant that
+    got every encrypted file unlinked before the router loaded.
     """
     profiles = tmp_path / "profiles"
     profiles.mkdir()
     (profiles / "plain.yaml").write_text(yaml.dump({"model": "plain", "version": "1"}))
+    monkeypatch.setenv("ARKHEIA_ALLOW_PLAINTEXT_PROFILES", "true")
 
     probe = booted(profiles)
     rows = [r for r in probe.rows() if r["event_type"] == EVENT_KEY_LOAD]
     assert len(rows) == 1
     assert rows[0]["outcome"] == KEY_LOAD_NO_ENCRYPTED_PROFILES
     assert rows[0]["receipt_status"] == "enqueued"
-    # No authentication verdicts, because nothing was authenticated.
-    assert [r for r in probe.rows() if r["event_type"] == EVENT_PROFILE_AUTH] == []
+
+    auth_rows = [r for r in probe.rows() if r["event_type"] == EVENT_PROFILE_AUTH]
+    assert len(auth_rows) == 1
+    assert auth_rows[0]["outcome"] == PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN
+    assert auth_rows[0]["plaintext_profile_names"] == ["plain.yaml"]
+    assert auth_rows[0]["plaintext_policy_state"] == PLAINTEXT_POLICY_DEVELOPMENT
+
+
+def test_a_real_boot_rejects_unmarked_plaintext_when_key_fetch_outage_unlinks_enc(
+    booted, key_server, tmp_path, monkeypatch
+):
+    """
+    Residual from PR #63: key loading observes encrypted inventory, returns no
+    key, and the encrypted file is renamed before the router scans. Without
+    carrying the earlier custody signal forward, the planted plaintext loads like
+    a healthy dev directory and leaves no profile-auth receipt.
+    """
+    from proxy.crypto.profile_crypto import DynamicKeyLoader
+
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    _seal(profiles, "legit", _key())
+
+    def unlink_before_no_key(_self):
+        (profiles / "legit.yaml.enc").rename(profiles / "legit.yaml.enc.bak")
+        (profiles / "attacker.yaml").write_text(
+            yaml.dump({"model": "attacker-model", "version": "1"}),
+            encoding="utf-8",
+        )
+        return None
+
+    key_server.fail(503)
+    monkeypatch.setenv("ARKHEIA_API_KEY", "an-api-key")
+    monkeypatch.setenv("ARKHEIA_HOSTED_URL", key_server.url)
+    monkeypatch.delenv("ARKHEIA_REQUIRE_ENCRYPTED_PROFILES", raising=False)
+    monkeypatch.delenv("ARKHEIA_ALLOW_PLAINTEXT_PROFILES", raising=False)
+    monkeypatch.setattr(DynamicKeyLoader, "_load_cache", unlink_before_no_key)
+
+    probe = booted(profiles)
+
+    key_rows = [r for r in probe.rows() if r["event_type"] == EVENT_KEY_LOAD]
+    assert [r["outcome"] for r in key_rows] == [KEY_LOAD_UNAVAILABLE]
+
+    auth_rows = [r for r in probe.rows() if r["event_type"] == EVENT_PROFILE_AUTH]
+    assert len(auth_rows) == 1
+    assert auth_rows[0]["outcome"] == PROFILE_AUTH_PLAINTEXT_REJECTED
+    assert auth_rows[0]["skipped_profile_names"] == ["attacker.yaml"]
+    assert auth_rows[0]["plaintext_policy_state"] == PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY
+
+
+def test_a_real_boot_with_encrypted_profile_policy_refuses_plaintext_without_enc_files(
+    booted, tmp_path, monkeypatch
+):
+    """
+    Cold-start deletion/rename case: if policy says this install is in encrypted
+    custody, a plaintext plant must not load just because ``*.yaml.enc`` is now
+    absent from the directory scan.
+    """
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    (profiles / "attacker.yaml").write_text(
+        yaml.dump({"model": "attacker-model", "version": "1"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ARKHEIA_REQUIRE_ENCRYPTED_PROFILES", "true")
+
+    probe = booted(profiles)
+
+    key_rows = [r for r in probe.rows() if r["event_type"] == EVENT_KEY_LOAD]
+    assert len(key_rows) == 1
+    assert key_rows[0]["outcome"] == KEY_LOAD_NO_ENCRYPTED_PROFILES
+
+    auth_rows = [r for r in probe.rows() if r["event_type"] == EVENT_PROFILE_AUTH]
+    assert len(auth_rows) == 1
+    assert auth_rows[0]["outcome"] == PROFILE_AUTH_PLAINTEXT_REJECTED
+    assert auth_rows[0]["skipped_profile_names"] == ["attacker.yaml"]
+    assert auth_rows[0]["plaintext_policy_state"] == PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY
 
 
 def test_a_real_boot_records_the_profile_authentication_verdicts(

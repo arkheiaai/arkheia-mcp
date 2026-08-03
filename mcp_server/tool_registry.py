@@ -288,6 +288,21 @@ def check(tool_name: object, *, human_confirmed: bool = False) -> ToolPolicy:
     return policy
 
 
+def require_network_egress(policy: ToolPolicy, *, provider: str) -> None:
+    """
+    Fail closed before a tool uses a cloud provider transport.
+
+    ``network_egress`` is deliberately evaluated at the egress boundary instead
+    of inside ``check()`` because local tools such as ``run_ollama`` are allowed
+    to execute without Internet egress.
+    """
+    if not policy.network_egress:
+        raise PolicyViolation(
+            policy.name,
+            f"network egress to {provider} is disabled by policy",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Receipted policy gate
 # ---------------------------------------------------------------------------

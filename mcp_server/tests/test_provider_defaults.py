@@ -65,6 +65,14 @@ from mcp_server.tools.providers import (
 XAI_URL = "https://api.x.ai/v1/chat/completions"
 TOGETHER_URL = "https://api.together.xyz/v1/chat/completions"
 
+
+def _use_provider_key(monkeypatch, provider: str, key: str) -> None:
+    monkeypatch.setattr(
+        providers,
+        "provider_api_key",
+        lambda requested: key if requested == provider else "",
+    )
+
 # The exact bodies observed from the live APIs — not paraphrases.
 XAI_BAD_KEY_BODY = {
     "code": "invalid-argument",
@@ -207,7 +215,7 @@ class TestWrappersReportAuthFailure:
     @respx.mock
     @pytest.mark.asyncio
     async def test_grok_reports_auth_failed_on_the_observed_xai_body(self, monkeypatch):
-        monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+        _use_provider_key(monkeypatch, "xai", "xai-test-key")
         respx.post(XAI_URL).mock(
             return_value=httpx.Response(400, json=XAI_BAD_KEY_BODY)
         )
@@ -221,7 +229,7 @@ class TestWrappersReportAuthFailure:
     @pytest.mark.asyncio
     async def test_grok_still_reports_http_400_for_a_genuine_bad_request(self, monkeypatch):
         """Positive control paired with the test above, through the same code path."""
-        monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+        _use_provider_key(monkeypatch, "xai", "xai-test-key")
         respx.post(XAI_URL).mock(
             return_value=httpx.Response(
                 400, json={"code": "invalid-argument", "error": "Model xyz does not exist"}
@@ -241,7 +249,7 @@ class TestWrappersReportAuthFailure:
         400 for an invalid key instead of 401 — the reason a dead Gemini key and a dead grok
         model id presented identically.
         """
-        monkeypatch.setenv("GOOGLE_API_KEY", "not-a-real-key")
+        _use_provider_key(monkeypatch, "google", "not-a-real-key")
         respx.post(
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
         ).mock(return_value=httpx.Response(400, json=GOOGLE_BAD_KEY_BODY))
@@ -253,7 +261,7 @@ class TestWrappersReportAuthFailure:
     @respx.mock
     @pytest.mark.asyncio
     async def test_together_reports_auth_failed_on_401(self, monkeypatch):
-        monkeypatch.setenv("TOGETHER_API_KEY", "not-a-real-key")
+        _use_provider_key(monkeypatch, "together", "not-a-real-key")
         respx.post(TOGETHER_URL).mock(
             return_value=httpx.Response(401, json={"error": "Invalid API key provided"})
         )
@@ -285,7 +293,7 @@ class TestErrorsDoNotLeak:
     @pytest.mark.asyncio
     async def test_the_api_key_never_appears_in_the_returned_error(self, monkeypatch):
         secret = "xai-SUPERSECRET-abcdef123456"
-        monkeypatch.setenv("XAI_API_KEY", secret)
+        _use_provider_key(monkeypatch, "xai", secret)
         respx.post(XAI_URL).mock(
             return_value=httpx.Response(400, json=XAI_BAD_KEY_BODY)
         )
@@ -303,7 +311,7 @@ class TestErrorsDoNotLeak:
         The classifier reads the body, so it must not then hand the body back. Provider error
         bodies can carry request echoes and internal identifiers.
         """
-        monkeypatch.setenv("XAI_API_KEY", "xai-test-key")
+        _use_provider_key(monkeypatch, "xai", "xai-test-key")
         respx.post(XAI_URL).mock(
             return_value=httpx.Response(
                 400,

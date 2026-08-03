@@ -171,6 +171,7 @@ def _path_lock(path: Path) -> asyncio.Lock:
 
 @contextmanager
 def _exclusive_file_lock(path: Path):
+    path = _validate_receipt_log_path(path)
     lock_path = path.with_name(f".{path.name}.lock")
     with open(lock_path, "a", encoding="utf-8") as lock_file:
         if fcntl is not None:

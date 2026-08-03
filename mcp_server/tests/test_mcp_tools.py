@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mcp_server.proxy_client import ProxyClient
+from mcp_server.tool_registry import REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +415,7 @@ class TestMCPToolBehaviour:
         mcp_server_module.proxy = mock_proxy
 
         try:
-            with patch.object(mcp_server_module, "check", lambda _tool: None), \
+            with patch.object(mcp_server_module, "check", lambda tool: REGISTRY[tool]), \
                  patch.object(
                      mcp_server_module,
                      provider_name,

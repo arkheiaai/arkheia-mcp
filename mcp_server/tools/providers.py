@@ -8,8 +8,9 @@ the MCP tool wrapper in server.py — NOT here.
 This separation means providers.py is testable in isolation and the
 detection layer is applied consistently regardless of which provider is called.
 
-Environment variables read at call time (not import time) so the process
-can start without all keys present and pick them up when they're set:
+Provider API keys are captured by a single custody module at import time, then
+removed from ambient os.environ so unrelated process code cannot copy or forward
+them. Set these before importing the MCP provider modules:
   XAI_API_KEY    — xAI / Grok
   GOOGLE_API_KEY — Google Gemini
   OLLAMA_BASE_URL — defaults to http://localhost:11434
@@ -22,18 +23,29 @@ Hook for enterprise upgrade:
 """
 
 import hashlib
+import ipaddress
 import logging
 import os
+import socket
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 from arkheia_common.egress import egress_async_client
+from mcp_server.provider_key_custody import provider_api_key
+from mcp_server.tool_registry import PolicyViolation, REGISTRY, require_network_egress
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 60.0
 _OLLAMA_TIMEOUT  = 120.0   # local models can be slow to load
+_CLOUD_PROVIDER_TOOL = {
+    "xai": "run_grok",
+    "google": "run_gemini",
+    "together": "run_together",
+}
+_DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +113,97 @@ def _err_response(model: str, prompt: str, error: str) -> dict:
     }
 
 
+def _bearer_json_headers(api_key: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+async def _provider_post(
+    provider: str,
+    client: httpx.AsyncClient,
+    url: str,
+    **kwargs: Any,
+) -> httpx.Response:
+    """Single outbound HTTP chokepoint for provider calls."""
+    tool_name = _CLOUD_PROVIDER_TOOL.get(provider)
+    if tool_name is not None:
+        require_network_egress(REGISTRY[tool_name], provider=provider)
+    return await client.post(url, **kwargs)
+
+
+def _provider_exception_reason(exc: BaseException) -> str:
+    if isinstance(exc, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(exc, httpx.ConnectError):
+        return "connection_error"
+    return exc.__class__.__name__
+
+
+def _provider_failure(
+    function_name: str,
+    model: str,
+    prompt: str,
+    exc: BaseException,
+) -> dict:
+    reason = _provider_exception_reason(exc)
+    logger.error(
+        "%s: provider call failed with %s for model=%s",
+        function_name,
+        exc.__class__.__name__,
+        model,
+    )
+    return _err_response(model, prompt, reason)
+
+
+def _parse_failure(function_name: str, model: str, prompt: str) -> dict:
+    logger.error("%s: unexpected response shape for model=%s", function_name, model)
+    return _err_response(model, prompt, "parse_error")
+
+
+def _resolved_host_addresses(
+    host: str,
+) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]:
+    try:
+        return (ipaddress.ip_address(host),)
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return ()
+
+    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for info in infos:
+        sockaddr = info[4]
+        if not sockaddr:
+            return ()
+        try:
+            addresses.append(ipaddress.ip_address(sockaddr[0]))
+        except ValueError:
+            return ()
+    return tuple(addresses)
+
+
+def _is_loopback_host(host: str | None) -> bool:
+    if host is None:
+        return False
+    addresses = _resolved_host_addresses(host)
+    return bool(addresses) and all(address.is_loopback for address in addresses)
+
+
+def _local_ollama_base_url(raw_url: str | None = None) -> str:
+    base_url = (
+        raw_url or os.environ.get("OLLAMA_BASE_URL") or _DEFAULT_OLLAMA_BASE_URL
+    ).rstrip("/")
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not _is_loopback_host(parsed.hostname):
+        raise PolicyViolation("run_ollama", "OLLAMA_BASE_URL must resolve to a loopback host")
+    return base_url
+
+
 # ---------------------------------------------------------------------------
 # Grok (xAI) — OpenAI-compatible /v1/chat/completions
 # ---------------------------------------------------------------------------
@@ -122,18 +225,17 @@ async def call_grok(
 
     Returns: {response, model, prompt_hash, error}
     """
-    api_key = os.environ.get("XAI_API_KEY", "")
+    api_key = provider_api_key("xai")
     if not api_key:
         return _err_response(model, prompt, "XAI_API_KEY not set")
 
     try:
         async with egress_async_client(timeout=_DEFAULT_TIMEOUT) as client:
-            resp = await client.post(
+            resp = await _provider_post(
+                "xai",
+                client,
                 "https://api.x.ai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=_bearer_json_headers(api_key),
                 json={
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
@@ -150,6 +252,8 @@ async def call_grok(
                 "usage":       data.get("usage", {}),
                 "error":       None,
             }
+    except (KeyError, IndexError, TypeError):
+        return _parse_failure("call_grok", model, prompt)
     except httpx.HTTPStatusError as e:
         reason = _classify_http_error(e.response.status_code, e.response.text)
         logger.error(
@@ -158,8 +262,7 @@ async def call_grok(
         )
         return _err_response(model, prompt, reason)
     except Exception as e:
-        logger.error("call_grok: unexpected error: %s", e)
-        return _err_response(model, prompt, str(e))
+        return _provider_failure("call_grok", model, prompt, e)
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +283,7 @@ async def call_gemini(
 
     Returns: {response, model, prompt_hash, error}
     """
-    api_key = os.environ.get("GOOGLE_API_KEY", "")
+    api_key = provider_api_key("google")
     if not api_key:
         return _err_response(model, prompt, "GOOGLE_API_KEY not set")
 
@@ -190,7 +293,9 @@ async def call_gemini(
     )
     try:
         async with egress_async_client(timeout=_DEFAULT_TIMEOUT) as client:
-            resp = await client.post(
+            resp = await _provider_post(
+                "google",
+                client,
                 url,
                 params={"key": api_key},
                 json={
@@ -213,9 +318,8 @@ async def call_gemini(
                 "usage":       data.get("usageMetadata", {}),
                 "error":       None,
             }
-    except (KeyError, IndexError) as e:
-        logger.error("call_gemini: unexpected response shape: %s", e)
-        return _err_response(model, prompt, f"parse_error: {e}")
+    except (KeyError, IndexError, TypeError):
+        return _parse_failure("call_gemini", model, prompt)
     except httpx.HTTPStatusError as e:
         reason = _classify_http_error(e.response.status_code, e.response.text)
         logger.error(
@@ -224,8 +328,7 @@ async def call_gemini(
         )
         return _err_response(model, prompt, reason)
     except Exception as e:
-        logger.error("call_gemini: unexpected error: %s", e)
-        return _err_response(model, prompt, str(e))
+        return _provider_failure("call_gemini", model, prompt, e)
 
 
 # ---------------------------------------------------------------------------
@@ -247,18 +350,17 @@ async def call_together(
 
     Returns: {response, model, prompt_hash, usage, error}
     """
-    api_key = os.environ.get("TOGETHER_API_KEY", "")
+    api_key = provider_api_key("together")
     if not api_key:
         return _err_response(model, prompt, "TOGETHER_API_KEY not set")
 
     try:
         async with egress_async_client(timeout=_DEFAULT_TIMEOUT) as client:
-            resp = await client.post(
+            resp = await _provider_post(
+                "together",
+                client,
                 "https://api.together.xyz/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=_bearer_json_headers(api_key),
                 json={
                     "model": model,
                     "max_tokens": max_tokens,
@@ -276,6 +378,8 @@ async def call_together(
                 "usage":       data.get("usage", {}),
                 "error":       None,
             }
+    except (KeyError, IndexError, TypeError):
+        return _parse_failure("call_together", model, prompt)
     except httpx.HTTPStatusError as e:
         reason = _classify_http_error(e.response.status_code, e.response.text)
         logger.error(
@@ -284,8 +388,7 @@ async def call_together(
         )
         return _err_response(model, prompt, reason)
     except Exception as e:
-        logger.error("call_together: unexpected error: %s", e)
-        return _err_response(model, prompt, str(e))
+        return _provider_failure("call_together", model, prompt, e)
 
 
 # ---------------------------------------------------------------------------
@@ -300,19 +403,22 @@ async def call_ollama(
     """
     Call local Ollama model via /api/generate (non-streaming).
 
-    OLLAMA_BASE_URL defaults to http://localhost:11434.
-    No network egress — local eval only.
+    OLLAMA_BASE_URL defaults to http://localhost:11434 and must name a
+    loopback host. Local inference only; remote URLs are refused before any
+    HTTP request is opened.
 
     Returns: {response, model, prompt_hash, eval_count, error}
     """
-    # `.rstrip("/")`: an operator-written base URL commonly carries a trailing
-    # slash, and httpx does not fold the resulting `//api/generate`. Same class of
-    # defect as the governance-push misroute — see proxy/detection_adapter.py.
-    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    try:
+        base_url = _local_ollama_base_url()
+    except PolicyViolation:
+        return _err_response(model, prompt, "ollama_base_url_not_local")
 
     try:
         async with egress_async_client(timeout=_OLLAMA_TIMEOUT) as client:
-            resp = await client.post(
+            resp = await _provider_post(
+                "ollama",
+                client,
                 f"{base_url}/api/generate",
                 json={
                     "model":  model,
@@ -341,5 +447,4 @@ async def call_ollama(
         )
         return _err_response(model, prompt, reason)
     except Exception as e:
-        logger.error("call_ollama: unexpected error: %s", e)
-        return _err_response(model, prompt, str(e))
+        return _provider_failure("call_ollama", model, prompt, e)
