@@ -449,20 +449,23 @@ function toPosix(relativePath) {
   return relativePath.split(path.sep).join("/");
 }
 
-function sha256File(filePath) {
-  const resolved = path.resolve(filePath);
-  if (!inside(resolved, PACKAGE_ROOT) && !inside(resolved, BUNDLE_ROOT)) {
-    fail(`refusing to hash ${resolved}, which is outside the package bundle`);
-  }
+function resolveFileUnder(root, relativePath, label) {
+  const normalised = assertContainedUnder(relativePath, root, label);
+  const resolved = path.resolve(root, normalised);
   let stat;
   try {
     stat = fs.lstatSync(resolved);
   } catch (err) {
-    fail(`cannot hash missing file ${resolved}: ${err.message}`);
+    fail(`${label} is missing at ${resolved}: ${err.message}`);
   }
   if (stat.isSymbolicLink() || !stat.isFile()) {
-    fail(`refusing to hash non-regular file ${resolved}`);
+    fail(`${label} is not a regular file at ${resolved}`);
   }
+  return resolved;
+}
+
+function sha256BundleFile(relativePath) {
+  const resolved = resolveFileUnder(BUNDLE_ROOT, relativePath, "bundle file to hash");
   return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
 }
 
@@ -511,28 +514,8 @@ function collectBundleFiles(dir, relative = "") {
   return files.sort();
 }
 
-function requirePackageOrBundleFile(filePath, label) {
-  const resolved = path.resolve(filePath);
-  if (!inside(resolved, PACKAGE_ROOT) && !inside(resolved, BUNDLE_ROOT)) {
-    fail(`${label} resolves outside the package bundle at ${filePath}`);
-  }
-  let stat;
-  try {
-    stat = fs.lstatSync(resolved);
-  } catch (err) {
-    fail(`${label} is missing at ${resolved}: ${err.message}`);
-  }
-  if (stat.isSymbolicLink() || !stat.isFile()) {
-    fail(`${label} is not a regular file at ${resolved}`);
-  }
-  return resolved;
-}
-
 function packageManifest() {
-  const manifestPath = requirePackageOrBundleFile(
-    path.join(PACKAGE_ROOT, "package.json"),
-    "package manifest"
-  );
+  const manifestPath = resolveFileUnder(PACKAGE_ROOT, "package.json", "package manifest");
   try {
     return JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
   } catch (err) {
@@ -562,7 +545,7 @@ function writeProvenanceManifest() {
     bundle_root: toPosix(path.relative(PACKAGE_ROOT, BUNDLE_ROOT)),
     files: files.map((rel) => ({
       path: rel,
-      sha256: sha256File(path.join(BUNDLE_ROOT, rel)),
+      sha256: sha256BundleFile(rel),
     })),
   };
 
@@ -587,7 +570,7 @@ function writeBundleTrustRoot(provenancePath) {
     entry_module: ENTRY_MODULE,
     bundle_root: toPosix(path.relative(PACKAGE_ROOT, BUNDLE_ROOT)),
     provenance_path: `${toPosix(path.relative(PACKAGE_ROOT, BUNDLE_ROOT))}/${PROVENANCE_FILE}`,
-    provenance_sha256: sha256File(provenancePath),
+    provenance_sha256: sha256BundleFile(PROVENANCE_FILE),
   };
   const trustRootPath = path.join(PACKAGE_ROOT, TRUST_ROOT_FILE);
   fs.mkdirSync(path.dirname(trustRootPath), { recursive: true });

@@ -34,7 +34,9 @@ if (!USER_HOME) {
 const ARKHEIA_HOME = path.join(USER_HOME, ".arkheia");
 const BUNDLED_PYTHON_DIR = path.join(__dirname, "..", "python");
 const VENV_DIR = path.join(ARKHEIA_HOME, "venv");
-const VENV_MARKER = path.join(VENV_DIR, ".arkheia-venv.json");
+const VENV_MARKER_RELATIVE = ".arkheia-venv.json";
+const DEPS_MARKER_RELATIVE = ".arkheia-deps-installed.json";
+const VENV_MARKER = path.join(VENV_DIR, VENV_MARKER_RELATIVE);
 const ENTRY_MODULE = "mcp_server.server";
 const SERVER_RELATIVE = "mcp_server/server.py";
 const REQUIREMENTS_RELATIVE = "requirements.txt";
@@ -107,22 +109,35 @@ function resolveBundlePath(relativePath, label) {
   return resolved;
 }
 
-function requirePackageOrBundleFile(filePath, label) {
-  const resolved = path.resolve(filePath);
-  if (!inside(resolved, PACKAGE_ROOT) && !inside(resolved, BUNDLED_PYTHON_DIR)) {
-    fail(`${label} resolves outside the package bundle at ${filePath}`);
+function resolveFileUnder(root, relativePath, label) {
+  if (typeof relativePath !== "string" || relativePath.length === 0) {
+    fail(`${label} is not a non-empty relative path`);
+  }
+  if (relativePath.includes("\0")) {
+    fail(`${label} contains a NUL byte`);
+  }
+  if (path.isAbsolute(relativePath) || /^[A-Za-z]:/.test(relativePath)) {
+    fail(`${label} is absolute: ${relativePath}`);
+  }
+  const normalised = path.normalize(relativePath);
+  if (normalised.split(/[\\/]/).includes("..")) {
+    fail(`${label} escapes its root: ${relativePath}`);
+  }
+  const resolved = path.resolve(root, normalised);
+  if (!inside(resolved, root)) {
+    fail(`${label} resolves outside ${root}: ${relativePath}`);
   }
   requireRegularFileNoSymlink(resolved, label);
   return resolved;
 }
 
-function sha256File(filePath, label = "file to hash") {
-  const resolved = requirePackageOrBundleFile(filePath, label);
+function sha256FileUnder(root, relativePath, label = "file to hash") {
+  const resolved = resolveFileUnder(root, relativePath, label);
   return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
 }
 
-function readJson(filePath, label) {
-  const resolved = requirePackageOrBundleFile(filePath, label);
+function readJsonUnder(root, relativePath, label) {
+  const resolved = resolveFileUnder(root, relativePath, label);
   try {
     return JSON.parse(fs.readFileSync(resolved, "utf-8"));
   } catch (err) {
@@ -287,9 +302,17 @@ function verifyBundle() {
   }
   requireRegularFileNoSymlink(TRUST_ROOT_PATH, "bundle provenance trust root");
 
-  const provenance = readJson(PROVENANCE_PATH, "bundle provenance manifest");
-  const trustRoot = readJson(TRUST_ROOT_PATH, "bundle provenance trust root");
-  const packageManifest = readJson(path.join(PACKAGE_ROOT, "package.json"), "package manifest");
+  const provenance = readJsonUnder(
+    BUNDLED_PYTHON_DIR,
+    PROVENANCE_RELATIVE,
+    "bundle provenance manifest"
+  );
+  const trustRoot = readJsonUnder(
+    PACKAGE_ROOT,
+    TRUST_ROOT_RELATIVE,
+    "bundle provenance trust root"
+  );
+  const packageManifest = readJsonUnder(PACKAGE_ROOT, "package.json", "package manifest");
   const packageInfo = provenance.package || {};
   const trustPackageInfo = trustRoot.package || {};
 
@@ -351,7 +374,11 @@ function verifyBundle() {
   if (typeof trustRoot.provenance_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(trustRoot.provenance_sha256)) {
     fail(`invalid bundle provenance trust root sha256: ${JSON.stringify(trustRoot.provenance_sha256)}`);
   }
-  const provenanceSha256 = sha256File(PROVENANCE_PATH, "bundle provenance manifest");
+  const provenanceSha256 = sha256FileUnder(
+    BUNDLED_PYTHON_DIR,
+    PROVENANCE_RELATIVE,
+    "bundle provenance manifest"
+  );
   if (trustRoot.provenance_sha256 !== provenanceSha256) {
     fail(
       "bundle provenance trust root mismatch: the bundled Python manifest has " +
@@ -378,7 +405,11 @@ function verifyBundle() {
       fail(`bundle provenance path is missing from disk: ${entry.path}`);
     }
     requireRegularFileNoSymlink(filePath, `bundle provenance path ${entry.path}`);
-    const actual = sha256File(filePath, `bundle provenance path ${entry.path}`);
+    const actual = sha256FileUnder(
+      BUNDLED_PYTHON_DIR,
+      entry.path,
+      `bundle provenance path ${entry.path}`
+    );
     if (actual !== entry.sha256) {
       fail(`bundle provenance hash mismatch for ${entry.path}`);
     }
@@ -444,7 +475,7 @@ function venvMarkerMatches(bundle) {
     return false;
   }
   try {
-    const markerPath = requireVenvFile(VENV_MARKER, "virtual environment marker");
+    const markerPath = resolveVenvFile(VENV_MARKER_RELATIVE, "virtual environment marker");
     const data = JSON.parse(fs.readFileSync(markerPath, "utf-8"));
     return (
       data &&
@@ -459,7 +490,7 @@ function venvMarkerMatches(bundle) {
 }
 
 function writeVenvMarker(bundle) {
-  writeMarkerJson(VENV_MARKER, "virtual environment marker", {
+  writeMarkerJson(VENV_MARKER_RELATIVE, "virtual environment marker", {
     schema: VENV_SCHEMA,
     package_name: bundle.packageName,
     package_version: bundle.packageVersion,
@@ -477,21 +508,27 @@ function regularFileNoSymlink(filePath) {
   }
 }
 
-function requireVenvFile(filePath, label) {
-  const resolved = path.resolve(filePath);
-  if (!inside(resolved, VENV_DIR)) {
-    fail(`${label} resolves outside the virtual environment at ${filePath}`);
-  }
-  if (!regularFileNoSymlink(resolved)) {
-    fail(`${label} is not a regular file at ${resolved}`);
-  }
+function resolveVenvFile(relativePath, label) {
+  const resolved = resolveFileUnder(VENV_DIR, relativePath, label);
   return resolved;
 }
 
-function writeMarkerJson(filePath, label, data) {
-  const resolved = path.resolve(filePath);
+function writeMarkerJson(relativePath, label, data) {
+  if (typeof relativePath !== "string" || relativePath.length === 0) {
+    fail(`${label} is not a non-empty relative marker path`);
+  }
+  if (relativePath.includes("\0")) {
+    fail(`${label} contains a NUL byte`);
+  }
+  if (path.isAbsolute(relativePath) || /^[A-Za-z]:/.test(relativePath)) {
+    fail(`${label} is not a safe relative marker path: ${relativePath}`);
+  }
+  if (path.normalize(relativePath).split(/[\\/]/).includes("..")) {
+    fail(`${label} escapes the virtual environment: ${relativePath}`);
+  }
+  const resolved = path.resolve(VENV_DIR, path.normalize(relativePath));
   if (!inside(resolved, VENV_DIR)) {
-    fail(`${label} resolves outside the virtual environment at ${filePath}`);
+    fail(`${label} resolves outside the virtual environment at ${relativePath}`);
   }
   if (fs.existsSync(resolved) && !regularFileNoSymlink(resolved)) {
     fail(`${label} is not a regular file at ${resolved}`);
@@ -552,7 +589,8 @@ function ensureVenv(python, bundle) {
   return fs.realpathSync(venvPython);
 }
 
-function depsMarkerMatches(marker, bundle) {
+function depsMarkerMatches(bundle) {
+  const marker = path.join(VENV_DIR, DEPS_MARKER_RELATIVE);
   if (!fs.existsSync(marker)) {
     return false;
   }
@@ -560,7 +598,7 @@ function depsMarkerMatches(marker, bundle) {
     return false;
   }
   try {
-    const markerPath = requireVenvFile(marker, "dependency install marker");
+    const markerPath = resolveVenvFile(DEPS_MARKER_RELATIVE, "dependency install marker");
     const data = JSON.parse(fs.readFileSync(markerPath, "utf-8"));
     return (
       data &&
@@ -575,8 +613,8 @@ function depsMarkerMatches(marker, bundle) {
 }
 
 function installDeps(venvPython, bundle) {
-  const marker = path.join(VENV_DIR, ".arkheia-deps-installed.json");
-  if (depsMarkerMatches(marker, bundle)) {
+  const marker = path.join(VENV_DIR, DEPS_MARKER_RELATIVE);
+  if (depsMarkerMatches(bundle)) {
     return; // Already installed for this verified requirements file
   }
   if (fs.existsSync(marker) && !regularFileNoSymlink(marker)) {
@@ -607,7 +645,7 @@ function installDeps(venvPython, bundle) {
     }
   );
 
-  writeMarkerJson(marker, "dependency install marker", {
+  writeMarkerJson(DEPS_MARKER_RELATIVE, "dependency install marker", {
     schema: "arkheia.npm.deps.v1",
     package_name: bundle.packageName,
     package_version: bundle.packageVersion,
