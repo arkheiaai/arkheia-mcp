@@ -11,8 +11,13 @@ Reload is copy-and-swap -- zero dropped requests during update.
 
 License verification:
   - Profiles with a 'license:' block are checked for expiry and HMAC signature.
-  - ARKHEIA_LICENSE_KEY   — HMAC-SHA256 secret; if unset, signature check is skipped (dev mode)
+  - ARKHEIA_LICENSE_KEY   — HMAC-SHA256 secret; signed profiles are rejected
+    when this is unset unless ARKHEIA_ALLOW_UNSIGNED_LICENSE=true.
   - ARKHEIA_REQUIRE_LICENSE — if true, profiles without a license block are rejected
+  - ARKHEIA_ALLOW_UNSIGNED_LICENSE — explicit local/dev escape hatch for unverified
+    license blocks; expiry is still checked.
+  - ARKHEIA_ALLOW_PLAINTEXT_PROFILES — explicit local/dev escape hatch for loading
+    .yaml profiles from a directory that also contains encrypted profiles.
   - Expired / tampered profiles are silently skipped; other profiles are unaffected.
 """
 
@@ -23,6 +28,8 @@ import json
 import logging
 import os
 import sys
+from dataclasses import dataclass, field
+import re
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -39,6 +46,7 @@ from proxy.audit.decision_journal import (
     PROFILE_AUTH_NO_MODEL_ID,
     PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
     PROFILE_AUTH_PLAINTEXT_REJECTED,
+    PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
     PROFILE_AUTH_SKIPPED_NO_KEY,
     PLAINTEXT_POLICY_DEVELOPMENT,
     PLAINTEXT_POLICY_ENCRYPTED_INVENTORY,
@@ -52,16 +60,11 @@ from proxy.audit.decision_journal import (
 
 logger = logging.getLogger(__name__)
 
-# Read once at import time; NSSM AppEnvironmentExtra sets these per installation.
-_LICENSE_KEY: str = os.getenv("ARKHEIA_LICENSE_KEY", "")
-_REQUIRE_LICENSE: bool = os.getenv("ARKHEIA_REQUIRE_LICENSE", "false").lower() in (
-    "true", "1", "yes"
-)
-_ALLOW_PLAINTEXT_PROFILES_ENV = "ARKHEIA_ALLOW_PLAINTEXT_PROFILES"
-
-
-def _truthy_env(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.lower() in ("true", "1", "yes")
 
 
 def _canonical_profile(profile: dict) -> str:
@@ -70,27 +73,48 @@ def _canonical_profile(profile: dict) -> str:
     return json.dumps(content, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
 
 
-def _verify_profile_license(profile: dict, filename: str) -> bool:
+def _verify_profile_license(
+    profile: dict,
+    filename: str,
+    *,
+    license_key: Optional[str] = None,
+    require_license: Optional[bool] = None,
+    allow_unsigned_license: Optional[bool] = None,
+) -> bool:
     """
     Verify the license block in a profile. Returns True if the profile may be loaded.
 
     Rules:
-      - No license block + REQUIRE_LICENSE=false  → allowed (open / dev mode)
-      - No license block + REQUIRE_LICENSE=true   → rejected, warning logged
-      - Expired date                               → rejected, warning logged
-      - HMAC mismatch                              → rejected, error logged
-      - No LICENSE_KEY configured                  → HMAC check skipped (dev mode)
+      - No license block + REQUIRE_LICENSE=false       → allowed (open profile)
+      - No license block + REQUIRE_LICENSE=true        → rejected, warning logged
+      - Expired date                                    → rejected, warning logged
+      - HMAC mismatch / missing signature               → rejected, error logged
+      - License block + no LICENSE_KEY                  → rejected unless
+        ALLOW_UNSIGNED_LICENSE=true (explicit dev mode)
     """
-    block = profile.get("license")
+    license_key = os.getenv("ARKHEIA_LICENSE_KEY", "") if license_key is None else license_key
+    require_license = (
+        _env_bool("ARKHEIA_REQUIRE_LICENSE")
+        if require_license is None else require_license
+    )
+    allow_unsigned_license = (
+        _env_bool("ARKHEIA_ALLOW_UNSIGNED_LICENSE")
+        if allow_unsigned_license is None else allow_unsigned_license
+    )
 
-    if not block:
-        if _REQUIRE_LICENSE:
+    if "license" not in profile:
+        if require_license:
             logger.warning(
                 "Profile %s has no license block and ARKHEIA_REQUIRE_LICENSE=true — skipping",
                 filename,
             )
             return False
-        return True  # open mode: no license required
+        return True
+
+    block = profile.get("license")
+    if not isinstance(block, dict):
+        logger.error("Profile %s license block is not an object — skipping", filename)
+        return False
 
     valid_until_str = str(block.get("valid_until", ""))
     try:
@@ -109,23 +133,118 @@ def _verify_profile_license(profile: dict, filename: str) -> bool:
         )
         return False
 
-    if _LICENSE_KEY:
-        customer_id = str(block.get("customer_id", ""))
-        message = f"{_canonical_profile(profile)}|{customer_id}|{valid_until_str}"
-        expected = _hmac_mod.new(
-            _LICENSE_KEY.encode("utf-8"),
-            message.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-        actual = str(block.get("signature", ""))
-        if not _hmac_mod.compare_digest(expected, actual):
-            logger.error(
-                "Profile %s license signature mismatch — skipping (possible tampering)",
+    if not license_key:
+        if allow_unsigned_license:
+            logger.warning(
+                "Profile %s license signature not verified because "
+                "ARKHEIA_ALLOW_UNSIGNED_LICENSE=true",
                 filename,
             )
-            return False
+            return True
+        logger.error(
+            "Profile %s has a license block but no ARKHEIA_LICENSE_KEY is configured — skipping",
+            filename,
+        )
+        return False
+
+    customer_id = str(block.get("customer_id", ""))
+    message = f"{_canonical_profile(profile)}|{customer_id}|{valid_until_str}"
+    expected = _hmac_mod.new(
+        license_key.encode("utf-8"),
+        message.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    actual = str(block.get("signature", ""))
+    if not actual or not _hmac_mod.compare_digest(expected, actual):
+        logger.error(
+            "Profile %s license signature mismatch — skipping (possible tampering)",
+            filename,
+        )
+        return False
 
     return True
+
+
+@dataclass
+class ProfileLoadReport:
+    """
+    What a profile load actually did — the work-done record for ``load_all``.
+
+    Earned 2026-07-26. ``ProfileRouter.loaded_count`` is the TOTAL profile count,
+    plaintext included, so it cannot answer "did the encrypted half work?". With a
+    wrong decryption key over a directory of 3 plaintext + 2 encrypted profiles,
+    ``loaded_count`` is 3 and ``proxy/main.py`` logs
+    ``"Decryption key loaded — 3 encrypted profiles available"`` having decrypted
+    exactly ZERO. Same shape as the integrity manifest that reported
+    ``"Integrity check passed: 0 modules verified"``.
+
+    Every field that can be non-zero is a count of work DONE, and every unit of
+    work-not-done is carried by NAME, per DONE.md floor invariant 9(a).
+    """
+
+    key_present: bool = False
+    plaintext_present: int = 0
+    plaintext_loaded: int = 0
+    plaintext_rejected: list[str] = field(default_factory=list)
+    encrypted_present: int = 0
+    encrypted_attempted: int = 0
+    encrypted_decrypted: int = 0
+    #: Files whose AES-GCM authentication FAILED (tamper or wrong key).
+    encrypted_failed: list[str] = field(default_factory=list)
+    #: Files that decrypted but were then rejected (bad YAML, licence, no model_id).
+    encrypted_rejected: list[str] = field(default_factory=list)
+    #: Encrypted files not even attempted because no key was available.
+    encrypted_skipped_no_key: list[str] = field(default_factory=list)
+    total_loaded: int = 0
+
+    @property
+    def clean(self) -> bool:
+        """True only if every unit present was actually turned into a profile."""
+        return (
+            not self.encrypted_failed
+            and not self.encrypted_rejected
+            and not self.encrypted_skipped_no_key
+            and not self.plaintext_rejected
+            and self.encrypted_attempted == self.encrypted_present
+            and self.encrypted_decrypted == self.encrypted_present
+        )
+
+    def summary(self, profile_dir: str) -> str:
+        parts = [
+            f"loaded {self.total_loaded} profiles from {profile_dir}",
+            f"plaintext {self.plaintext_loaded}/{self.plaintext_present}",
+            f"encrypted {self.encrypted_decrypted}/{self.encrypted_present} decrypted",
+        ]
+        if self.encrypted_skipped_no_key:
+            parts.append(
+                "NOT ATTEMPTED (no key): " + ", ".join(self.encrypted_skipped_no_key)
+            )
+        if self.encrypted_failed:
+            parts.append("AUTHENTICATION FAILED: " + ", ".join(self.encrypted_failed))
+        if self.encrypted_rejected:
+            parts.append("decrypted but rejected: " + ", ".join(self.encrypted_rejected))
+        if self.plaintext_rejected:
+            parts.append("plaintext rejected: " + ", ".join(self.plaintext_rejected))
+        return "; ".join(parts)
+
+
+def _looks_versioned_or_dated(model_id: str) -> bool:
+    return bool(re.search(r"(?:^|[-_:/])\d", model_id))
+
+
+def _family_token(model_id: str) -> Optional[str]:
+    """
+    Conservative final-tier family key.
+
+    Exact and prefix matching have already run by the time this is used. If the
+    requested id carries a version/date and still did not match, a broad
+    first-token family fallback would borrow an unreviewed sibling surface.
+    """
+    if _looks_versioned_or_dated(model_id):
+        return None
+    if "-" in model_id:
+        return None
+    return model_id
 
 
 class ProfileRouter:
@@ -149,6 +268,10 @@ class ProfileRouter:
         decryption_key: Optional[bytes] = None,
         audit_writer: Optional[object] = None,
         journal: Optional[DecisionJournal] = None,
+        license_key: Optional[str] = None,
+        require_license: Optional[bool] = None,
+        allow_unsigned_license: Optional[bool] = None,
+        allow_plaintext_profiles: Optional[bool] = None,
         encrypted_profile_policy: Optional[bool] = None,
         plaintext_development_mode: Optional[bool] = None,
     ):
@@ -157,6 +280,7 @@ class ProfileRouter:
         self.profile_dir = profile_dir
         self._loaded_count = 0
         self._decryption_key = decryption_key
+        self.last_load_report = ProfileLoadReport()
         # The audit rail, handed in at CONSTRUCTION. ``proxy/main.py`` builds the
         # AuditWriter at step 0 for exactly this reason: the router decides
         # whether each encrypted profile authenticated, and before this change no
@@ -174,6 +298,21 @@ class ProfileRouter:
             else bool(plaintext_development_mode)
         )
         self.decision_journal = journal or DecisionJournal()
+        self._license_key = (
+            os.getenv("ARKHEIA_LICENSE_KEY", "") if license_key is None else license_key
+        )
+        self._require_license = (
+            _env_bool("ARKHEIA_REQUIRE_LICENSE")
+            if require_license is None else require_license
+        )
+        self._allow_unsigned_license = (
+            _env_bool("ARKHEIA_ALLOW_UNSIGNED_LICENSE")
+            if allow_unsigned_license is None else allow_unsigned_license
+        )
+        self._allow_plaintext_profiles = (
+            _env_bool("ARKHEIA_ALLOW_PLAINTEXT_PROFILES")
+            if allow_plaintext_profiles is None else allow_plaintext_profiles
+        )
         #: Fire-and-forget flush tasks, held so the GC cannot collect a pending
         #: one mid-flight (asyncio only holds a weak reference to a bare task).
         self._flush_tasks: set = set()
@@ -219,11 +358,18 @@ class ProfileRouter:
         self._flush_tasks.add(task)
         task.add_done_callback(self._flush_tasks.discard)
 
-    def set_decryption_key(self, key: bytes) -> None:
-        """Set the decryption key and reload encrypted profiles."""
+    def set_decryption_key(self, key: bytes) -> "ProfileLoadReport":
+        """Set the decryption key and reload encrypted profiles.
+
+        Returns the load report so the caller can state what the key actually
+        achieved. ``loaded_count`` is NOT that number -- it counts plaintext
+        profiles too, so it stays high (and reads like success) even when every
+        single encrypted profile failed to decrypt.
+        """
         self._decryption_key = key
         self.load_all()
         self._schedule_flush()
+        return self.last_load_report
 
     def _plaintext_policy_state(self, enc_files: list[Path]) -> str:
         """
@@ -258,6 +404,8 @@ class ProfileRouter:
         override, not a silent bypass.
         """
         profiles: dict[str, dict] = {}
+        report = ProfileLoadReport(key_present=self._decryption_key is not None)
+        self.last_load_report = report
         path = Path(self.profile_dir).resolve()
         if not path.exists():
             logger.warning("Profiles directory not found: %s", self.profile_dir)
@@ -265,9 +413,12 @@ class ProfileRouter:
             self._loaded_count = 0
             return
 
-        enc_files = sorted(path.glob("*.yaml.enc"))
-        plaintext_files = sorted(path.glob("*.yaml"))
-        plaintext_allowed = _truthy_env(_ALLOW_PLAINTEXT_PROFILES_ENV)
+        enc_files = [
+            f for f in path.glob("*.yaml.enc")
+            if f.resolve().parent == path  # aikido-ignore
+        ]
+        report.encrypted_present = len(enc_files)
+        plaintext_allowed = self._allow_plaintext_profiles
         plaintext_policy_state = self._plaintext_policy_state(enc_files)
         plaintext_requires_opt_in = self._plaintext_requires_opt_in(plaintext_policy_state)
         refusing_plaintext = plaintext_requires_opt_in and not plaintext_allowed
@@ -280,32 +431,44 @@ class ProfileRouter:
         refused_plaintext_names: list[str] = []
 
         # Load plaintext .yaml profiles
-        for f in plaintext_files:
+        #
+        # NOTE, and it is the load-bearing note for this whole module: these are
+        # UNAUTHENTICATED. A .yaml dropped into the profile directory is parsed and
+        # used with no key, no tag and -- unless ARKHEIA_LICENSE_KEY is set, which
+        # it is not by default -- no signature check either. The AES-GCM path below
+        # protects only the models that ship as .yaml.enc. See
+        # tests/test_encrypted_profile_tamper.py::test_plaintext_yaml_bypasses_the
+        # _entire_crypto_path.
+        for f in sorted(path.glob("*.yaml")):
             if not f.resolve().parent == path:  # aikido-ignore
                 logger.warning("Skipping file outside profile dir: %s", f)
                 continue
             if f.name == "schema.yaml":
                 continue
+            report.plaintext_present += 1
             plaintext_candidate_names.append(f.name)
             if refusing_plaintext:
+                logger.error(
+                    "Skipping plaintext profile %s in governed profile directory %s "
+                    "(policy_state=%s); set ARKHEIA_ALLOW_PLAINTEXT_PROFILES=true "
+                    "only for an intentional migration or development window",
+                    f.name,
+                    path,
+                    plaintext_policy_state,
+                )
                 refused_plaintext_names.append(f.name)
+                report.plaintext_rejected.append(f.name)
                 continue
             data = self._load_plaintext(f)
             if data:
                 model_id = self._extract_model_id(data, f.name)
                 if model_id:
                     profiles[model_id] = data
+                    report.plaintext_loaded += 1
+                    continue
+            report.plaintext_rejected.append(f.name)
 
         if refused_plaintext_names:
-            logger.warning(
-                "Refusing %d plaintext profile(s) in governed profile directory %s "
-                "(policy_state=%s). Set %s=true only for an intentional "
-                "migration or development window.",
-                len(refused_plaintext_names),
-                self.profile_dir,
-                plaintext_policy_state,
-                _ALLOW_PLAINTEXT_PROFILES_ENV,
-            )
             self.decision_journal.record(build_profile_auth_record(
                 outcome=PROFILE_AUTH_PLAINTEXT_REJECTED,
                 skipped_profile_names=refused_plaintext_names,
@@ -313,37 +476,38 @@ class ProfileRouter:
             ))
         elif plaintext_allowed and plaintext_requires_opt_in and plaintext_candidate_names:
             logger.warning(
-                "Plaintext profile loading explicitly enabled by %s in %s "
-                "(policy_state=%s).",
-                _ALLOW_PLAINTEXT_PROFILES_ENV,
+                "Plaintext profile loading explicitly enabled by "
+                "ARKHEIA_ALLOW_PLAINTEXT_PROFILES in %s (policy_state=%s).",
                 self.profile_dir,
                 plaintext_policy_state,
             )
             self.decision_journal.record(build_profile_auth_record(
                 outcome=PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
                 plaintext_profile_names=plaintext_candidate_names,
-                plaintext_opt_in_env=_ALLOW_PLAINTEXT_PROFILES_ENV,
+                plaintext_opt_in_env="ARKHEIA_ALLOW_PLAINTEXT_PROFILES",
                 plaintext_policy_state=plaintext_policy_state,
             ))
         elif receipting_development_opt_in and plaintext_candidate_names:
             logger.warning(
-                "Development plaintext profile loading explicitly enabled by %s in %s.",
-                _ALLOW_PLAINTEXT_PROFILES_ENV,
+                "Development plaintext profile loading explicitly enabled by "
+                "ARKHEIA_ALLOW_PLAINTEXT_PROFILES in %s.",
                 self.profile_dir,
             )
             self.decision_journal.record(build_profile_auth_record(
                 outcome=PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
                 plaintext_profile_names=plaintext_candidate_names,
-                plaintext_opt_in_env=_ALLOW_PLAINTEXT_PROFILES_ENV,
+                plaintext_opt_in_env="ARKHEIA_ALLOW_PLAINTEXT_PROFILES",
                 plaintext_policy_state=plaintext_policy_state,
             ))
 
         # Load encrypted .yaml.enc profiles (if decryption key available)
         if enc_files and not self._decryption_key:
+            report.encrypted_skipped_no_key = [f.name for f in enc_files]
             logger.warning(
-                "Found %d encrypted profiles but no decryption key — skipping. "
+                "Found %d encrypted profiles but no decryption key — skipping: %s. "
                 "Detection will return UNKNOWN for these models.",
                 len(enc_files),
+                ", ".join(report.encrypted_skipped_no_key),
             )
             # One record: no per-profile decision was TAKEN here, so emitting a
             # per-profile row would overstate what happened. The names are
@@ -360,6 +524,7 @@ class ProfileRouter:
                 if not f.resolve().parent == path:  # aikido-ignore
                     continue
                 profile_name = f.name.replace(".yaml.enc", "")
+                report.encrypted_attempted += 1
                 encrypted = b""
                 try:
                     encrypted = f.read_bytes()
@@ -369,35 +534,63 @@ class ProfileRouter:
                     # disk are not the bytes that were sealed, or this is not the
                     # key they were sealed with. Previously this was one ERROR
                     # line in an unchained log; it is now a row on the
-                    # hash-chained rail carrying which bytes and which key.
+                    # hash-chained rail carrying which bytes and which key, AND a
+                    # named unit in the work-done report below -- it must never
+                    # vanish into a log line while the summary reports a clean
+                    # load. InvalidTag carries an EMPTY message, so the exception
+                    # type is named explicitly or the operator gets no reason at
+                    # all.
+                    report.encrypted_failed.append(f.name)
                     logger.error(
-                        "Profile %s FAILED AUTHENTICATION (AES-GCM tag rejected) — "
-                        "tampered file or wrong key", f.name,
+                        "AUTHENTICATION FAILED for encrypted profile %s (%s) — "
+                        "tampered file or wrong key. Profile DROPPED; no "
+                        "plaintext fallback.",
+                        f.name, type(e).__name__,
                     )
                     self._journal_auth(PROFILE_AUTH_FAILED, profile_name, encrypted, e)
                     continue
                 except ValueError as e:
-                    logger.error("Failed to decrypt profile %s: %s", f.name, e)
+                    # Too short to contain a nonce and a tag -- never reached the
+                    # cipher at all. Discriminated from a tamper (InvalidTag)
+                    # rather than filed as one, so a truncated file does not cry
+                    # wolf; still a dropped, named, non-clean unit.
+                    report.encrypted_failed.append(f.name)
+                    logger.error(
+                        "AUTHENTICATION FAILED for encrypted profile %s (%s: %s) — "
+                        "malformed ciphertext. Profile DROPPED; no plaintext "
+                        "fallback.",
+                        f.name, type(e).__name__, e or "<no detail>",
+                    )
                     self._journal_auth(PROFILE_AUTH_MALFORMED, profile_name, encrypted, e)
                     continue
                 except Exception as e:
-                    logger.error("Failed to decrypt profile %s: %s", f.name, e)
+                    report.encrypted_failed.append(f.name)
+                    logger.error(
+                        "AUTHENTICATION FAILED for encrypted profile %s (%s: %s) — "
+                        "tampered, or the wrong decryption key. Profile DROPPED; "
+                        "no plaintext fallback.",
+                        f.name, type(e).__name__, e or "<no detail>",
+                    )
                     self._journal_auth(PROFILE_AUTH_MALFORMED, profile_name, encrypted, e)
                     continue
 
                 # From here the profile HAS authenticated; every further refusal
                 # is a content decision, and each gets its own outcome so a
-                # tamper can never be confused with a licence expiry.
+                # tamper can never be confused with a licence expiry -- and its
+                # own named bucket in the work-done report.
                 try:
                     data = yaml.safe_load(plaintext)
                 except Exception as e:
+                    report.encrypted_rejected.append(f.name)
                     logger.error("Decrypted profile %s is not valid YAML: %s", f.name, e)
                     self._journal_auth(PROFILE_AUTH_NOT_YAML, profile_name, encrypted, e)
                     continue
                 if not data:
+                    report.encrypted_rejected.append(f.name)
                     self._journal_auth(PROFILE_AUTH_EMPTY, profile_name, encrypted, None)
                     continue
-                if not _verify_profile_license(data, f.name):
+                if not self._verify_license(data, f.name):
+                    report.encrypted_rejected.append(f.name)
                     self._journal_auth(PROFILE_AUTH_LICENSE_REJECTED, profile_name, encrypted, None)
                     continue
                 model_id = self._extract_model_id(
@@ -406,19 +599,26 @@ class ProfileRouter:
                     allow_filename_fallback=False,
                 )
                 if not model_id:
+                    report.encrypted_rejected.append(f.name)
                     self._journal_auth(PROFILE_AUTH_NO_MODEL_ID, profile_name, encrypted, None)
                     continue
                 profiles[model_id] = data
+                report.encrypted_decrypted += 1
                 logger.debug("Loaded encrypted profile: %s -> %s", f.name, model_id)
                 self._journal_auth(PROFILE_AUTH_AUTHENTICATED, profile_name, encrypted, None)
 
         self._profiles = profiles
         self._loaded_count = len(profiles)
-        logger.info(
-            "ProfileRouter: loaded %d valid profiles from %s",
-            len(profiles),
-            self.profile_dir,
-        )
+        report.total_loaded = len(profiles)
+        # DONE.md floor invariant 9(b): the pass WORDING is gated on work done, not
+        # on absence-of-failure, and every work-not-done unit is NAMED. Before
+        # 2026-07-26 this line read "loaded N valid profiles" whatever happened to
+        # the encrypted half, so a wrong key produced a clean-looking INFO summary
+        # over zero successful decrypts.
+        if report.encrypted_failed or report.encrypted_rejected:
+            logger.error("ProfileRouter: %s", report.summary(self.profile_dir))
+        else:
+            logger.info("ProfileRouter: %s", report.summary(self.profile_dir))
 
     def _journal_auth(
         self,
@@ -448,12 +648,21 @@ class ProfileRouter:
                 data = yaml.safe_load(fh)
             if not data:
                 return None
-            if not _verify_profile_license(data, f.name):
+            if not self._verify_license(data, f.name):
                 return None
             return data
         except Exception as e:
             logger.error("Failed to load profile %s: %s", f.name, e)
             return None
+
+    def _verify_license(self, data: dict, filename: str) -> bool:
+        return _verify_profile_license(
+            data,
+            filename,
+            license_key=self._license_key,
+            require_license=self._require_license,
+            allow_unsigned_license=self._allow_unsigned_license,
+        )
 
     @staticmethod
     def _extract_model_id(
@@ -520,8 +729,7 @@ class ProfileRouter:
             return prof
         # public-API GPT-5.x: prefer a version-specific profile if characterised
         # (gpt-5.5 covers gpt-5.5*, etc.), else nearest characterised API surface gpt-5.4.
-        import re as _re
-        _vm = _re.match(r"(gpt-5(?:\.\d+)?)", model_lower)
+        _vm = re.match(r"(gpt-5(?:\.\d+)?)", model_lower)
         if _vm:
             vprof = self._by_model_id(_vm.group(1))
             if vprof is not None:
@@ -540,8 +748,7 @@ class ProfileRouter:
         MODEL_PROFILE_MAP GLM entries (2026-07-05)."""
         if "glm" not in model_lower:
             return None
-        import re as _re
-        m = _re.search(r"glm-?(5(?:\.\d+)?)", model_lower)
+        m = re.search(r"glm-?(5(?:\.\d+)?)", model_lower)
         if not m:
             return None
         return self._by_model_id(f"zai-org/glm-{m.group(1)}")
@@ -589,7 +796,14 @@ class ProfileRouter:
                 return self._profiles[key]
 
         # 3. Family match (first token of model_id)
-        family = model_lower.split("-")[0]
+        family = _family_token(model_lower)
+        if family is None:
+            logger.debug(
+                "No safe family fallback for versioned or compound model: %s",
+                model_id,
+            )
+            return None
+
         candidates = []
         for key, profile in self._profiles.items():
             stored_family = (

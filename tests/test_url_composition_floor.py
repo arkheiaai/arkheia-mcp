@@ -118,6 +118,12 @@ REVIEWED_UNRESOLVED: dict[str, str] = {
     "proxy/tests/test_egress_proxy_runtime.py::url":
         "f\"{target_server.url}/...\"; _Server.url is a @property returning "
         "f\"http://{host}:{port}\" from a live socket address, never an env read",
+    # Same blind spot 2, same construct, second copy: PR #65 added a repo-root
+    # tests/test_egress_proxy_runtime.py whose _Server.url is likewise a
+    # @property returning f"http://{host}:{port}" off a bound socket.
+    "tests/test_egress_proxy_runtime.py::url":
+        "f\"{target.url}/...\"; _Server.url is a @property returning "
+        "f\"http://{host}:{port}\" from a live socket address, never an env read",
     # Blind spot 1 again, one hop through a frozen dataclass field rather than a
     # helper: `candidate = f"{provider.base}/{path}"` in `_resolve_upstream`.
     # `Provider.base` is a FIELD, so `_bindings` finds no assignment to the slot

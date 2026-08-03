@@ -15,8 +15,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from proxy.crypto.profile_crypto import encrypt_profile
-from proxy.license.integrity import generate_manifest
+from proxy.crypto.profile_crypto import decrypt_profile, encrypt_profile
+from proxy.license.integrity import COMPILED_ARTIFACT_GLOBS, generate_manifest
 try:
     from setup_cython import COMPILED_MODULES
 except ImportError:
@@ -90,6 +90,23 @@ def resolve_profile_key(
     return master_key
 
 
+def _compiled_artifacts(module_dir: Path) -> list[Path]:
+    artifacts: list[Path] = []
+    for pattern in COMPILED_ARTIFACT_GLOBS:
+        artifacts.extend(sorted(module_dir.glob(pattern)))
+    return artifacts
+
+
+def assert_compiled_artifact_population(module_dirs: Sequence[Path]) -> None:
+    empty_dirs = [module_dir for module_dir in module_dirs if not _compiled_artifacts(module_dir)]
+    if empty_dirs:
+        formatted = ", ".join(str(path) for path in empty_dirs)
+        raise ValueError(
+            "No compiled artifacts found for integrity manifest generation in: "
+            f"{formatted}"
+        )
+
+
 def step_cython_compile(repo_root: Path = REPO_ROOT) -> None:
     print("\n=== Step 1: Cython compile ===")
     subprocess.run(
@@ -116,18 +133,54 @@ def step_encrypt_profiles(master_key: bytes, profile_dir: Path) -> int:
         encrypted = encrypt_profile(plaintext, master_key, profile_name)
         enc_path = profile_dir / f"{profile_name}.yaml.enc"
         enc_path.write_bytes(encrypted)
+
+        # Prove the ciphertext is RECOVERABLE before destroying the only plaintext copy.
+        # Without this, a broken or mis-keyed encrypt_profile writes undecryptable bytes, this
+        # step reports success, and the source YAML is deleted -- unrecoverable data loss that
+        # every existing assertion passes straight through, because they only check that the
+        # plaintext is gone and a .enc exists. Read back from DISK rather than trusting the
+        # in-memory buffer, so a truncated or partial write is caught too.
+        try:
+            recovered = decrypt_profile(enc_path.read_bytes(), master_key, profile_name)
+        except Exception as exc:  # noqa: BLE001 - any failure here must stop the build
+            raise RuntimeError(
+                f"Refusing to delete {yaml_file.name}: the ciphertext written to "
+                f"{enc_path.name} could not be decrypted ({exc!r}). The plaintext has been "
+                f"left in place."
+            ) from exc
+        if recovered != plaintext:
+            raise RuntimeError(
+                f"Refusing to delete {yaml_file.name}: {enc_path.name} decrypts to "
+                f"{len(recovered)} bytes but the source is {len(plaintext)} bytes. The "
+                f"plaintext has been left in place."
+            )
+
         yaml_file.unlink()
         encrypted_count += 1
-        print(f"  Encrypted: {yaml_file.name} -> {enc_path.name}")
+        print(f"  Encrypted: {yaml_file.name} -> {enc_path.name} (round-trip verified)")
 
-    print(f"  Profiles encrypted: {encrypted_count}")
+    if encrypted_count == 0:
+        # A zero count previously printed "Profiles encrypted: 0" and returned success, so a
+        # release could ship with nothing encrypted and nothing to say so.
+        raise RuntimeError(
+            f"Refusing to continue: no profiles were encrypted. Searched {profile_dir} for "
+            f"'*.yaml' (excluding schema.yaml) and found no candidates."
+        )
+
+    print(f"  Profiles encrypted: {encrypted_count} (all round-trip verified)")
     return encrypted_count
 
 
-#: What ``proxy.license.integrity.generate_manifest`` globs for. Named here so the
+#: Re-exported from ``proxy.license.integrity`` (see the import above) so the
 #: refusal below can tell an operator what was actually searched for, rather than
 #: reporting an unexplained zero.
-COMPILED_ARTIFACT_GLOBS = ("*.so", "*.pyd")
+#:
+#: It used to be a SECOND declaration here, documented as "what generate_manifest
+#: globs for". Two constants that must agree eventually will not, and drifting low
+#: on this one would let a compiled artifact exist that the runtime check never
+#: notices — the missing-manifest bypass with extra steps. The runtime owns the
+#: definition; this module imports it.
+__all_globs__ = COMPILED_ARTIFACT_GLOBS
 
 
 class EmptyManifest(ValueError):
@@ -189,6 +242,9 @@ def step_generate_manifest(module_dir: Path, output_path: Path | None = None) ->
 
 
 def compiled_module_dirs(repo_root: Path = REPO_ROOT) -> list[Path]:
+    if not COMPILED_MODULES:
+        raise ValueError("No compiled modules configured; refusing to build a release.")
+
     seen: list[Path] = []
     for module_path in COMPILED_MODULES:
         module_dir = (repo_root / module_path).parent
@@ -295,14 +351,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
 
     try:
+        module_dirs = compiled_module_dirs(REPO_ROOT)
         master_key = resolve_profile_key(args.profile_key_cli, args.profile_key_file)
         if not args.skip_compile:
             step_cython_compile(REPO_ROOT)
 
+        assert_compiled_artifact_population(module_dirs)
+
         encrypted_count = step_encrypt_profiles(master_key, REPO_ROOT / "profiles")
 
         manifests: dict[str, dict[str, str]] = {}
-        for module_dir in compiled_module_dirs(REPO_ROOT):
+        for module_dir in module_dirs:
             manifest_path = module_dir / "integrity_manifest.json"
             manifests[str(manifest_path)] = step_generate_manifest(module_dir, manifest_path)
 
@@ -317,7 +376,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             removed=removed,
             repo_root=REPO_ROOT,
         )
-    except (FileNotFoundError, ValueError, subprocess.CalledProcessError) as exc:
+    except (FileNotFoundError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
 

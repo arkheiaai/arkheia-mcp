@@ -9,7 +9,7 @@ PASSING CRITERIA:
   5. Smoke test failure -> ProfileValidator.run_smoke_test() returns (False, reason)
   6. MCP ProxyClient ConnectError -> UNKNOWN returned, no exception raised
   7. No profile for model -> engine returns UNKNOWN with error=no_profile_for_model
-  8. AuditWriter queue full -> write() drops record silently, no exception raised
+  8. AuditWriter queue full -> write() returns queue_full, no exception raised
   9. Registry 429 (rate limit) -> pull() returns error dict gracefully
  10. Engine None in app state -> /detect/verify returns HTTP 200, risk_level=UNKNOWN
 
@@ -455,16 +455,16 @@ class TestFailureModeContracts:
     # -----------------------------------------------------------------------
 
     @pytest.mark.asyncio
-    async def test_audit_writer_queue_full_drops_silently(self, tmp_path):
+    async def test_audit_writer_queue_full_reports_drop(self, tmp_path):
         """
-        CRITERION 8: AuditWriter.write() with a full queue drops the record
-        silently -- no exception raised to caller, no crash.
+        CRITERION 8: AuditWriter.write() with a full queue reports that the
+        record was dropped -- no exception raised to caller, no crash.
 
         AuditWriter uses put_nowait() wrapped in try/except QueueFull.
         The queue has maxsize=10_000 -- we fill it then verify write() still
-        returns without raising.
+        returns without raising and does not read as success.
         """
-        from proxy.audit.writer import AuditWriter
+        from proxy.audit.writer import AUDIT_WRITE_QUEUE_FULL, AuditWriter
 
         log_file = str(tmp_path / "audit.jsonl")
         writer = AuditWriter(log_path=log_file, retention_days=365)
@@ -474,9 +474,10 @@ class TestFailureModeContracts:
             # Fill the queue to capacity by patching put_nowait to always raise QueueFull
             with patch.object(writer._queue, "put_nowait",
                               side_effect=asyncio.QueueFull()):
-                # write() must not raise -- it silently drops the record
-                await writer.write({"detection_id": "test-123", "risk_level": "LOW"})
-                # If we reach here, the contract is satisfied
+                status = await writer.write({
+                    "detection_id": "test-123", "risk_level": "LOW",
+                })
+                assert status == AUDIT_WRITE_QUEUE_FULL
         finally:
             await writer.stop()
 

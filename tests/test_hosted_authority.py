@@ -302,6 +302,12 @@ def test_installer_hosted_url_policy_matches_python_policy_for_deterministic_url
 def test_installer_key_bearing_curls_use_authorized_hosted_url_not_raw_env():
     source = (ROOT / "install.sh").read_text(encoding="utf-8")
 
+    if "This installer does not read, provision, verify, persist, or print API keys." in source:
+        assert "X-Arkheia-Key" not in source
+        assert "/v1/provision" not in source
+        assert "/v1/detect" not in source
+        return
+
     assert '"${AUTHORIZED_HOSTED_URL}/v1/provision"' in source
     assert '"${AUTHORIZED_HOSTED_URL}/v1/detect"' in source
     assert '"${HOSTED_URL}/v1/provision"' not in source

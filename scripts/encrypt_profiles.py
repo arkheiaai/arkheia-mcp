@@ -26,7 +26,7 @@ from typing import Sequence
 # Add parent to path so we can import proxy modules
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from proxy.crypto.profile_crypto import encrypt_profile
+from proxy.crypto.profile_crypto import decrypt_profile, encrypt_profile
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -100,10 +100,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifest = {}
     encrypted_count = 0
 
-    for yaml_file in sorted(profile_dir.glob("*.yaml")):
-        if yaml_file.name == "schema.yaml":
-            continue
+    candidates = [
+        f for f in sorted(profile_dir.glob("*.yaml")) if f.name != "schema.yaml"
+    ]
 
+    # DONE.md floor invariant 9: a step that reports a count must fail when the
+    # count is zero. Before 2026-07-26 this loop over an empty directory printed
+    # "Done: 0 profiles encrypted" and exited 0 — a release that encrypted NOTHING
+    # reported success, exactly as `generate_manifest` over a directory with no
+    # `.so` wrote `{}` and then logged "Integrity check passed: 0 modules verified".
+    if not candidates:
+        print(
+            f"ERROR: No profiles to encrypt in {profile_dir} (0 *.yaml files, "
+            "excluding schema.yaml). Refusing to report a successful release "
+            "build that encrypted nothing.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    for yaml_file in candidates:
         profile_name = yaml_file.stem  # e.g. "gpt-4o" from "gpt-4o.yaml"
         plaintext = yaml_file.read_bytes()
         encrypted = encrypt_profile(plaintext, master_key, profile_name)
@@ -111,13 +126,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         enc_path = output_dir / f"{profile_name}.yaml.enc"
         enc_path.write_bytes(encrypted)
 
+        # Verify the round trip BEFORE deleting the only plaintext copy. This step
+        # is destructive and was previously unverified: it wrote the .enc, unlinked
+        # the source, and never once proved the bytes it had just written could be
+        # read back. A short write, a wrong-but-well-formed key, or any future
+        # framing change would have destroyed the profile corpus irrecoverably,
+        # and the symptom would not appear until a customer's proxy started up.
+        readback = enc_path.read_bytes()
+        recovered = decrypt_profile(readback, master_key, profile_name)
+        if recovered != plaintext:
+            print(
+                f"ERROR: round-trip verification FAILED for {yaml_file.name} — "
+                f"the encrypted file does not decrypt back to the source. "
+                f"Plaintext NOT deleted. Aborting.",
+                file=sys.stderr,
+            )
+            sys.exit(3)
+
         manifest[profile_name] = {
             "file": enc_path.name,
             "plaintext_size": len(plaintext),
             "encrypted_size": len(encrypted),
         }
         encrypted_count += 1
-        print(f"  Encrypted: {yaml_file.name} -> {enc_path.name} ({len(encrypted)} bytes)")
+        print(
+            f"  Encrypted: {yaml_file.name} -> {enc_path.name} "
+            f"({len(encrypted)} bytes, round-trip verified)"
+        )
 
         if not args.keep_plaintext:
             yaml_file.unlink()
@@ -126,6 +161,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Write manifest (not encrypted — just profile names and versions)
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2))
+
+    if encrypted_count != len(candidates):  # pragma: no cover - defensive
+        missing = sorted({f.stem for f in candidates} - set(manifest))
+        print(
+            f"ERROR: {encrypted_count} of {len(candidates)} profiles encrypted. "
+            f"NOT encrypted: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        sys.exit(4)
 
     print(f"\nDone: {encrypted_count} profiles encrypted, manifest at {manifest_path}")
     return 0

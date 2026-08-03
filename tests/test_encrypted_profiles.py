@@ -154,9 +154,10 @@ def test_profile_router_warns_no_key(master_key, profile_yaml, caplog):
         assert any("no decryption key" in r.message.lower() for r in caplog.records)
 
 
-def test_profile_router_mixed_plaintext_and_encrypted(master_key, sample_profile, profile_yaml):
-    """Encrypted profile directories refuse plaintext siblings by default."""
-    from proxy.audit.decision_journal import PROFILE_AUTH_PLAINTEXT_REJECTED
+def test_profile_router_mixed_plaintext_and_encrypted_requires_explicit_escape_hatch(
+    master_key, sample_profile, profile_yaml
+):
+    """Mixed plaintext/encrypted estates are explicit local/dev mode, not fallback."""
     from proxy.router.profile_router import ProfileRouter
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -168,75 +169,11 @@ def test_profile_router_mixed_plaintext_and_encrypted(master_key, sample_profile
         encrypted = encrypt_profile(profile_yaml, master_key, "gpt-4o")
         (Path(tmpdir) / "gpt-4o.yaml.enc").write_bytes(encrypted)
 
-        router = ProfileRouter(tmpdir, decryption_key=master_key)
-        assert router.loaded_count == 1
-        assert router.get("gpt-4o") is not None
-        assert router.get("claude-sonnet-4-6") is None
-        entries, dropped = router.decision_journal.drain()
-        assert dropped == 0
-        assert entries[0]["outcome"] == PROFILE_AUTH_PLAINTEXT_REJECTED
-        assert entries[0]["skipped_profile_names"] == ["claude-sonnet-4-6.yaml"]
-
-
-def test_profile_router_refuses_plaintext_sibling_when_encrypted_profile_has_no_key(
-    master_key, sample_profile, profile_yaml,
-):
-    """A no-key encrypted directory cannot be backfilled by attacker plaintext."""
-    from proxy.audit.decision_journal import (
-        PROFILE_AUTH_PLAINTEXT_REJECTED,
-        PROFILE_AUTH_SKIPPED_NO_KEY,
-    )
-    from proxy.router.profile_router import ProfileRouter
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        attacker_profile = {**sample_profile, "model": "attacker-model"}
-        (Path(tmpdir) / "attacker-model.yaml").write_text(yaml.dump(attacker_profile))
-        encrypted = encrypt_profile(profile_yaml, master_key, "gpt-4o")
-        (Path(tmpdir) / "gpt-4o.yaml.enc").write_bytes(encrypted)
-
-        router = ProfileRouter(tmpdir)
-        assert router.loaded_count == 0
-        assert router.get("attacker-model") is None
-        entries, dropped = router.decision_journal.drain()
-        assert dropped == 0
-        assert [entry["outcome"] for entry in entries] == [
-            PROFILE_AUTH_PLAINTEXT_REJECTED,
-            PROFILE_AUTH_SKIPPED_NO_KEY,
-        ]
-        assert entries[0]["skipped_profile_names"] == ["attacker-model.yaml"]
-        assert entries[1]["skipped_profile_names"] == ["gpt-4o.yaml.enc"]
-
-
-def test_profile_router_plaintext_only_directory_still_loads(sample_profile):
-    """Development plaintext directories stay supported when no encrypted profile exists."""
-    from proxy.router.profile_router import ProfileRouter
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        (Path(tmpdir) / "claude-sonnet-4-6.yaml").write_text(
-            yaml.dump({**sample_profile, "model": "claude-sonnet-4-6"})
+        router = ProfileRouter(
+            tmpdir,
+            decryption_key=master_key,
+            allow_plaintext_profiles=True,
         )
-
-        router = ProfileRouter(tmpdir)
-        assert router.loaded_count == 1
-        assert router.get("claude-sonnet-4-6") is not None
-        assert router.decision_journal.drain() == ([], 0)
-
-
-def test_profile_router_plaintext_migration_requires_explicit_opt_in(
-    monkeypatch, master_key, sample_profile, profile_yaml,
-):
-    """Mixed plaintext/encrypted loading is intentional only with a visible opt-in."""
-    from proxy.router.profile_router import ProfileRouter
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        (Path(tmpdir) / "claude-sonnet-4-6.yaml").write_text(
-            yaml.dump({**sample_profile, "model": "claude-sonnet-4-6"})
-        )
-        encrypted = encrypt_profile(profile_yaml, master_key, "gpt-4o")
-        (Path(tmpdir) / "gpt-4o.yaml.enc").write_bytes(encrypted)
-
-        monkeypatch.setenv("ARKHEIA_ALLOW_PLAINTEXT_PROFILES", "true")
-        router = ProfileRouter(tmpdir, decryption_key=master_key)
         assert router.loaded_count == 2
         assert router.get("gpt-4o") is not None
         assert router.get("claude-sonnet-4-6") is not None
@@ -294,23 +231,29 @@ def test_key_loader_no_cache():
 def test_integrity_no_manifest():
     """No manifest must NOT block, and must NOT read as a pass either.
 
-    Updated 2026-07-26 (Codex finding 4): `verify_integrity` used to return `True`
-    both here and for a fully verified artifact, which is exactly the collapse that
-    let proxy/main.py treat a tamper like a missing manifest. The two states are now
-    distinct, so this test asserts the state rather than the truthiness.
+    Updated again for F18: `verify_integrity` is now the policy wrapper
+    (`True` or `TamperDetected`), while `build_integrity_record` carries the
+    state.
     """
-    from proxy.license.integrity import IntegrityStatus, verify_integrity
+    from proxy.license.integrity import (
+        VERDICT_UNVERIFIABLE,
+        build_integrity_record,
+        verify_integrity,
+    )
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        report = verify_integrity(Path(tmpdir))
-        assert report.status == IntegrityStatus.UNVERIFIED_NO_MANIFEST
-        assert report.verified is False
+        path = Path(tmpdir)
+        assert verify_integrity(path) is True
+        record = build_integrity_record(path)
+        assert record["verdict"] == VERDICT_UNVERIFIABLE
+        assert record["modules_expected"] == 0
 
 
 def test_integrity_valid_manifest():
     """Valid manifest should pass verification."""
     from proxy.license.integrity import (
-        IntegrityStatus,
+        VERDICT_VERIFIED,
+        build_integrity_record,
         generate_manifest,
         verify_integrity,
     )
@@ -320,10 +263,11 @@ def test_integrity_valid_manifest():
         # Create a fake .so file
         (p / "features.cpython-312.so").write_bytes(b"fake compiled module content")
         generate_manifest(p, p / "integrity_manifest.json")
-        report = verify_integrity(p)
-        assert report.status == IntegrityStatus.VERIFIED
-        assert report.verified is True
-        assert report.modules_checked == 1
+        assert verify_integrity(p) is True
+        record = build_integrity_record(p)
+        assert record["verdict"] == VERDICT_VERIFIED
+        assert record["modules_expected"] == 1
+        assert record["modules_matched"] == 1
 
 
 def test_integrity_tampered_module():

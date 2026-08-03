@@ -324,8 +324,8 @@ class TestTheRailCanOnlyEverConfirmEnqueued:
     """PR #31 corrected `"recorded"` to `"enqueued"` for exactly this reason, and the
     same limit applies to every claim this suite makes.
 
-    `AuditWriter.write()` drops silently on a full queue and `_writer_loop` swallows
-    every I/O error, so the endpoint cannot know its record landed. It returns the
+    `AuditWriter.write()` reports a full queue, but `_writer_loop` still swallows
+    every later I/O error, so the endpoint cannot know its record landed. It returns the
     verdict either way. The consequence for THIS flow: a suppression — a decision not to
     report — can be taken and lost, with the caller told LOW and nothing on disk.
     Proved with a REAL filesystem failure, not a patched exception.

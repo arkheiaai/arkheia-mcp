@@ -28,8 +28,8 @@ Three ways a "receipt test" fails to answer it, all seen in this repo:
    the audit layer. It proves nothing about what reaches disk — the writer
    redacts, chains and serialises after that point, and can drop the record
    entirely (``AuditWriter._writer_loop`` swallows every exception, and
-   ``write()`` drops silently on a full queue). A recording stub cannot observe
-   any of that.
+   ``write()`` reports but still drops on a full queue). A recording stub cannot
+   observe any of that.
 
 2. **It reads back *a* record, not *this* record.** A test that writes one record
    and then asserts something about "the record on disk" passes even when the id
