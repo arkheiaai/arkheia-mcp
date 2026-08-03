@@ -190,6 +190,22 @@ class TestProfileValidator:
         """CRITERION 10: Wrong checksum returns False."""
         assert validator.verify_checksum(VALID_YAML, "deadbeef" * 8) is False
 
+    def test_checksum_same_prefix_wrong_tail_is_rejected(self, validator):
+        """Checksum verification must compare the FULL SHA-256, not a prefix.
+
+        PR #66 floor, kept on merge: `test_checksum_mismatch` above uses a digest
+        that differs in its FIRST byte, so a truncated/prefix comparison would
+        still pass it. This one shares the first 8 chars and differs at index 8,
+        so it fails iff the comparison is full-length.
+        """
+        wrong_tail = "0" if VALID_CHECKSUM[8] != "0" else "1"
+        same_prefix_wrong_digest = VALID_CHECKSUM[:8] + wrong_tail + VALID_CHECKSUM[9:]
+        assert same_prefix_wrong_digest[:8] == VALID_CHECKSUM[:8]
+        assert same_prefix_wrong_digest != VALID_CHECKSUM
+        assert len(same_prefix_wrong_digest) == 64
+
+        assert validator.verify_checksum(VALID_YAML, same_prefix_wrong_digest) is False
+
     def test_smoke_test_pass(self, validator):
         """Smoke test with expected LOW result passes."""
         passed, reason = validator.run_smoke_test(VALID_PROFILE)

@@ -284,13 +284,21 @@ class InterceptionRefusal(Exception):
 # Body extraction helpers (module-level, not methods)
 # ---------------------------------------------------------------------------
 
+# The audit-row value meaning "the transport never identified a model" -- an
+# unparseable body, a body with no `model` key, or a request refused before it was
+# ever relayed. It is a SENTINEL, not a model id: no traffic is ever routed to it and
+# no profile can exist for it. Named once so the two producers below agree, and so it
+# is never spelled as a model-id-shaped parameter DEFAULT (see `_audit_record`).
+UNIDENTIFIED_MODEL_ID = "unknown"
+
+
 def _extract_model_id(body: bytes) -> str:
     """Parse JSON body and return the model field. Returns 'unknown' on any error."""
     try:
         body_json = json.loads(body)
-        return body_json.get("model", "unknown")
+        return body_json.get("model", UNIDENTIFIED_MODEL_ID)
     except Exception:
-        return "unknown"
+        return UNIDENTIFIED_MODEL_ID
 
 
 def _extract_prompt(body: bytes) -> str:
@@ -568,7 +576,14 @@ def _audit_record(
     method: str,
     prompt: str,
     response_body: bytes,
-    model_id: str = "unknown",
+    # None = the transport never identified a model, which is the ONLY way this is
+    # called without one (`_refuse`: the request was denied before relay, so nothing
+    # was ever scored). Absence is spelled as absence rather than as the string
+    # "unknown", because a model-id-shaped parameter DEFAULT is indistinguishable --
+    # to tests/test_fleet_default_screening_floor.py and to a reader -- from a fleet
+    # default that ships unscreened. Rendered as UNIDENTIFIED_MODEL_ID on the row so
+    # /audit/log keeps one vocabulary.
+    model_id: Optional[str] = None,
     profile_version: str = "none",
     confidence: float = 0.0,
     features_triggered: Optional[list] = None,
@@ -592,7 +607,7 @@ def _audit_record(
         "detection_id": detection_id,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "session_id": None,
-        "model_id": model_id,
+        "model_id": model_id or UNIDENTIFIED_MODEL_ID,
         "profile_version": profile_version,
         "risk_level": risk_level,
         "confidence": confidence,

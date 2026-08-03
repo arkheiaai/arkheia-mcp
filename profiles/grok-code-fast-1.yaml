@@ -3,6 +3,26 @@ version: "2.0"
 type: api
 generated: "2026-02-27T09:21:20Z"
 
+# ---------------------------------------------------------------------------
+# ⚠ NAME-STABILITY CAVEAT — added 2026-07-26, UNVERIFIED, do not treat as measured.
+#
+# REPORTED (not confirmed from this machine): `grok-code-fast-1` is now a live ALIAS
+# onto a different underlying model (`grok-build-0.1`). If that is so, this profile is
+# keyed to a NAME that no longer denotes the model it was characterised against on
+# 2026-02-27, and scoring traffic under this id would compare a new model's output to an
+# old model's fingerprint — the same silent-mischaracterisation failure that
+# ProfileRouter._resolve_grok now prevents for versioned grok ids.
+#
+# It could NOT be checked: the only xAI key available returns "Incorrect API key
+# provided" for every request including GET /v1/language-models, so the alias table was
+# unreadable. Flagged rather than acted on, because deleting or re-pointing a profile on
+# an unverified report would itself be a fabrication.
+#
+# TO RESOLVE: with a working xAI key, GET https://api.x.ai/v1/language-models and check
+# whether this id appears as an alias of another model. If it does, this profile must be
+# re-characterised or renamed to the id it actually describes.
+# ---------------------------------------------------------------------------
+
 characterization:
   date: "2026-02-27"
   prompts: 400

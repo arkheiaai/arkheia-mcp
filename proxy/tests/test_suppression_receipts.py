@@ -61,7 +61,10 @@ def rail(tmp_path):
     production code writes it, the test only reads it.
     """
     log_path = tmp_path / "audit" / "audit.jsonl"
-    with patch("proxy.main.settings") as s:
+    with (
+        patch.dict("os.environ", {"ARKHEIA_ALLOW_PLAINTEXT_PROFILES": "true"}),
+        patch("proxy.main.settings") as s,
+    ):
         s.detection.profile_dir = str(_REPO_ROOT / "profiles")
         s.detection.high_risk_action = "warn"
         s.detection.unknown_action = "pass"

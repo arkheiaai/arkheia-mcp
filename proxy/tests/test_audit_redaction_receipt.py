@@ -18,15 +18,14 @@ production writer loop into the append-only JSONL, and it is sealed into the
 tamper-evident hash chain, so it is durable and non-repudiable in the same sense
 every other audit field is.
 
-So this is not an ``n/a``: the decision exists, and its record exists. Current
-``master`` already proves the broad leak-detection path through endpoint and
-writer coverage. What this module adds is narrower: the receipt token is
-value-identifying, the exact row is found by the surfaced decision id, and the
-redacted form is the form sealed into the hash chain. ``redact()`` returning a
-clean dict, a clean dict reaching disk, and a value-specific token being chained
-on disk are different claims: between them sit ``AuditWriter._writer_loop``'s
-chain fields, its serialisation, its blanket ``except Exception`` (which drops the
-record and logs), and ``write()``'s silent drop on a full queue.
+So this is not an ``n/a``: the decision exists, and its record exists. What was
+missing was any proof that the record is real — every existing test of the
+redactor calls ``redact()`` directly and asserts on its return value, which is a
+test of the function, not of the artefact. ``redact()`` returning a clean dict and
+a clean dict reaching disk are different claims: between them sit
+``AuditWriter._writer_loop``'s chain fields, its serialisation, its blanket
+``except Exception`` (which drops the record and logs), and ``write()``'s silent
+drop on a full queue.
 
 Phase 2: what proving it requires
 ---------------------------------

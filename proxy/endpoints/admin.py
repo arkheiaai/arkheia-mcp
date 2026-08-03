@@ -641,6 +641,10 @@ _ADMIN_UI_HTML = """<!DOCTYPE html>
           '<span class="expand-key">Full prompt</span><span class="expand-val text">' + escHtml(e.prompt_preview || '—') + '</span>' +
           '<span class="expand-key">Model</span><span class="expand-val">' + escHtml(e.model_id || '—') + '</span>' +
           '<span class="expand-key">Risk level</span><span class="expand-val">' + escHtml(e.risk_level || '—') + '</span>' +
+          '<span class="expand-key">Profile version</span><span class="expand-val">' + escHtml(e.profile_version || '—') + '</span>' +
+          '<span class="expand-key">Features fired</span><span class="expand-val">' + escHtml(featuresText(e)) + '</span>' +
+          '<span class="expand-key">Detection reason</span><span class="expand-val text">' + escHtml(reasonText(e)) + '</span>' +
+          '<span class="expand-key">What would clear it</span><span class="expand-val text">' + escHtml(remedyText(e)) + '</span>' +
           '</div></td></tr>';
       }
     });
@@ -715,6 +719,58 @@ _ADMIN_UI_HTML = """<!DOCTYPE html>
     fetchAll();
     startTimer();
   };
+
+  // ── Verdict legibility ───────────────────────────────────────────────────
+  // An adverse or unassessable verdict must carry, AT THE POINT OF THE VERDICT, the reason
+  // behind it and what would clear it. A bare UNKNOWN badge with the reason swallowed is
+  // "computer says no" — for a trust product that is indistinguishable from fabrication,
+  // and it was the state of this dashboard: it rendered the badge and dropped `error`.
+  var REASON_TEXT = {
+    'no_profile_for_model':   "couldn't assess — no detection profile exists for this model id, so nothing about this response was measured",
+    'no_computable_features': "couldn't assess — a profile exists for this model but none of its features could be computed from this response",
+    'engine_unavailable':     "couldn't assess — the detection engine was not running",
+    'engine_error':           "couldn't assess — the detection engine raised while scoring",
+    'response_empty':         "couldn't assess — there was no response text to score",
+    'model_id_missing':       "couldn't assess — no model id was supplied, so no profile could be selected"
+  };
+  var REMEDY_TEXT = {
+    'no_profile_for_model':   'A characterisation run for this model id (labelled corpus, real model calls, held-out validation). Until then, traffic on this id is UNSCORED — not low risk.',
+    'no_computable_features': 'A longer response, or a profile whose features do not require telemetry this path cannot supply.',
+    'engine_unavailable':     'Start the detection engine, then re-run the call.',
+    'engine_error':           'Check the proxy logs for the engine error, then re-run the call.',
+    'response_empty':         'Nothing — an empty response cannot be assessed.',
+    'model_id_missing':       'Send the model id used for the call.'
+  };
+
+  function featuresText(e) {
+    var f = e.features_triggered;
+    if (!f || !f.length) return 'none';
+    return f.join(', ');
+  }
+
+  function reasonText(e) {
+    if (e.error) {
+      return REASON_TEXT[e.error] || ("couldn't assess — " + e.error);
+    }
+    var noFeatures = !e.features_triggered || !e.features_triggered.length;
+    if (e.evidence_depth_limited === true && noFeatures) {
+      return "couldn't assess with confidence — the profile ran, no feature fired, and evidence depth is limited. Not a clean assessment.";
+    }
+    if (e.evidence_depth_limited === true) {
+      return 'Assessed on limited evidence depth.';
+    }
+    return 'Assessed.';
+  }
+
+  function remedyText(e) {
+    if (e.error) {
+      return REMEDY_TEXT[e.error] || 'Restore the detection path and re-run, or verify by other means.';
+    }
+    if (e.evidence_depth_limited === true) {
+      return 'A richer characterisation of this model, or a longer response.';
+    }
+    return '—';
+  }
 
   // ── Helpers ──────────────────────────────────────────────────────────────
   function badge(level) {

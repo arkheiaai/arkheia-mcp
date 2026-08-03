@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mcp_server.proxy_client import ProxyClient
+from mcp_server.tool_registry import REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -337,13 +338,15 @@ class TestMCPToolBehaviour:
                 "call_grok",
                 {
                     "response": "",
-                    "model": "grok-4-fast-non-reasoning",
+                    # The SHIPPED default for run_grok. Moved to the grok-4.20 pair on
+                    # 2026-07-26 (F2); grok-4-fast-* is retired and could not run.
+                    "model": "grok-4.20-non-reasoning",
                     "prompt_hash": "hash",
                     "usage": {"completion_tokens": 0},
                     "error": None,
                 },
                 {
-                    "model_id": "grok-4-fast-non-reasoning",
+                    "model_id": "grok-4.20-non-reasoning",
                     "usage": {"completion_tokens": 0},
                 },
             ),
@@ -412,7 +415,7 @@ class TestMCPToolBehaviour:
         mcp_server_module.proxy = mock_proxy
 
         try:
-            with patch.object(mcp_server_module, "check", lambda _tool: None), \
+            with patch.object(mcp_server_module, "check", lambda tool: REGISTRY[tool]), \
                  patch.object(
                      mcp_server_module,
                      provider_name,

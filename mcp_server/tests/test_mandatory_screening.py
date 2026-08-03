@@ -51,7 +51,14 @@ PROVIDER_TEXT = (
 # namespace, the tool's DEFAULT model). The default matters: it is what an agent
 # gets when it does not name a model, so it is the configuration actually shipped.
 WRAPPERS = [
-    ("run_grok", "run_grok", "call_grok", "grok-4-fast-non-reasoning"),
+    # grok's default moved to the grok-4.20 pair on 2026-07-26 (F2, David's explicit
+    # instruction). grok-4-fast-* is RETIRED, so the old value pinned a default that
+    # could not run. 4.20 has NO detection profile, which is why it is registered in
+    # tests/floor_baselines/knowingly_unprofiled_defaults.json and enforced by
+    # tests/test_fleet_default_screening_floor.py -- the value here is kept in step
+    # with the shipped default deliberately, so this pin still describes what an agent
+    # actually gets.
+    ("run_grok", "run_grok", "call_grok", "grok-4.20-non-reasoning"),
     ("run_gemini", "run_gemini", "call_gemini", "gemini-2.5-flash"),
     ("run_ollama", "run_ollama", "call_ollama", "phi4:14b"),
     ("run_together", "run_together", "call_together", "moonshotai/Kimi-K2.5"),
