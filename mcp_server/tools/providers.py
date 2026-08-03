@@ -56,6 +56,54 @@ def _prompt_hash(prompt: str) -> str:
     return hashlib.sha256(prompt.encode()).hexdigest()
 
 
+# Substrings that mean "your credentials were rejected", in the wording the providers
+# actually use. Matched case-insensitively against the response body.
+#
+# This list exists because HTTP STATUS IS NOT ENOUGH. Both xAI and Google express an
+# authentication failure as 400 Bad Request rather than 401, so status alone cannot
+# separate "your key is dead" from "your request is malformed" — and on 2026-07-26 those
+# two causes produced the identical `provider_error: http_400` from two different tools,
+# which sent the investigation after a retired model id that was never the problem.
+_AUTH_FAILURE_MARKERS = (
+    "incorrect api key",       # xAI:    {"code":"invalid-argument","error":"Incorrect API key provided..."}
+    "api key not valid",       # Google: {"error":{"message":"API key not valid...","status":"INVALID_ARGUMENT"}}
+    "invalid api key",         # Together and most OpenAI-compatible surfaces
+    "invalid_api_key",
+    "api key expired",
+    "unauthenticated",         # xAI with no Authorization header at all
+    "no credentials",
+    "unauthorized",
+    "authentication",
+)
+
+
+def _classify_http_error(status_code: int, body_text: str) -> str:
+    """
+    Map a provider HTTP error onto a stable, ACTIONABLE error code.
+
+    Returns "auth_failed" when the response is a credentials rejection — either by status
+    (401/403, the honest encodings) or by body (400, the encoding xAI and Google actually
+    use). Otherwise returns "http_<status>" unchanged.
+
+    The body is READ but never returned: provider error bodies can echo request content and
+    internal trace identifiers, and the caller only needs the classification. See
+    mcp_server/tests/test_provider_defaults.py INV-4.
+
+    Deliberately NOT a catch-all: a 400 whose body does not look like a credentials problem
+    stays `http_400`. Relabelling every 400 as an auth failure would be a worse defect than
+    the one this fixes — it would send an operator to rotate a perfectly good key.
+    """
+    if status_code in (401, 403):
+        return "auth_failed"
+
+    if status_code == 400 and body_text:
+        haystack = body_text.lower()
+        if any(marker in haystack for marker in _AUTH_FAILURE_MARKERS):
+            return "auth_failed"
+
+    return f"http_{status_code}"
+
+
 def _err_response(model: str, prompt: str, error: str) -> dict:
     return {
         "response":    f"[provider_error: {error}]",
@@ -162,11 +210,18 @@ def _local_ollama_base_url(raw_url: str | None = None) -> str:
 
 async def call_grok(
     prompt: str,
-    model: str = "grok-4-fast-non-reasoning",
+    model: str = "grok-4.20-non-reasoning",
     **kwargs: Any,
 ) -> dict:
     """
     Call xAI Grok chat completions API.
+
+    DEFAULT MODEL — the grok-4.20 pair (David, 2026-07-26). The pair is
+    `grok-4.20-non-reasoning` / `grok-4.20-reasoning`, deliberately chosen because both
+    modes are priced identically ($1.25 in / $2.50 out per 1M tokens as reported), so
+    switching mode does not change the cost model. Do NOT promote `grok-4.5` to the fleet
+    default: it is the frontier tier at $2.00/$6.00 — 2.4x the output price — and is
+    reserved rather than used for routine fleet work.
 
     Returns: {response, model, prompt_hash, error}
     """
@@ -200,8 +255,12 @@ async def call_grok(
     except (KeyError, IndexError, TypeError):
         return _parse_failure("call_grok", model, prompt)
     except httpx.HTTPStatusError as e:
-        logger.error("call_grok: HTTP %s for model=%s", e.response.status_code, model)
-        return _err_response(model, prompt, f"http_{e.response.status_code}")
+        reason = _classify_http_error(e.response.status_code, e.response.text)
+        logger.error(
+            "call_grok: HTTP %s (%s) for model=%s",
+            e.response.status_code, reason, model,
+        )
+        return _err_response(model, prompt, reason)
     except Exception as e:
         return _provider_failure("call_grok", model, prompt, e)
 
@@ -262,8 +321,12 @@ async def call_gemini(
     except (KeyError, IndexError, TypeError):
         return _parse_failure("call_gemini", model, prompt)
     except httpx.HTTPStatusError as e:
-        logger.error("call_gemini: HTTP %s for model=%s", e.response.status_code, model)
-        return _err_response(model, prompt, f"http_{e.response.status_code}")
+        reason = _classify_http_error(e.response.status_code, e.response.text)
+        logger.error(
+            "call_gemini: HTTP %s (%s) for model=%s",
+            e.response.status_code, reason, model,
+        )
+        return _err_response(model, prompt, reason)
     except Exception as e:
         return _provider_failure("call_gemini", model, prompt, e)
 
@@ -318,8 +381,12 @@ async def call_together(
     except (KeyError, IndexError, TypeError):
         return _parse_failure("call_together", model, prompt)
     except httpx.HTTPStatusError as e:
-        logger.error("call_together: HTTP %s for model=%s", e.response.status_code, model)
-        return _err_response(model, prompt, f"http_{e.response.status_code}")
+        reason = _classify_http_error(e.response.status_code, e.response.text)
+        logger.error(
+            "call_together: HTTP %s (%s) for model=%s",
+            e.response.status_code, reason, model,
+        )
+        return _err_response(model, prompt, reason)
     except Exception as e:
         return _provider_failure("call_together", model, prompt, e)
 
@@ -373,7 +440,11 @@ async def call_ollama(
         logger.error("call_ollama: cannot connect to Ollama at %s", base_url)
         return _err_response(model, prompt, "ollama_unavailable")
     except httpx.HTTPStatusError as e:
-        logger.error("call_ollama: HTTP %s for model=%s", e.response.status_code, model)
-        return _err_response(model, prompt, f"http_{e.response.status_code}")
+        reason = _classify_http_error(e.response.status_code, e.response.text)
+        logger.error(
+            "call_ollama: HTTP %s (%s) for model=%s",
+            e.response.status_code, reason, model,
+        )
+        return _err_response(model, prompt, reason)
     except Exception as e:
         return _provider_failure("call_ollama", model, prompt, e)

@@ -342,20 +342,51 @@ async def detect_verify(req: VerifyRequest, request: Request, http_response: Res
             "response_hash": hashlib.sha256(req.response.encode()).hexdigest(),
             "action_taken": action,
             "gate_action": gate_action,
+            # WHY the band is what it is. An UNKNOWN band with the reason dropped is a
+            # bare non-verdict: the operator surface can then tell "not assessed" from
+            # "assessed clean", but not "engine unavailable" from "no profile for this
+            # model" -- and only the second is fixable by shipping a profile. The audit
+            # record already carries both; a governance envelope that carries less than
+            # the local log is the weaker of the two compliance artefacts.
+            "error": response.error,
+            "evidence_depth_limited": response.evidence_depth_limited,
         },
-        # Pass the RAW band. This used to coerce anything unrecognised (i.e.
-        # UNKNOWN -- engine unavailable, engine error, no profile) to "LOW",
-        # which published an evidence-limited non-verdict to the governance plane
-        # as a clean LOW. detection_adapter.build_proxy_event now carries UNKNOWN
-        # through as classification=UNCERTAIN plus context.risk_level_raw, so a
-        # couldn't-assess never reads as an all-clear.
-        risk_level=response.risk_level,
+        # The band the envelope records. Normalised HERE, at the producer, and
+        # normalised again by detection_adapter.build_proxy_event at the wire schema --
+        # deliberately two layers, because this seam has failed in the LOW direction
+        # once already. This argument used to be
+        #     response.risk_level if response.risk_level in
+        #         ("LOW","MEDIUM","HIGH","CRITICAL") else "LOW"
+        # i.e. anything unrecognised -- UNKNOWN from an unavailable engine, an engine
+        # error, or no profile for the model -- was defaulted to the SAFEST-SOUNDING
+        # value, so a detection that never ran was published to the governance plane as
+        # a clean LOW. The honest default for "we do not recognise this" is UNKNOWN.
+        # The band exactly as the engine reported it still travels verbatim in
+        # `payload["risk_level"]` (-> `context.risk_level`), so nothing is lost.
+        risk_level=_envelope_risk_band(response.risk_level),
     )
 
     # Surface the governance decision to the caller: policy `action` (mirrors action_taken in
     # the audit) + profile-earned `gate_action`. Keeps HTTP 200; blocking-at-transport stays the
     # job of proxy/middleware/interception.py. Consumers hard-block only when gate_action=="block".
     return _signal(http_response, response, action, gate_action)
+
+
+# Bands the governance surface understands. UNKNOWN is in the set on purpose: "we could not
+# assess this" is a real, reportable outcome and must not be laundered into a risk band.
+_ENVELOPE_RISK_BANDS = ("LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN")
+
+
+def _envelope_risk_band(risk_level: str) -> str:
+    """
+    The band to record on the governance envelope.
+
+    Anything we do not recognise becomes UNKNOWN, never LOW. The old code defaulted to LOW,
+    which meant every unrecognised or unassessable outcome was recorded as the quietest
+    possible result — the exact shape of a check that reports clean when it measured nothing.
+    """
+    band = (risk_level or "").strip().upper()
+    return band if band in _ENVELOPE_RISK_BANDS else "UNKNOWN"
 
 
 def _determine_action(risk_level: str, settings) -> str:

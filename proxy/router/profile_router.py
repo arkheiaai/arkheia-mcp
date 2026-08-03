@@ -463,6 +463,19 @@ class ProfileRouter:
             if data:
                 model_id = self._extract_model_id(data, f.name)
                 if model_id:
+                    # A duplicate declared model id is a SILENT DISCARD: the dict is keyed by
+                    # the declared id, so whichever file the glob reaches last wins and the
+                    # other file's characterisation is dead weight that looks live in the
+                    # repo. Found 2026-07-26: profiles/gpt-5.2-codex.yaml declares
+                    # model: "gpt-5-codex", colliding with profiles/gpt-5-codex.yaml, so its
+                    # v4.0 content never loads and _by_model_id("gpt-5.2-codex") returns None.
+                    if model_id in profiles:
+                        logger.error(
+                            "Profile %s declares model id %r which is ALREADY provided by "
+                            "another profile file — one of them is being silently discarded. "
+                            "Detection for %r is running against whichever file loaded last.",
+                            f.name, model_id, model_id,
+                        )
                     profiles[model_id] = data
                     report.plaintext_loaded += 1
                     continue
@@ -753,6 +766,77 @@ class ProfileRouter:
             return None
         return self._by_model_id(f"zai-org/glm-{m.group(1)}")
 
+    @staticmethod
+    def _grok_version(model_lower: str) -> Optional[str]:
+        """
+        The version token of a grok id, normalised so '4-1' and '4.1' compare equal.
+
+        grok-4                    -> "4"
+        grok-4-fast-non-reasoning -> "4"
+        grok-4-1-fast-reasoning   -> "4.1"
+        grok-4.20-non-reasoning   -> "4.20"
+        grok-4.5                  -> "4.5"
+        grok-code-fast-1          -> None   (no numeric version in that position)
+        """
+        import re as _re
+
+        m = _re.match(r"^grok-(\d+(?:[.-]\d+)?)", model_lower)
+        return m.group(1).replace("-", ".") if m else None
+
+    def _resolve_grok(self, model_lower: str) -> Optional[dict]:
+        """
+        Version-aware routing for grok ids, so a NEW grok version never borrows an OLDER
+        one's behavioural fingerprint. Parity with _resolve_recent_gpt and _resolve_glm,
+        which exist for exactly this reason; grok simply never got one.
+
+        The crude prefix match in `get()` matches in either direction, and
+        "grok-4.20-non-reasoning".startswith("grok-4") is TRUE — so when the fleet default
+        moved to the grok-4.20 pair (2026-07-26), every grok-4.20 and grok-4.5 id silently
+        resolved to the **grok-4** profile. Detection would then have returned a
+        confident-looking verdict computed from a different model's fingerprint, which is
+        worse than returning nothing: an evidence-limited verdict must present as
+        "couldn't assess", never as a clean bill of health.
+
+        Returns a profile only when its own version token MATCHES the queried one, which
+        still permits a dated snapshot of the same version (grok-4-fast-...-20260101 ->
+        grok-4-fast-...) while refusing a cross-version borrow. Returns None otherwise —
+        the caller surfaces that as UNKNOWN.
+        """
+        want = self._grok_version(model_lower)
+        if want is None:
+            return None
+
+        # Collect ALL version-matching prefix candidates, then take the most specific
+        # (longest key). Returning the first match would be order-dependent: both "grok-4"
+        # and "grok-4-fast-non-reasoning" are version "4" and both prefix-match
+        # "grok-4-fast-non-reasoning-20260101", so a first-match rule hands a dated snapshot
+        # to whichever profile the directory happened to load first. That is the same
+        # accidental-borrow class this function exists to close.
+        candidates = []
+        for key, profile in self._profiles.items():
+            stored_id = (
+                profile.get("model")
+                or profile.get("metadata", {}).get("model_id", "")
+                or key
+            ).lower()
+            if self._grok_version(stored_id) != want:
+                continue
+            if key.startswith(model_lower) or model_lower.startswith(key):
+                candidates.append((len(key), key, profile))
+
+        if candidates:
+            _, key, profile = max(candidates, key=lambda c: c[0])
+            logger.debug("Grok version-matched profile: %s -> %s", model_lower, key)
+            return profile
+
+        logger.warning(
+            "Model %s: no profile for this grok version — refusing to borrow another "
+            "version's fingerprint. Detection will report UNKNOWN (couldn't assess) "
+            "rather than a verdict computed from the wrong model.",
+            model_lower,
+        )
+        return None
+
     def get(self, model_id: str) -> Optional[dict]:
         """Return profile for model_id, or None if no match."""
         if not model_id:
@@ -788,6 +872,13 @@ class ProfileRouter:
         glm = self._resolve_glm(model_lower)
         if glm is not None:
             return glm
+
+        # 1d. Grok explicit version routing — before the fuzzy match, so a VERSIONED grok id
+        # resolves only to its own version's profile and never borrows another's. Only takes
+        # over when a version token is actually parseable; an unversioned grok id (e.g.
+        # grok-code-fast-1) falls through to the existing behaviour unchanged.
+        if model_lower.startswith("grok") and self._grok_version(model_lower) is not None:
+            return self._resolve_grok(model_lower)
 
         # 2. Prefix match (either direction)
         for key in self._profiles:
