@@ -227,8 +227,7 @@ def _sanitize_for_json(obj):
         return obj, False
 
     if isinstance(obj, (bytes, bytearray)):
-        digest = hashlib.blake2b(bytes(obj), digest_size=8).hexdigest()
-        return f"<unserialisable:bytes len={len(obj)} fingerprint={digest}>", True
+        return f"<unserialisable:bytes len={len(obj)}>", True
 
     try:
         text = repr(obj)
