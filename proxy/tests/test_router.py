@@ -15,11 +15,19 @@ PASSING CRITERIA:
 """
 
 import asyncio
+import hashlib
+import hmac
+import json
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 import yaml
 
+from proxy.audit.decision_journal import (
+    PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
+    PROFILE_AUTH_SKIPPED_NO_KEY,
+)
 from proxy.router.profile_router import ProfileRouter
 
 
@@ -127,6 +135,135 @@ class TestProfileRouterLoading:
         assert r.get("good-model") is not None
 
 
+def _canonical_for_license(profile: dict) -> str:
+    content = {k: v for k, v in profile.items() if k != "license"}
+    return json.dumps(content, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
+
+
+def _license_signature(profile: dict, key: str) -> str:
+    block = profile["license"]
+    message = (
+        f"{_canonical_for_license(profile)}|"
+        f"{block['customer_id']}|{block['valid_until']}"
+    )
+    return hmac.new(key.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _licensed_profile(valid_until: str | None = None) -> dict:
+    return {
+        "model": "licensed-model",
+        "version": "1.0",
+        "detection": {"features": {}},
+        "license": {
+            "customer_id": "acme",
+            "valid_until": valid_until or (date.today() + timedelta(days=30)).isoformat(),
+        },
+    }
+
+
+class TestProfileRouterLicenseTrust:
+
+    def test_valid_signed_license_loads_when_key_is_configured(self, tmp_path):
+        key = "test-license-secret"
+        profile = _licensed_profile()
+        profile["license"]["signature"] = _license_signature(profile, key)
+        (tmp_path / "licensed.yaml").write_text(yaml.dump(profile))
+
+        router = ProfileRouter(str(tmp_path), license_key=key)
+
+        assert router.loaded_count == 1
+        assert router.get("licensed-model") is not None
+
+    def test_license_block_is_not_default_open_without_verification_key(self, tmp_path):
+        profile = _licensed_profile()
+        profile["license"]["signature"] = "present-but-not-verifiable"
+        (tmp_path / "licensed.yaml").write_text(yaml.dump(profile))
+
+        router = ProfileRouter(str(tmp_path), license_key="")
+
+        assert router.loaded_count == 0
+        assert router.get("licensed-model") is None
+
+    @pytest.mark.parametrize("license_block", [{}, [], "", 0, False, None])
+    def test_present_but_unusable_license_block_is_rejected(
+        self, tmp_path, license_block
+    ):
+        profile = {
+            "model": "licensed-model",
+            "version": "1.0",
+            "detection": {"features": {}},
+            "license": license_block,
+        }
+        (tmp_path / "licensed.yaml").write_text(yaml.dump(profile))
+
+        router = ProfileRouter(str(tmp_path), license_key="")
+
+        assert router.loaded_count == 0
+        assert router.get("licensed-model") is None
+
+    def test_bad_license_signature_is_rejected(self, tmp_path):
+        profile = _licensed_profile()
+        profile["license"]["signature"] = "bad"
+        (tmp_path / "licensed.yaml").write_text(yaml.dump(profile))
+
+        router = ProfileRouter(str(tmp_path), license_key="test-license-secret")
+
+        assert router.loaded_count == 0
+        assert router.get("licensed-model") is None
+
+    def test_expired_license_is_rejected(self, tmp_path):
+        key = "test-license-secret"
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        profile = _licensed_profile(yesterday)
+        profile["license"]["signature"] = _license_signature(profile, key)
+        (tmp_path / "licensed.yaml").write_text(yaml.dump(profile))
+
+        router = ProfileRouter(str(tmp_path), license_key=key)
+
+        assert router.loaded_count == 0
+        assert router.get("licensed-model") is None
+
+    def test_plaintext_profile_cannot_fallback_when_encrypted_profiles_are_refused(
+        self, tmp_path
+    ):
+        (tmp_path / "victim.yaml.enc").write_bytes(b"encrypted-profile-needs-a-key")
+        (tmp_path / "attacker.yaml").write_text(yaml.dump({
+            "model": "victim-model",
+            "version": "1.0",
+            "detection": {"features": {}},
+        }))
+
+        router = ProfileRouter(str(tmp_path), decryption_key=None)
+
+        assert router.loaded_count == 0
+        assert router.get("victim-model") is None
+        rows, dropped = router.decision_journal.drain()
+        assert dropped == 0
+        assert {row["outcome"] for row in rows} == {
+            PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
+            PROFILE_AUTH_SKIPPED_NO_KEY,
+        }
+
+    def test_plaintext_profile_in_encrypted_dir_requires_explicit_escape_hatch(
+        self, tmp_path
+    ):
+        (tmp_path / "victim.yaml.enc").write_bytes(b"encrypted-profile-needs-a-key")
+        (tmp_path / "local-dev.yaml").write_text(yaml.dump({
+            "model": "local-dev-model",
+            "version": "1.0",
+            "detection": {"features": {}},
+        }))
+
+        router = ProfileRouter(
+            str(tmp_path),
+            decryption_key=None,
+            allow_plaintext_profiles=True,
+        )
+
+        assert router.loaded_count == 1
+        assert router.get("local-dev-model") is not None
+
+
 class TestProfileRouterLookup:
 
     def test_exact_match(self, router):
@@ -162,6 +299,41 @@ class TestProfileRouterLookup:
     def test_none_safe(self, router):
         """None-like input returns None."""
         assert router.get(None) is None  # type: ignore
+
+    def test_versioned_family_miss_does_not_borrow_unreviewed_sibling(self, tmp_path):
+        (tmp_path / "claude-sonnet-4-6.yaml").write_text(yaml.dump({
+            "model": "claude-sonnet-4-6",
+            "version": "1.0",
+            "detection": {"features": {}},
+        }))
+        (tmp_path / "claude-opus-4-8.yaml").write_text(yaml.dump({
+            "model": "claude-opus-4-8",
+            "version": "1.0",
+            "detection": {"features": {}},
+        }))
+        router = ProfileRouter(str(tmp_path))
+
+        assert router.get("claude-unknown-9") is None
+
+    def test_explicit_prefix_resolution_still_supports_dated_model_ids(self, router):
+        profile = router.get("claude-sonnet-4-6-20250515")
+
+        assert profile is not None
+        assert profile["model"] == "claude-sonnet-4-6"
+
+    def test_unversioned_metadata_family_fallback_still_works(self, tmp_path):
+        (tmp_path / "acme-surface.yaml").write_text(yaml.dump({
+            "model": "acme-surface",
+            "version": "1.0",
+            "metadata": {"model_family": "acme"},
+            "detection": {"features": {}},
+        }))
+        router = ProfileRouter(str(tmp_path))
+
+        profile = router.get("acme")
+
+        assert profile is not None
+        assert profile["model"] == "acme-surface"
 
 
 class TestProfileRouterReload:

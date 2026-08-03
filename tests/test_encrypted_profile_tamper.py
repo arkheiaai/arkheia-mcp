@@ -464,10 +464,10 @@ def test_router_drops_a_SUBSTITUTED_profile(tmp_path, master_key):
 def test_router_with_a_WRONG_key_decrypts_nothing_and_says_so(tmp_path, master_key, caplog):
     """The 'Integrity check passed: 0 modules verified' shape, at this flow.
 
-    3 plaintext + 2 encrypted, wrong key. ``loaded_count`` is 3 — which is what
-    ``proxy/main.py`` prints as "%d encrypted profiles available" — while the
-    number of encrypted profiles that decrypted is ZERO. The report must state
-    the real number and name the files.
+    3 plaintext + 2 encrypted, wrong key. Current master refuses plaintext in a
+    mixed encrypted/plaintext directory unless explicitly escaped, so
+    ``loaded_count`` is now zero. The report must state the real number and name
+    both the encrypted failures and the plaintext units refused by policy.
     """
     d = _enc_dir(tmp_path, master_key, names=("gpt-4o", "grok-4"))
     for n in ("a-model", "b-model", "c-model"):
@@ -479,8 +479,15 @@ def test_router_with_a_WRONG_key_decrypts_nothing_and_says_so(tmp_path, master_k
     with caplog.at_level(logging.INFO, logger="proxy.router.profile_router"):
         r = ProfileRouter(str(d), decryption_key=secrets.token_bytes(32))
 
-    assert r.loaded_count == 3  # the misleading number, pinned so it cannot drift
+    assert r.loaded_count == 0
     rep = r.last_load_report
+    assert rep.plaintext_present == 3
+    assert rep.plaintext_loaded == 0
+    assert sorted(rep.plaintext_rejected) == [
+        "a-model.yaml",
+        "b-model.yaml",
+        "c-model.yaml",
+    ]
     assert rep.encrypted_present == 2
     assert rep.encrypted_attempted == 2
     assert rep.encrypted_decrypted == 0
@@ -489,8 +496,11 @@ def test_router_with_a_WRONG_key_decrypts_nothing_and_says_so(tmp_path, master_k
 
     # DONE.md floor 9(a): the units of work-not-done are NAMED, not summarised.
     summary = rep.summary(str(d))
+    assert "plaintext 0/3" in summary
     assert "encrypted 0/2 decrypted" in summary
     assert "gpt-4o.yaml.enc" in summary and "grok-4.yaml.enc" in summary
+    for name in ("a-model.yaml", "b-model.yaml", "c-model.yaml"):
+        assert name in summary
 
     # 9(b): the wording is gated on work done. Assert over EVERY record, not just
     # the ERROR ones — scoping the negative assertion to ERROR records let a
@@ -561,18 +571,14 @@ def test_a_decrypt_failure_never_falls_back_to_reading_the_file_as_plaintext(tmp
     assert r.last_load_report.encrypted_failed == ["gpt-4o.yaml.enc"]
 
 
-def test_plaintext_yaml_bypasses_the_entire_crypto_path(tmp_path, master_key):
-    """OBSERVED-BAD, pinned deliberately. This is not a passing behaviour.
+def test_plaintext_yaml_in_an_encrypted_dir_is_rejected_by_default(tmp_path, master_key):
+    """A substituted plaintext profile must not bypass AES-GCM in a mixed directory.
 
-    A ``.yaml`` file dropped into the profile directory is loaded with no key, no
-    tag and — because ``ARKHEIA_LICENSE_KEY`` is unset by default — no signature
-    check. So the answer to "can a substituted profile be decrypted and used?" is:
-    an attacker does not need to defeat AES-GCM at all, they add a plaintext file
-    next to it. On ``origin/master`` the shipped repo carries 60 plaintext
-    profiles and ZERO ``.yaml.enc``, so this is the ONLY live path.
-
-    This test pins the gap so that closing it (David's call — see the PR body) is
-    a visible, deliberate change and not a silent one.
+    Current master closes the observed-bad path this file used to pin: once any
+    ``.yaml.enc`` is present, a sidecar ``.yaml`` is refused unless the operator
+    deliberately sets the local/dev escape hatch. That policy must compose with
+    this PR's work-done report, so the refused plaintext file is named rather
+    than disappearing behind ``loaded_count``.
     """
     assert os.environ.get("ARKHEIA_LICENSE_KEY", "") == "", (
         "this test characterises the default posture; a LICENSE_KEY is set"
@@ -583,10 +589,29 @@ def test_plaintext_yaml_bypasses_the_entire_crypto_path(tmp_path, master_key):
 
     r = ProfileRouter(str(d), decryption_key=master_key)
 
-    assert r.get("grok-4") == hostile, "expected the unauthenticated path to accept it"
-    assert r.last_load_report.plaintext_loaded == 1
+    assert r.get("grok-4") is None
+    assert r.last_load_report.plaintext_loaded == 0
+    assert r.last_load_report.plaintext_rejected == ["grok-4.yaml"]
+    assert "grok-4.yaml" in r.last_load_report.summary(str(d))
     # ...and the encrypted one is unaffected, so the two paths are independent.
     assert r.get("gpt-4o") is not None
+
+
+def test_plaintext_yaml_escape_hatch_is_explicit_and_reported(tmp_path, master_key):
+    d = _enc_dir(tmp_path, master_key, names=("gpt-4o",))
+    local_profile = {"model": "local-dev-profile"}
+    (d / "local-dev-profile.yaml").write_text(yaml.dump(local_profile))
+
+    r = ProfileRouter(
+        str(d),
+        decryption_key=master_key,
+        allow_plaintext_profiles=True,
+    )
+
+    assert r.get("local-dev-profile") == local_profile
+    assert r.last_load_report.plaintext_present == 1
+    assert r.last_load_report.plaintext_loaded == 1
+    assert r.last_load_report.plaintext_rejected == []
 
 
 # ===========================================================================

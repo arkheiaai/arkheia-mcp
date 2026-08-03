@@ -61,6 +61,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install -r mcp_server/requirements.txt
+          pip install -r proxy/requirements.txt
+          pip install -r registry_server/requirements.txt
           # NO ad-hoc installs. cryptography / python-dotenv / respx /
           # pytest-timeout are now DECLARED in requirements.txt. Installing them
           # here instead meant CI green did not prove the declared manifest could

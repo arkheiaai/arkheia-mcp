@@ -34,6 +34,13 @@ from proxy.audit.redactor import redact
 
 logger = logging.getLogger(__name__)
 
+AUDIT_WRITE_ENQUEUED = "enqueued"
+AUDIT_WRITE_QUEUE_FULL = "queue_full"
+AUDIT_WRITE_STATUSES = frozenset({
+    AUDIT_WRITE_ENQUEUED,
+    AUDIT_WRITE_QUEUE_FULL,
+})
+
 
 def _compute_hash(record: dict, prev_hash: str) -> str:
     """
@@ -44,6 +51,15 @@ def _compute_hash(record: dict, prev_hash: str) -> str:
     """
     content = json.dumps(record, sort_keys=True) + prev_hash
     return hashlib.sha256(content.encode()).hexdigest()
+
+
+def _record_id(record: dict) -> str:
+    """A non-secret locator for dropped-record logs."""
+    for key in ("detection_id", "decision_id", "receipt_id"):
+        value = record.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return "?"
 
 
 def _load_chain_state(log_path: Path) -> tuple[str, int]:
@@ -83,7 +99,7 @@ class AuditWriter:
     Usage:
         writer = AuditWriter("/var/log/arkheia/audit.jsonl")
         await writer.start()                    # call from app lifespan
-        await writer.write({...})               # non-blocking, returns immediately
+        status = await writer.write({...})      # non-blocking, returns immediately
         await writer.stop()                     # flush and close
     """
 
@@ -125,16 +141,40 @@ class AuditWriter:
                 pass
         logger.info("AuditWriter stopped  final_seq=%d", self._seq)
 
-    async def write(self, record: dict) -> None:
+    async def write(self, record: dict) -> str:
         """
         Enqueue a record for async write. Returns immediately.
-        If queue is full, logs a warning and drops the record (never blocks).
+
+        Returns ``"enqueued"`` when the queue accepted the record and
+        ``"queue_full"`` when the record was dropped before reaching the
+        background writer. The method still never blocks and never raises for
+        saturation, but saturation is an observable outcome rather than a
+        caller-visible success.
         """
         try:
             self._queue.put_nowait(record)
         except asyncio.QueueFull:
-            logger.warning("AuditWriter queue full — dropping detection event %s",
-                           record.get("detection_id", "?"))
+            logger.warning(
+                "AuditWriter queue full — dropping audit event id=%s",
+                _record_id(record),
+            )
+            return AUDIT_WRITE_QUEUE_FULL
+        return AUDIT_WRITE_ENQUEUED
+
+    async def flush(self, timeout: float = 5.0) -> None:
+        """
+        Block until everything enqueued so far has been through ``_writer_loop``.
+
+        ``write()`` is deliberately fire-and-forget so an audit write can never
+        delay a response — which is right for the detection stream and wrong for
+        a caller that must be able to state, afterwards, that its record was
+        committed. Such a caller flushes and then reads the record back by id
+        (see ``proxy.license.integrity._emit_receipt``). Raises
+        ``asyncio.TimeoutError`` if the queue does not drain — never swallows,
+        because "the flush timed out" and "the record was written" must not be
+        the same observation.
+        """
+        await asyncio.wait_for(self._queue.join(), timeout=timeout)
 
     async def _writer_loop(self) -> None:
         """Background loop: drain queue, redact, chain-hash, write to JSONL."""

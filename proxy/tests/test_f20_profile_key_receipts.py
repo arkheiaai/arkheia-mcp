@@ -56,6 +56,7 @@ from proxy.audit.decision_journal import (
     KEY_SOURCE_NONE,
     KEY_SOURCE_PRECONFIGURED,
     RECEIPT_ENQUEUED,
+    RECEIPT_QUEUE_FULL,
     RECEIPT_UNAVAILABLE,
     REVOCATION_CHECKED,
     REVOCATION_NOT_APPLICABLE,
@@ -494,6 +495,32 @@ async def test_a_rail_that_REFUSES_the_write_is_reported_as_unavailable():
         revocation_state=REVOCATION_NOT_APPLICABLE,
     )
     assert await emit(_RefusingRail(), record) == RECEIPT_UNAVAILABLE
+
+
+async def test_a_full_audit_queue_is_reported_as_queue_full(tmp_path):
+    """
+    A saturated production ``AuditWriter`` must not read the same as an accepted
+    hand-off. The record still does not land, but the receipt status now says
+    why instead of calling the drop ``enqueued``.
+    """
+    from proxy.audit.writer import AuditWriter
+
+    writer = AuditWriter(str(tmp_path / "audit.jsonl"))
+    n = 0
+    while True:
+        try:
+            writer._queue.put_nowait({"decision_id": f"filler-{n}"})
+        except Exception:
+            break
+        n += 1
+    assert n >= 1000, f"the queue accepted only {n} records; wrong premise"
+
+    record = build_key_load_record(
+        outcome=KEY_LOAD_UNAVAILABLE,
+        key_source=KEY_SOURCE_NONE,
+        revocation_state=REVOCATION_NOT_APPLICABLE,
+    )
+    assert await emit(writer, record) == RECEIPT_QUEUE_FULL
 
 
 async def test_a_loader_whose_rail_refuses_reports_unavailable_end_to_end(key_server):
