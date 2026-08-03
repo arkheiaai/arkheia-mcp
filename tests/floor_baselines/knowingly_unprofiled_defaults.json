@@ -1,0 +1,129 @@
+{
+  "_README": [
+    "WAIVER LEDGER — fleet default model ids that are KNOWINGLY shipped without a detection",
+    "profile. Enforced by tests/test_fleet_default_screening_floor.py in the required",
+    "floor-invariants CI context.",
+    "",
+    "A model id configured as a fleet default must either resolve to a real profile or appear",
+    "here. This file is the ONLY way to ship an unscreened default, and it is deliberately",
+    "uncomfortable to use: every entry carries an owner, a reason, what would clear it, and an",
+    "EXPIRY. An entry past its expiry FAILS the build — a waiver that never expires is not a",
+    "waiver, it is a silent gap that has learned to look official.",
+    "",
+    "An entry is also REMOVED automatically-or-else: the floor fails if an entry names a model",
+    "id that is no longer a fleet default, or one that has since acquired a profile. The ledger",
+    "cannot accumulate stale rows that hide real coverage.",
+    "",
+    "WHAT THIS FILE IS NOT: it is not a profile, and it contains no thresholds, weights or",
+    "feature values. Registering an id here records that we CANNOT screen it. Real detection",
+    "parameters come only from a characterisation run (labelled corpus, real model calls,",
+    "effect sizes, held-out validation). Inventing them would manufacture exactly the",
+    "confident-verdict-from-nothing failure the detector exists to catch."
+  ],
+  "entries": [
+    {
+      "model_id": "grok-4.20-non-reasoning",
+      "registered_on": "2026-07-26",
+      "expires": "2026-10-24",
+      "owner": "David Murfet",
+      "reason": [
+        "David's explicit instruction (2026-07-26) is that the fleet defaults to the grok-4.20",
+        "pair; a second vendor confirmed against official xAI docs that the alias and pricing",
+        "are real and current, so the DEFAULT is correct. What does not exist is a detection",
+        "profile for grok version 4.20. ProfileRouter._resolve_grok deliberately returns None",
+        "for it rather than borrowing the grok-4 profile, because",
+        "\"grok-4.20-non-reasoning\".startswith(\"grok-4\") is True and the resolver it replaced",
+        "was silently scoring 4.20 traffic against a DIFFERENT model's fingerprint. An honest",
+        "UNKNOWN beats a borrowed fingerprint, so DetectionEngine returns",
+        "risk_level=UNKNOWN / error=no_profile_for_model."
+      ],
+      "measured": [
+        "ProfileRouter('profiles').get('grok-4.20-non-reasoning') -> None (58 profiles loaded)",
+        "DetectionEngine.verify(...) -> risk_level='UNKNOWN' confidence=0.0",
+        "  error='no_profile_for_model' profile_version='none' gate_action='advise'"
+      ],
+      "why_not_fall_back_to_a_profiled_grok_id": [
+        "Because it would buy no screening. Every grok id with a CROSS-DOMAIN-VALIDATED profile",
+        "is either retired (grok-4-fast-* and the grok-3 family are in RETIRED_MODEL_IDS, so a",
+        "default there could not run at all) or is grok-4-1-fast-*, whose profile requires",
+        "logprob features that the /detect/verify path cannot supply. MEASURED:",
+        "  DetectionEngine.verify(..., 'grok-4-1-fast-non-reasoning') ->",
+        "      risk_level='UNKNOWN' error='no_computable_features'",
+        "So switching the default to a 'profiled' grok id yields UNKNOWN on this path anyway —",
+        "the same unscreened outcome, minus the capability David asked for. grok-4's own profile",
+        "records status: provisional, code-domain only, 150/200 prompts before quota exhaustion,",
+        "not cross-domain validated; routing to it would be a weak verdict, not a strong one.",
+        "The tradeoff was therefore decided in favour of the instructed default plus loud",
+        "unscreened-ness, and the loudness is load-bearing."
+      ],
+      "loudness_that_makes_this_acceptable": [
+        "caller: run_grok returns arkheia_screened=False, arkheia_unscreened_reason=",
+        "  'no_profile_for_model', and a plain-English arkheia_warning naming what would clear",
+        "  it (mcp_server/screening.py)",
+        "caller, before the call: run_grok's docstring — which is what the MCP client shows the",
+        "  agent — leads with 'THE DEFAULT MODEL IS NOT SCREENED'",
+        "operator log: _log_verdict emits logger.WARNING 'NOT SCREENED (reason=...) — response",
+        "  ran UNSCORED' instead of a calm INFO line",
+        "operator governance envelope: /detect/verify pushes risk_level='UNKNOWN' (never 'LOW')",
+        "  with the reason in the payload (proxy/endpoints/detect.py::_envelope_risk_band)",
+        "operator dashboard: /admin/ui renders Detection reason + What would clear it beside the",
+        "  UNKNOWN badge, instead of a bare badge with the reason swallowed"
+      ],
+      "what_would_clear_it": [
+        "A characterisation run for grok-4.20-non-reasoning: labelled TRUTH/FAB corpus, real",
+        "model calls against a WORKING xAI key, per-feature effect sizes, held-out validation,",
+        "then a profiles/grok-4.20-non-reasoning.yaml. That run is budget-gated workstation work",
+        "and is blocked on the xAI key, which currently returns 'Incorrect API key provided' for",
+        "every request including GET /v1/language-models. Rotating the key is David's."
+      ],
+      "not_covered_by_this_entry": [
+        "grok-4.20-reasoning and grok-4.5 are equally unprofiled but are NOT code defaults, so",
+        "the floor does not derive them and they are not waived here. If either is ever made a",
+        "default, the floor fails until it is registered."
+      ]
+    }
+  ],
+  "_FALLBACK_README": [
+    "The same waiver contract, for the hard-coded profile FALLBACK ids the version routers",
+    "reach for via ProfileRouter._by_model_id(). A fallback naming a profile that no file",
+    "provides silently falls through, and the crude prefix/family match downstream can then",
+    "borrow another version's fingerprint — the same defect class as an unprofiled default,",
+    "one layer down."
+  ],
+  "fallback_entries": [
+    {
+      "model_id": "gpt-5.2-codex",
+      "registered_on": "2026-07-26",
+      "expires": "2026-09-24",
+      "owner": "David Murfet",
+      "reason": [
+        "FOUND BY THIS FLOOR ON ITS FIRST RUN, not by review. _resolve_recent_gpt routes any",
+        "'5.2-codex' or '5.3-codex' id to _by_model_id('gpt-5.2-codex'), but NO loaded profile",
+        "has that id — because profiles/gpt-5.2-codex.yaml declares `model: \"gpt-5-codex\"`,",
+        "the SAME id as profiles/gpt-5-codex.yaml. ProfileRouter.load_all keys its dict by the",
+        "declared model id, so the two files collide and one is silently discarded by glob",
+        "order. MEASURED: the surviving profile is version 3.0 (gpt-5-codex.yaml), so the v4.0",
+        "content of gpt-5.2-codex.yaml is DEAD — loaded, keyed over, never used.",
+        "Consequence: _by_model_id('gpt-5.2-codex') -> None, _resolve_recent_gpt returns None,",
+        "and get() falls through to the crude prefix match, which lands on gpt-5-codex v3.0.",
+        "MEASURED: router.get('gpt-5.2-codex') -> model='gpt-5-codex' version='3.0'."
+      ],
+      "why_not_fixed_here": [
+        "Both candidate fixes CHANGE DETECTION BEHAVIOUR for live traffic on evidence I do not",
+        "have. Renaming gpt-5.2-codex.yaml's `model:` field would ACTIVATE an unvalidated v4.0",
+        "profile for gpt-5.2/5.3-codex traffic; repointing the router literal would pin a",
+        "cross-version borrow as deliberate. Which profile legitimately characterises",
+        "gpt-5.2-codex is a characterisation-owner decision, and guessing it is the same class",
+        "of error as inventing thresholds. Reported, waived with a short expiry, not papered",
+        "over. Load-time collision detection was added so the discard is no longer silent."
+      ],
+      "what_would_clear_it": [
+        "Decide which file characterises gpt-5.2-codex, give it that model id (so the two files",
+        "stop colliding), and confirm router.get('gpt-5.2-codex') resolves to it. If the answer",
+        "is that gpt-5.2-codex should legitimately share the gpt-5-codex surface, delete the",
+        "duplicate file and change the router literal to gpt-5-codex so the intent is explicit",
+        "rather than accidental."
+      ]
+    }
+  ]
+}

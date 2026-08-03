@@ -61,6 +61,15 @@ def _is_safe_model_id(model_id: str) -> bool:
     return True
 
 
+PUBLIC_PROFILE_METADATA_KEYS = (
+    "model_id",
+    "version",
+    "checksum",
+    "download_url",
+    "updated_at",
+)
+
+
 class ProfileStorage:
     def __init__(self, profile_dir: str, base_url: str):
         self.profile_dir = Path(profile_dir)
@@ -173,6 +182,15 @@ class ProfileStorage:
             or data.get("metadata", {}).get("model_id")
             or path.stem
         )
+        # A profile's OWN `model:` value is untrusted input too - it is authored
+        # in a YAML file, not validated on the way in, and it is what the listing
+        # advertises as a download id. If it cannot name a legitimate profile,
+        # refuse to publish an entry rather than advertise an id every download
+        # route will then reject (PR #66 floor; pinned by
+        # test_profile_storage_skips_unsafe_model_ids_in_listing). Raising here is
+        # caught by `list_profiles`, which logs and skips the file.
+        if not _is_safe_model_id(model_id):
+            raise ValueError(f"unsafe model_id: {model_id!r}")
         version = str(
             data.get("version")
             or data.get("metadata", {}).get("version", "1.0")
@@ -213,7 +231,7 @@ class ProfileStorage:
             f"{self.base_url}/profiles/download?{urlencode({'model_id': model_id})}"
         )
 
-        return {
+        meta = {
             "model_id": model_id,
             "version": version,
             "checksum": checksum,
@@ -221,4 +239,6 @@ class ProfileStorage:
             "updated_at": datetime.fromtimestamp(
                 path.stat().st_mtime, tz=timezone.utc
             ).isoformat(),
+            "provider": data.get("api", {}).get("provider"),
         }
+        return {key: meta[key] for key in PUBLIC_PROFILE_METADATA_KEYS}

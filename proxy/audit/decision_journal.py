@@ -59,11 +59,12 @@ INV-9/INV-10 fail the build if a record reaches a writer by any other route.
 ``receipt_status`` is ``"enqueued"``, never ``"recorded"``
 ---------------------------------------------------------
 ``AuditWriter`` is fire-and-forget: ``write()`` returns as soon as the record is
-queued and drops silently when the queue is full, and its background
-``_writer_loop`` catches and logs *every* exception raised while redacting,
-chaining, serialising or appending. So this module can honestly say a record was
-HANDED to the rail. It cannot say the record LANDED. That gap is proved against a
-real filesystem failure — not a monkeypatch — in
+queued. Queue saturation is reported as ``"queue_full"`` rather than folded into
+success, but an accepted queue item is still weaker than a recorded row: the
+background ``_writer_loop`` catches and logs *every* exception raised while
+redacting, chaining, serialising or appending. So this module can honestly say a
+record was HANDED to the rail. It cannot say the record LANDED. That gap is
+proved against a real filesystem failure — not a monkeypatch — in
 ``proxy/tests/test_f20_profile_key_receipts.py::test_disclosed_rail_gap_*``.
 
 CLOSED TAXONOMIES
@@ -92,6 +93,8 @@ import uuid
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+from proxy.audit.writer import AUDIT_WRITE_ENQUEUED, AUDIT_WRITE_QUEUE_FULL
 
 logger = logging.getLogger(__name__)
 
@@ -159,11 +162,30 @@ PROFILE_AUTH_EMPTY = "decrypted_empty"
 PROFILE_AUTH_LICENSE_REJECTED = "license_rejected"
 PROFILE_AUTH_NO_MODEL_ID = "no_model_id"
 PROFILE_AUTH_SKIPPED_NO_KEY = "skipped_no_key"
+PROFILE_AUTH_PLAINTEXT_REJECTED = "plaintext_rejected_by_policy"
+PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN = "plaintext_allowed_explicit_opt_in"
+PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR = "plaintext_rejected_encrypted_dir"
 
 PROFILE_AUTH_OUTCOMES = frozenset({
     PROFILE_AUTH_AUTHENTICATED, PROFILE_AUTH_FAILED, PROFILE_AUTH_MALFORMED,
     PROFILE_AUTH_NOT_YAML, PROFILE_AUTH_EMPTY, PROFILE_AUTH_LICENSE_REJECTED,
     PROFILE_AUTH_NO_MODEL_ID, PROFILE_AUTH_SKIPPED_NO_KEY,
+    PROFILE_AUTH_PLAINTEXT_REJECTED, PROFILE_AUTH_PLAINTEXT_ALLOWED_OPT_IN,
+    PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
+})
+
+#: Why plaintext YAML required an explicit opt-in. ``development_plaintext`` is
+#: the one posture where plaintext does not require an opt-in.
+PLAINTEXT_POLICY_DEVELOPMENT = "development_plaintext"
+PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY = "encrypted_profile_policy"
+PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY = "trusted_decryption_key"
+PLAINTEXT_POLICY_ENCRYPTED_INVENTORY = "encrypted_profile_inventory"
+PLAINTEXT_POLICY_UNMARKED_PLAINTEXT_DIRECTORY = "unmarked_plaintext_directory"
+
+PLAINTEXT_POLICY_STATES = frozenset({
+    PLAINTEXT_POLICY_DEVELOPMENT, PLAINTEXT_POLICY_ENCRYPTED_PROFILE_POLICY,
+    PLAINTEXT_POLICY_TRUSTED_DECRYPTION_KEY, PLAINTEXT_POLICY_ENCRYPTED_INVENTORY,
+    PLAINTEXT_POLICY_UNMARKED_PLAINTEXT_DIRECTORY,
 })
 
 #: What an admin profile rollback concluded.
@@ -194,7 +216,13 @@ RISK_LEVEL = "GOVERNANCE"
 
 #: What we can honestly say about a handed-off record. See the module docstring.
 RECEIPT_ENQUEUED = "enqueued"
+RECEIPT_QUEUE_FULL = "queue_full"
 RECEIPT_UNAVAILABLE = "unavailable"
+RECEIPT_STATUSES = frozenset({
+    RECEIPT_ENQUEUED,
+    RECEIPT_QUEUE_FULL,
+    RECEIPT_UNAVAILABLE,
+})
 
 #: Where a record's ``decided_at`` came from. A timestamp with no provenance
 #: claims to be the moment of decision while possibly being the moment of
@@ -460,12 +488,27 @@ async def emit(writer: Any, record: dict) -> str:
         return RECEIPT_UNAVAILABLE
 
     try:
-        await writer.write(out)
+        write_status = await writer.write(out)
     except Exception as exc:
         logger.error(
             "Governance decision NOT RECEIPTED (audit write raised %s): "
             "event_type=%s decision_id=%s outcome=%s",
             type(exc).__name__, event_label, id_label, outcome_label,
+        )
+        return RECEIPT_UNAVAILABLE
+
+    if write_status == AUDIT_WRITE_QUEUE_FULL:
+        logger.error(
+            "Governance decision NOT RECEIPTED (audit queue full): "
+            "event_type=%s decision_id=%s outcome=%s",
+            event_label, id_label, outcome_label,
+        )
+        return RECEIPT_QUEUE_FULL
+    if write_status not in (None, AUDIT_WRITE_ENQUEUED):
+        logger.error(
+            "Governance decision NOT RECEIPTED (unknown audit write status %s): "
+            "event_type=%s decision_id=%s outcome=%s",
+            write_status, event_label, id_label, outcome_label,
         )
         return RECEIPT_UNAVAILABLE
 
@@ -521,6 +564,9 @@ def build_profile_auth_record(
     key: Optional[bytes] = None,
     error_type: Optional[str] = None,
     skipped_profile_names: Optional[list] = None,
+    plaintext_profile_names: Optional[list] = None,
+    plaintext_opt_in_env: Optional[str] = None,
+    plaintext_policy_state: Optional[str] = None,
 ) -> dict:
     """
     D2 — the record for "did this profile authenticate?".
@@ -533,6 +579,10 @@ def build_profile_auth_record(
     """
     if outcome not in PROFILE_AUTH_OUTCOMES:
         raise ValueError(f"profile-auth outcome {outcome!r} is outside the closed taxonomy")
+    if plaintext_policy_state is not None and plaintext_policy_state not in PLAINTEXT_POLICY_STATES:
+        raise ValueError(
+            f"plaintext policy state {plaintext_policy_state!r} is outside the closed taxonomy"
+        )
     return {
         "event_type": EVENT_PROFILE_AUTH,
         "risk_level": RISK_LEVEL,
@@ -545,6 +595,10 @@ def build_profile_auth_record(
         "error_type": error_type,
         "skipped_profile_names": sorted(skipped_profile_names) if skipped_profile_names else None,
         "skipped_count": len(skipped_profile_names) if skipped_profile_names else 0,
+        "plaintext_profile_names": sorted(plaintext_profile_names) if plaintext_profile_names else None,
+        "plaintext_count": len(plaintext_profile_names) if plaintext_profile_names else 0,
+        "plaintext_opt_in_env": plaintext_opt_in_env,
+        "plaintext_policy_state": plaintext_policy_state,
     }
 
 

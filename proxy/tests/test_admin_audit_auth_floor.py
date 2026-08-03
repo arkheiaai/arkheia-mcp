@@ -143,6 +143,19 @@ def test_admin_json_endpoint_accepts_valid_jwt(client):
     assert response.json()["status"] == "ok"
 
 
+def test_admin_health_without_audit_chain_is_not_reported_healthy(client):
+    test_client, app = client
+    del app.state.audit_chain
+
+    response = test_client.get("/admin/health", headers=_bearer())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "degraded"
+    assert body["audit_chain"]["ok"] is False
+    assert body["audit_chain"]["status"] == "NOT_CHECKED"
+
+
 def test_admin_ui_redirects_without_valid_session_cookie(client):
     test_client, _ = client
 

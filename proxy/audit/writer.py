@@ -101,6 +101,15 @@ def _safe_log_detection_id(record: object) -> str:
         return "?"
 
 
+def _redacted_diagnostic_text(value: object, limit: int = 1000) -> str:
+    """Bounded diagnostic text safe for operator surfaces and logs."""
+    try:
+        text = str(value)
+    except Exception:
+        text = f"<unprintable:{type(value).__name__}>"
+    return redact(text)[:limit]
+
+
 class ChainState(NamedTuple):
     """
     Chain head recovered from disk, plus whether recovering it was clean.
@@ -114,6 +123,14 @@ class ChainState(NamedTuple):
     last_seq: int
     ok: bool = True
     detail: Optional[str] = None
+
+
+AUDIT_WRITE_ENQUEUED = "enqueued"
+AUDIT_WRITE_QUEUE_FULL = "queue_full"
+AUDIT_WRITE_STATUSES = frozenset({
+    AUDIT_WRITE_ENQUEUED,
+    AUDIT_WRITE_QUEUE_FULL,
+})
 
 
 def _compute_hash(record: dict, prev_hash: str) -> str:
@@ -210,8 +227,8 @@ def _sanitize_for_json(obj):
         return obj, False
 
     if isinstance(obj, (bytes, bytearray)):
-        digest = hashlib.sha256(bytes(obj)).hexdigest()[:16]
-        return f"<unserialisable:bytes len={len(obj)} sha256={digest}>", True
+        digest = hashlib.blake2b(bytes(obj), digest_size=8).hexdigest()
+        return f"<unserialisable:bytes len={len(obj)} fingerprint={digest}>", True
 
     try:
         text = repr(obj)
@@ -412,7 +429,7 @@ class AuditWriter:
     Usage:
         writer = AuditWriter("/var/log/arkheia/audit.jsonl")
         await writer.start()                    # call from app lifespan
-        await writer.write({...})               # non-blocking, returns immediately
+        status = await writer.write({...})      # non-blocking, returns immediately
         await writer.stop()                     # flush and close
     """
 
@@ -469,20 +486,21 @@ class AuditWriter:
         erases the first. ``_note_degraded_chain`` then keeps re-emitting the
         signal from the writer loop for as long as the state persists.
         """
+        safe_detail = _redacted_diagnostic_text(detail)
         first = self._chain_ok
         self._chain_ok = False
         self._chain_status = status
         if first:
-            self._chain_detail = detail
+            self._chain_detail = safe_detail
             self._chain_detected_at = datetime.now(timezone.utc).isoformat()
-        elif detail and detail not in (self._chain_detail or ""):
-            self._chain_detail = f"{self._chain_detail}; {detail}"
+        elif safe_detail and safe_detail not in (self._chain_detail or ""):
+            self._chain_detail = f"{self._chain_detail}; {safe_detail}"
         logger.error(
-            "AuditWriter: audit hash chain is %s — %s. The service continues "
+            "AuditWriter: audit hash chain is %s. The service continues "
             "(an audit self-check must never be a one-append denial of the "
             "whole proxy) but this chain is NOT trustworthy and is published "
             "on /admin/health until it is repaired.",
-            status, detail,
+            status,
         )
 
     def _note_degraded_chain(self) -> None:
@@ -580,16 +598,42 @@ class AuditWriter:
                 pass
         logger.info("AuditWriter stopped  final_seq=%d", self._seq)
 
-    async def write(self, record: dict) -> None:
+    async def write(self, record: dict) -> str:
         """
         Enqueue a record for async write. Returns immediately.
-        If queue is full, logs a warning and drops the record (never blocks).
+
+        Returns ``"enqueued"`` when the queue accepted the record and
+        ``"queue_full"`` when the record was dropped before reaching the
+        background writer. The method still never blocks and never raises for
+        saturation, but saturation is an observable outcome rather than a
+        caller-visible success.
         """
         try:
             self._queue.put_nowait(record)
         except asyncio.QueueFull:
-            logger.warning("AuditWriter queue full — dropping detection event %s",
-                           _safe_log_detection_id(record))
+            safe_id = _safe_log_detection_id(record)
+            logger.warning("AuditWriter queue full — dropping audit event")
+            self.mark_chain_degraded(
+                "RECORD_DROPPED",
+                f"queue full before record {safe_id} reached disk",
+            )
+            return AUDIT_WRITE_QUEUE_FULL
+        return AUDIT_WRITE_ENQUEUED
+
+    async def flush(self, timeout: float = 5.0) -> None:
+        """
+        Block until everything enqueued so far has been through ``_writer_loop``.
+
+        ``write()`` is deliberately fire-and-forget so an audit write can never
+        delay a response — which is right for the detection stream and wrong for
+        a caller that must be able to state, afterwards, that its record was
+        committed. Such a caller flushes and then reads the record back by id
+        (see ``proxy.license.integrity._emit_receipt``). Raises
+        ``asyncio.TimeoutError`` if the queue does not drain — never swallows,
+        because "the flush timed out" and "the record was written" must not be
+        the same observation.
+        """
+        await asyncio.wait_for(self._queue.join(), timeout=timeout)
 
     async def _writer_loop(self) -> None:
         """Background loop: drain queue, redact, chain-hash, write to JSONL."""

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
+import base64
 import json
 import secrets
 import shutil
@@ -9,6 +11,8 @@ import uuid
 from pathlib import Path
 
 import pytest
+
+from proxy.crypto.profile_crypto import decrypt_profile
 
 HAS_SETUPTOOLS = importlib.util.find_spec("setuptools") is not None
 
@@ -18,10 +22,12 @@ else:
     setup_cython = None
 
 from scripts import build_release
+from scripts import encrypt_profiles
 from proxy.license.integrity import (
     MANIFEST_FILE,
-    IntegrityStatus,
     TamperDetected,
+    VERDICT_VERIFIED,
+    build_integrity_record,
     generate_manifest,
     verify_integrity,
 )
@@ -36,6 +42,20 @@ def make_case_dir(case_name: str) -> Path:
     case_dir = TEMP_ROOT / f"{case_name}_{uuid.uuid4().hex}"
     case_dir.mkdir()
     return case_dir
+
+
+def release_key() -> str:
+    return base64.b64encode(secrets.token_bytes(32)).decode("ascii")
+
+
+def seed_release_profiles(repo_root: Path) -> None:
+    profiles_dir = repo_root / "profiles"
+    profiles_dir.mkdir()
+    (profiles_dir / "gpt-4o.yaml").write_text(
+        "model: gpt-4o\nthresholds:\n  cohens_d: 0.35\n",
+        encoding="utf-8",
+    )
+    (profiles_dir / "schema.yaml").write_text("type: object\n", encoding="utf-8")
 
 
 def _fake_binary(directory: Path, name: str, payload: bytes) -> Path:
@@ -73,14 +93,235 @@ def test_build_release_encrypt_step():
         (profiles_dir / "gpt-4o.yaml").write_text("model: gpt-4o\nthresholds:\n  cohens_d: 0.35\n")
         (profiles_dir / "schema.yaml").write_text("type: object\n")
 
-        encrypted_count = build_release.step_encrypt_profiles(secrets.token_bytes(32), profiles_dir)
+        source_bytes = (profiles_dir / "gpt-4o.yaml").read_bytes()
+        master_key = secrets.token_bytes(32)
+        encrypted_count = build_release.step_encrypt_profiles(master_key, profiles_dir)
 
         assert encrypted_count == 1
         assert not (profiles_dir / "gpt-4o.yaml").exists()
         assert (profiles_dir / "gpt-4o.yaml.enc").exists()
         assert (profiles_dir / "schema.yaml").exists()
+
+        # The plaintext is now GONE, so the only thing that makes deleting it safe is that the
+        # ciphertext decrypts back to it. Assert that, not merely that the .enc file exists.
+        recovered = decrypt_profile(
+            (profiles_dir / "gpt-4o.yaml.enc").read_bytes(), master_key, "gpt-4o"
+        )
+        assert recovered == source_bytes
     finally:
         shutil.rmtree(case_dir, ignore_errors=True)
+
+
+def test_build_release_encrypt_step_refuses_to_delete_unrecoverable_plaintext(monkeypatch):
+    """The release path must not destroy the source when the ciphertext cannot be recovered.
+
+    Before the round-trip guard, a broken encrypt_profile wrote undecryptable bytes, the step
+    printed success and returned 1, and gpt-4o.yaml was deleted -- unrecoverable loss that every
+    other assertion in this file passed straight through.
+    """
+    case_dir = make_case_dir("encrypt-unrecoverable")
+    try:
+        profiles_dir = case_dir / "profiles"
+        profiles_dir.mkdir()
+        (profiles_dir / "gpt-4o.yaml").write_text("model: gpt-4o\n")
+
+        monkeypatch.setattr(
+            build_release, "encrypt_profile",
+            lambda plaintext, master_key, profile_name: b"not-a-valid-aes-gcm-profile",
+        )
+        with pytest.raises(RuntimeError, match="Refusing to delete"):
+            build_release.step_encrypt_profiles(secrets.token_bytes(32), profiles_dir)
+
+        assert (profiles_dir / "gpt-4o.yaml").exists(), "source plaintext must survive a failed encrypt"
+    finally:
+        shutil.rmtree(case_dir, ignore_errors=True)
+
+
+def test_build_release_main_refuses_unrecoverable_profile_before_source_removal(
+    tmp_path, monkeypatch, capsys
+):
+    root = _release_repo(tmp_path)
+    profile = root / "profiles" / "demo.yaml"
+    module_dir = root / "proxy" / "detection"
+    _fake_binary(module_dir, "features.cpython-312-darwin.so", b"\x7fELF" + b"x" * 64)
+    _fake_binary(module_dir, "engine.cpython-312-darwin.so", b"\x7fELF" + b"y" * 64)
+
+    monkeypatch.setattr(build_release, "REPO_ROOT", root)
+    monkeypatch.setattr(
+        build_release,
+        "COMPILED_MODULES",
+        ["proxy/detection/features.py", "proxy/detection/engine.py"],
+    )
+    monkeypatch.setattr(
+        build_release,
+        "encrypt_profile",
+        lambda plaintext, master_key, profile_name: b"not-a-valid-aes-gcm-profile",
+    )
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", release_key())
+
+    rc = build_release.main(["--skip-compile"])
+    out = capsys.readouterr()
+
+    assert rc == 1
+    assert "Refusing to delete demo.yaml" in out.err
+    assert "Release build complete" not in out.out
+    assert profile.exists()
+    assert (module_dir / "features.py").exists()
+    assert (module_dir / "engine.py").exists()
+    assert not list(root.rglob(MANIFEST_FILE))
+
+
+def test_build_release_encrypt_step_refuses_a_zero_profile_release():
+    """Zero encrypted profiles previously printed 'Profiles encrypted: 0' and returned success."""
+    case_dir = make_case_dir("encrypt-empty")
+    try:
+        profiles_dir = case_dir / "profiles"
+        profiles_dir.mkdir()
+        (profiles_dir / "schema.yaml").write_text("type: object\n")
+        with pytest.raises(RuntimeError, match="no profiles were encrypted"):
+            build_release.step_encrypt_profiles(secrets.token_bytes(32), profiles_dir)
+    finally:
+        shutil.rmtree(case_dir, ignore_errors=True)
+
+
+def test_build_release_rejects_command_line_profile_key_without_echo():
+    secret = base64.b64encode(secrets.token_bytes(32)).decode()
+    with pytest.raises(ValueError) as exc:
+        build_release.resolve_profile_key(profile_key_cli=secret)
+
+    message = str(exc.value)
+    assert "command line" in message
+    assert secret not in message
+
+
+def test_build_release_main_rejects_command_line_profile_key_without_echo(capsys):
+    secret = base64.b64encode(secrets.token_bytes(32)).decode()
+
+    rc = build_release.main(["--profile-key", secret, "--skip-compile"])
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert rc == 1
+    assert "command line" in captured.err
+    assert secret not in rendered
+    assert "Traceback" not in rendered
+
+
+def test_build_release_fails_closed_without_profile_key(monkeypatch):
+    monkeypatch.delenv("ARKHEIA_PROFILE_MASTER_KEY", raising=False)
+
+    with pytest.raises(ValueError) as exc:
+        build_release.resolve_profile_key()
+
+    assert "Profile key missing" in str(exc.value)
+
+
+def test_build_release_main_fails_closed_without_profile_key(monkeypatch, capsys):
+    monkeypatch.delenv("ARKHEIA_PROFILE_MASTER_KEY", raising=False)
+
+    rc = build_release.main(["--skip-compile"])
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert rc == 1
+    assert "Profile key missing" in captured.err
+    assert "Traceback" not in rendered
+
+
+def test_build_release_reads_profile_key_file(tmp_path):
+    raw = secrets.token_bytes(32)
+    key_file = tmp_path / "profile-key"
+    key_file.write_text(base64.b64encode(raw).decode(), encoding="utf-8")
+
+    assert build_release.resolve_profile_key(profile_key_file=str(key_file)) == raw
+
+
+def test_build_release_missing_profile_key_file_is_clean_error(tmp_path, capsys):
+    missing = tmp_path / "missing-profile-key"
+
+    rc = build_release.main(["--skip-compile", "--profile-key-file", str(missing)])
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert rc == 1
+    assert "ERROR: Could not read profile key file." in captured.err
+    assert "Traceback" not in rendered
+    assert str(missing) not in rendered
+
+
+def test_encrypt_profiles_rejects_command_line_key_without_echo():
+    secret = base64.b64encode(secrets.token_bytes(32)).decode()
+    with pytest.raises(ValueError) as exc:
+        encrypt_profiles.resolve_master_key(key_cli=secret)
+
+    message = str(exc.value)
+    assert "command line" in message
+    assert secret not in message
+
+
+def test_encrypt_profiles_main_rejects_command_line_key_without_echo(tmp_path, capsys):
+    secret = base64.b64encode(secrets.token_bytes(32)).decode()
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+    (profiles_dir / "gpt-4o.yaml").write_text("model: gpt-4o\n", encoding="utf-8")
+
+    rc = encrypt_profiles.main(["--key", secret, "--profile-dir", str(profiles_dir)])
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert rc == 1
+    assert "command line" in captured.err
+    assert secret not in rendered
+    assert "Traceback" not in rendered
+    assert (profiles_dir / "gpt-4o.yaml").exists()
+    assert not (profiles_dir / "gpt-4o.yaml.enc").exists()
+
+
+def test_encrypt_profiles_fails_closed_without_profile_key(monkeypatch):
+    monkeypatch.delenv("ARKHEIA_PROFILE_MASTER_KEY", raising=False)
+
+    with pytest.raises(ValueError) as exc:
+        encrypt_profiles.resolve_master_key()
+
+    assert "Profile key missing" in str(exc.value)
+
+
+def test_encrypt_profiles_main_fails_closed_without_profile_key(monkeypatch, tmp_path, capsys):
+    monkeypatch.delenv("ARKHEIA_PROFILE_MASTER_KEY", raising=False)
+    profiles_dir = tmp_path / "profiles"
+    profiles_dir.mkdir()
+    (profiles_dir / "gpt-4o.yaml").write_text("model: gpt-4o\n", encoding="utf-8")
+
+    rc = encrypt_profiles.main(["--profile-dir", str(profiles_dir)])
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert rc == 1
+    assert "Profile key missing" in captured.err
+    assert "Traceback" not in rendered
+    assert (profiles_dir / "gpt-4o.yaml").exists()
+    assert not (profiles_dir / "gpt-4o.yaml.enc").exists()
+
+
+def test_encrypt_profiles_reads_profile_key_file(tmp_path):
+    raw = secrets.token_bytes(32)
+    key_file = tmp_path / "profile-key"
+    key_file.write_text(base64.b64encode(raw).decode(), encoding="utf-8")
+
+    assert encrypt_profiles.resolve_master_key(key_file=str(key_file)) == raw
+
+
+def test_encrypt_profiles_missing_key_file_is_clean_error(tmp_path, capsys):
+    missing = tmp_path / "missing-profile-key"
+
+    rc = encrypt_profiles.main(["--key-file", str(missing)])
+
+    captured = capsys.readouterr()
+    rendered = captured.out + captured.err
+    assert rc == 1
+    assert "ERROR: Could not read profile key file." in captured.err
+    assert "Traceback" not in rendered
+    assert str(missing) not in rendered
 
 
 def test_build_release_manifest_step(capsys):
@@ -100,6 +341,71 @@ def test_build_release_manifest_step(capsys):
         assert fake_module.name in manifest_json
         assert len(manifest_json[fake_module.name]) == 64
         assert fake_module.name in capsys.readouterr().out
+    finally:
+        shutil.rmtree(case_dir, ignore_errors=True)
+
+
+def test_build_release_refuses_empty_compiled_module_configuration(monkeypatch, capsys):
+    """
+    Hard-empty release floor: a build whose configured compiled-module population
+    is empty must fail before it can print a successful release summary.
+    """
+    case_dir = make_case_dir("empty_compiled_modules")
+    try:
+        seed_release_profiles(case_dir)
+        monkeypatch.setattr(build_release, "REPO_ROOT", case_dir)
+        monkeypatch.setattr(build_release, "COMPILED_MODULES", [])
+
+        rc = build_release.main(["--skip-compile", "--profile-key", release_key()])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "No compiled modules configured" in captured.err
+        assert "Release build complete" not in captured.out
+        assert (case_dir / "profiles" / "gpt-4o.yaml").exists(), (
+            "the build mutated profiles before refusing the empty compiled-module "
+            "population"
+        )
+    finally:
+        shutil.rmtree(case_dir, ignore_errors=True)
+
+
+def test_build_release_refuses_manifest_dirs_with_zero_compiled_artifacts(
+    monkeypatch, capsys
+):
+    """
+    Soft-empty release floor: COMPILED_MODULES can be non-empty while the compiled
+    artifact population is still empty, for example when --skip-compile is used
+    against a clean source checkout. That must not produce an empty manifest and
+    report success.
+    """
+    case_dir = make_case_dir("zero_compiled_artifacts")
+    try:
+        seed_release_profiles(case_dir)
+        source_path = case_dir / "proxy" / "detection" / "features.py"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text("VALUE = 1\n", encoding="utf-8")
+        monkeypatch.setattr(build_release, "REPO_ROOT", case_dir)
+        monkeypatch.setattr(build_release, "COMPILED_MODULES", [
+            "proxy/detection/features.py",
+        ])
+        monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", release_key())
+
+        rc = build_release.main(["--skip-compile"])
+
+        captured = capsys.readouterr()
+        assert rc == 1
+        assert "No compiled artifacts found" in captured.err
+        assert "Release build complete" not in captured.out
+        assert not (source_path.parent / "integrity_manifest.json").exists()
+        assert source_path.exists(), (
+            "the build removed source before proving there was a compiled artifact "
+            "to manifest"
+        )
+        assert (case_dir / "profiles" / "gpt-4o.yaml").exists(), (
+            "the build encrypted profiles before refusing the empty compiled "
+            "artifact population"
+        )
     finally:
         shutil.rmtree(case_dir, ignore_errors=True)
 
@@ -128,10 +434,11 @@ def test_build_release_manifest_is_consumed_by_integrity_report(tmp_path):
     for name, recorded in on_disk.items():
         assert recorded == hashlib.sha256((module_dir / name).read_bytes()).hexdigest()
 
-    report = verify_integrity(module_dir)
-    assert report.status == IntegrityStatus.VERIFIED
-    assert report.verified is True
-    assert report.modules_checked == 2
+    report = build_integrity_record(module_dir)
+    assert report["verdict"] == VERDICT_VERIFIED
+    assert verify_integrity(module_dir) is True
+    assert report["modules_expected"] == 2
+    assert report["modules_matched"] == 2
 
     manifest = json.loads(manifest_path.read_text())
     fabricated = f"{uuid.uuid4().hex}.so"
@@ -148,7 +455,8 @@ def test_build_release_manifest_is_consumed_by_integrity_report(tmp_path):
 
     manifest[engine.name] = hashlib.sha256(engine.read_bytes()).hexdigest()
     manifest_path.write_text(json.dumps(manifest))
-    assert verify_integrity(module_dir).status == IntegrityStatus.VERIFIED
+    assert verify_integrity(module_dir) is True
+    assert build_integrity_record(module_dir)["verdict"] == VERDICT_VERIFIED
 
     engine.write_bytes(b"\x7fELF" + b"tampered" * 8)
     with pytest.raises(TamperDetected, match=engine.name):
@@ -200,7 +508,13 @@ def test_build_with_no_binaries_aborts_before_deleting_sources(tmp_path, monkeyp
         ["proxy/detection/features.py", "proxy/detection/engine.py"],
     )
 
-    rc = build_release.main(["--skip-compile", "--profile-key", PROFILE_KEY])
+    # The key goes through ARKHEIA_PROFILE_MASTER_KEY, not argv. This branch makes
+    # `--profile-key` a HARD REFUSAL -- a master key on the command line is visible in `ps`
+    # output to every user on the box -- so passing it that way makes main() return 1 at
+    # step 0 and this test never reaches the manifest behaviour it exists to pin. The subject
+    # here is what the manifest RECORDS; argv was only ever the plumbing.
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", PROFILE_KEY)
+    rc = build_release.main(["--skip-compile"])
     out = capsys.readouterr()
 
     assert rc == 1
@@ -225,7 +539,13 @@ def test_partly_compiled_build_names_modules_no_record_covers(
         ["proxy/detection/features.py", "proxy/detection/engine.py"],
     )
 
-    rc = build_release.main(["--skip-compile", "--profile-key", PROFILE_KEY])
+    # The key goes through ARKHEIA_PROFILE_MASTER_KEY, not argv. This branch makes
+    # `--profile-key` a HARD REFUSAL -- a master key on the command line is visible in `ps`
+    # output to every user on the box -- so passing it that way makes main() return 1 at
+    # step 0 and this test never reaches the manifest behaviour it exists to pin. The subject
+    # here is what the manifest RECORDS; argv was only ever the plumbing.
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", PROFILE_KEY)
+    rc = build_release.main(["--skip-compile"])
     out = capsys.readouterr()
 
     assert rc == 1
@@ -250,7 +570,13 @@ def test_complete_compiled_build_records_every_module_then_removes_sources(
         ["proxy/detection/features.py", "proxy/detection/engine.py"],
     )
 
-    rc = build_release.main(["--skip-compile", "--profile-key", PROFILE_KEY])
+    # The key goes through ARKHEIA_PROFILE_MASTER_KEY, not argv. This branch makes
+    # `--profile-key` a HARD REFUSAL -- a master key on the command line is visible in `ps`
+    # output to every user on the box -- so passing it that way makes main() return 1 at
+    # step 0 and this test never reaches the manifest behaviour it exists to pin. The subject
+    # here is what the manifest RECORDS; argv was only ever the plumbing.
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", PROFILE_KEY)
+    rc = build_release.main(["--skip-compile"])
     out = capsys.readouterr()
 
     assert rc == 0, out.err

@@ -15,24 +15,21 @@ end to end: written on the production path, read back off disk, and tied to the
 decision by re-hashing the actual bytes of every file it names.
 
 **D2, at runtime** — *"this artifact matches / does not match its manifest."*
-Current ``master`` now makes this decision at startup: ``verify_all()`` runs from
-the FastAPI lifespan and publishes the outcome on ``app.state.integrity`` /
-``/admin/health``. That is visible process-local state, not a durable record:
-restart the proxy and the verdict is gone. **D2 is therefore NOT receipted, and
-this module does not claim it is.** It is not ``n/a`` either: a startup that
-refuses to serve because a detection binary was modified is exactly the kind of
-decision an auditor needs a record of, and the audit rail to write it on already
-exists in the same lifespan. It is FAIL / not-yet.
+Current ``master`` now makes this decision at startup and publishes the outcome
+on ``app.state.integrity`` / ``/admin/health``. That is visible process-local
+state, not a durable record: restart the proxy and the verdict is gone. This
+branch's runtime receipt tests supply the durable D2 proof; this module stays on
+D1, the build-time manifest receipt, while preserving the runtime empty-manifest
+refusal that current ``master`` added.
 
 Phase 2: the defect this found
 ------------------------------
 ``generate_manifest`` globs ``*.so``/``*.pyd``. Over a directory containing none
 it returned ``{}`` and ``step_generate_manifest`` wrote that out, printed
 "Manifest written: … (0 modules)", and the build continued to exit 0. The empty
-file was not neutral — before current ``master`` closed the runtime half,
-``verify_integrity`` treated a manifest that EXISTS as one to check, iterated its
-zero entries, logged *"Integrity check passed: 0 modules verified"* and returned
-success.
+file is not neutral — ``verify_integrity`` treats a manifest that EXISTS as one
+to check, iterates its zero entries, logs *"Integrity check passed: 0 modules
+verified"* and returns success.
 
 That was a receipt of a check that did not happen: the artifact reported VERIFIED
 having established nothing, and downstream that verdict was trusted. It is DONE.md
@@ -76,7 +73,6 @@ from pathlib import Path
 import pytest
 
 from proxy.license.integrity import (
-    IntegrityStatus,
     MANIFEST_FILE,
     TamperDetected,
     generate_manifest,
@@ -168,12 +164,8 @@ def test_the_verifier_consumes_exactly_this_record(module_dir):
     build_release.step_generate_manifest(module_dir)
     manifest_path = module_dir / MANIFEST_FILE
 
-    # Positive: the artifact as built verifies, using the current IntegrityReport
-    # contract rather than the old bool return.
-    report = verify_integrity(module_dir)
-    assert report.status == IntegrityStatus.VERIFIED
-    assert report.verified is True
-    assert report.modules_checked == 2
+    # Positive: the artifact as built verifies.
+    assert verify_integrity(module_dir) is True
 
     # Vacuity guard 1 — a FABRICATED entry. If the verifier did not really read
     # the record, adding a module that does not exist would change nothing.
@@ -198,9 +190,7 @@ def test_the_verifier_consumes_exactly_this_record(module_dir):
     # the direction the whole flow exists for.
     manifest[real] = hashlib.sha256((module_dir / real).read_bytes()).hexdigest()
     manifest_path.write_text(json.dumps(manifest))
-    report = verify_integrity(module_dir)
-    assert report.status == IntegrityStatus.VERIFIED  # restored: positive control
-    assert report.modules_checked == 2
+    assert verify_integrity(module_dir) is True  # restored: positive control
     (module_dir / real).write_bytes(b"\x7fELF" + b"tampered" * 8)
     with pytest.raises(TamperDetected, match=real):
         verify_integrity(module_dir)
@@ -210,10 +200,24 @@ def test_the_verifier_consumes_exactly_this_record(module_dir):
 # 2. The false receipt: a manifest that certifies nothing.
 # ---------------------------------------------------------------------------
 
-def test_an_empty_manifest_is_rejected_as_a_check_that_did_not_happen(tmp_path):
+def test_an_empty_manifest_is_a_record_of_a_check_that_did_not_happen(tmp_path):
     """
-    Pin the runtime half now supplied by current ``master``: an empty manifest is
-    evidence, not absence, and must fail closed just like a corrupt manifest.
+    REWRITTEN, exactly as this test instructed its successor to do.
+
+    It was a characterisation test: it asserted that ``verify_integrity`` returned
+    True for a manifest that certifies nothing, and carried the message *"behaviour
+    changed — if verify_integrity now refuses an empty manifest, this
+    characterisation test has served its purpose and should be rewritten as the
+    assertion that it refuses"*. The runtime half of F18 fixed the library, so it
+    is that assertion now.
+
+    Why the library had to change and not just the build: the manifest sits next
+    to the artifacts it certifies, so an attacker with write access to one has
+    write access to the other. Truncating it to ``{}`` made the pre-fix verifier
+    iterate zero entries, log "Integrity check passed: 0 modules verified" and
+    return True — a bypass of the whole mechanism, not merely a weak build. Step 3
+    refusing to *ship* an empty manifest (next test) does not help against a
+    manifest emptied after shipping.
     """
     empty_dir = tmp_path / "no_binaries"
     empty_dir.mkdir()
@@ -221,8 +225,8 @@ def test_an_empty_manifest_is_rejected_as_a_check_that_did_not_happen(tmp_path):
     manifest = generate_manifest(empty_dir, empty_dir / MANIFEST_FILE)
     assert manifest == {}, "test setup: the directory must contain no artifacts"
 
-    # A manifest that EXISTS and lists nothing is a positive integrity failure.
-    with pytest.raises(TamperDetected, match="[Ee]mpty"):
+    # A manifest that EXISTS and lists nothing is now refused, not passed.
+    with pytest.raises(TamperDetected, match="lists no modules"):
         verify_integrity(empty_dir)
 
 
@@ -240,9 +244,9 @@ def test_step_3_refuses_to_ship_a_manifest_that_certifies_nothing(tmp_path):
     for glob in build_release.COMPILED_ARTIFACT_GLOBS:
         assert glob in message, f"refusal does not name the glob {glob!r}: {message}"
 
-    # The false receipt must not survive the refusal. Runtime now rejects an empty
-    # manifest, but a release build should fail here rather than ship an artifact
-    # that can only die on startup.
+    # The false receipt must not survive the refusal. Runtime now rejects an
+    # empty manifest, but a release build should fail here rather than ship an
+    # artifact that can only die on startup.
     assert not (empty_dir / MANIFEST_FILE).exists(), (
         "an empty manifest was left on disk after the refusal; a later "
         "verify_integrity() would treat it as a positive integrity failure"
@@ -294,7 +298,13 @@ def test_a_build_that_produced_no_binaries_aborts_before_deleting_the_sources(
     )
 
     key = "A" * 43 + "="  # 32 bytes once base64-decoded
-    rc = build_release.main(["--skip-compile", "--profile-key", key])
+    # The key goes through ARKHEIA_PROFILE_MASTER_KEY, not argv. This branch makes
+    # `--profile-key` a HARD REFUSAL -- a master key on the command line is visible in `ps`
+    # output and shell history to every user on the box -- so passing it that way makes
+    # main() return 1 at step 0 and this test never reaches the manifest behaviour it exists
+    # to pin. The subject here is what the manifest RECORDS; argv was only ever the plumbing.
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", key)
+    rc = build_release.main(["--skip-compile"])
 
     assert rc == 1, "a build that compiled nothing reported success"
 
@@ -337,7 +347,13 @@ def test_a_partly_compiled_build_names_the_modules_no_record_covers(
     )
 
     key = "A" * 43 + "="
-    rc = build_release.main(["--skip-compile", "--profile-key", key])
+    # The key goes through ARKHEIA_PROFILE_MASTER_KEY, not argv. This branch makes
+    # `--profile-key` a HARD REFUSAL -- a master key on the command line is visible in `ps`
+    # output and shell history to every user on the box -- so passing it that way makes
+    # main() return 1 at step 0 and this test never reaches the manifest behaviour it exists
+    # to pin. The subject here is what the manifest RECORDS; argv was only ever the plumbing.
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", key)
+    rc = build_release.main(["--skip-compile"])
     out = capsys.readouterr()
 
     assert rc == 1, "a build missing one module's binary reported success"
@@ -374,7 +390,13 @@ def test_the_abort_is_specific_not_a_blanket_failure(tmp_path, monkeypatch, caps
     )
 
     key = "A" * 43 + "="
-    rc = build_release.main(["--skip-compile", "--profile-key", key])
+    # The key goes through ARKHEIA_PROFILE_MASTER_KEY, not argv. This branch makes
+    # `--profile-key` a HARD REFUSAL -- a master key on the command line is visible in `ps`
+    # output and shell history to every user on the box -- so passing it that way makes
+    # main() return 1 at step 0 and this test never reaches the manifest behaviour it exists
+    # to pin. The subject here is what the manifest RECORDS; argv was only ever the plumbing.
+    monkeypatch.setenv("ARKHEIA_PROFILE_MASTER_KEY", key)
+    rc = build_release.main(["--skip-compile"])
     out = capsys.readouterr()
 
     assert rc == 0, out.err

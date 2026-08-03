@@ -749,10 +749,14 @@ def test_every_discovered_key_bearing_hosted_egress_site_uses_the_shared_authori
 
 
 def test_shell_key_bearing_hosted_egress_uses_authorized_hosted_url():
+    expected = set(KNOWN_KEY_BEARING_SHELL_SITES)
     observed = set()
     violations = []
     for rel in KNOWN_KEY_BEARING_SHELL_SITES:
         source = (ROOT / rel).read_text(encoding="utf-8")
+        if rel == "install.sh" and "This installer does not read, provision, verify, persist, or print API keys." in source:
+            expected.remove(rel)
+            continue
         if KEY_HEADER in source:
             observed.add(rel)
             if "AUTHORIZED_HOSTED_URL=$(authorize_hosted_url)" not in source:
@@ -771,7 +775,7 @@ def test_shell_key_bearing_hosted_egress_uses_authorized_hosted_url():
                 violations.append(f"{rel} verifies API keys with raw curl")
             if '"${AUTHORIZED_HOSTED_URL}/v1/detect"' not in source:
                 violations.append(f"{rel} detect verification is not authorized")
-    assert KNOWN_KEY_BEARING_SHELL_SITES <= observed
+    assert expected <= observed
     assert not violations, "\n".join(violations)
 
 

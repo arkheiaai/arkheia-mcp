@@ -38,6 +38,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_REQUIRE_ENCRYPTED_PROFILES_ENV = "ARKHEIA_REQUIRE_ENCRYPTED_PROFILES"
+_ALLOW_PLAINTEXT_PROFILES_ENV = "ARKHEIA_ALLOW_PLAINTEXT_PROFILES"
+
+
+def _truthy_env(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
 
 def _preconfigured_profile_key() -> Optional[bytes]:
     """
@@ -367,9 +374,22 @@ async def lifespan(app: FastAPI):
     #    went dark" — for a startup that then fetched the key and authenticated
     #    every surface. See _resolve_profile_key's docstring.
     # ----------------------------------------------------------------
+    # Hold onto the pre-key-load inventory result. The router will scan again,
+    # and an attacker-controlled profile directory can change between the two
+    # scans; seeing encrypted inventory at either point keeps plaintext under
+    # encrypted-profile custody.
+    encrypted_inventory_seen = any(profiles_dir.glob("*.yaml.enc"))
+    preconfigured_key = _preconfigured_profile_key()
     decryption_key, _key_receipt_status = await _resolve_profile_key(
-        audit_writer, profiles_dir, preconfigured_key=_preconfigured_profile_key(),
+        audit_writer, profiles_dir, preconfigured_key=preconfigured_key,
     )
+    encrypted_profile_policy = (
+        _truthy_env(_REQUIRE_ENCRYPTED_PROFILES_ENV)
+        or preconfigured_key is not None
+        or decryption_key is not None
+        or encrypted_inventory_seen
+    )
+    plaintext_development_mode = _truthy_env(_ALLOW_PLAINTEXT_PROFILES_ENV)
 
     # 2. Profile router -- loads all YAML profiles, ONCE, holding the key the
     #    step above concluded on.
@@ -382,6 +402,8 @@ async def lifespan(app: FastAPI):
         # receipt_deferred_ms so the gap between deciding and enqueueing is a
         # number a reader can see, not a claim they have to take on trust.
         audit_writer=audit_writer,
+        encrypted_profile_policy=encrypted_profile_policy,
+        plaintext_development_mode=plaintext_development_mode,
     )
     await profile_router.flush_decision_journal()
     logger.info("Loaded %d profiles from %s",
@@ -404,101 +426,65 @@ async def lifespan(app: FastAPI):
             settings.detection.profile_dir,
         )
 
-    # 3. Binary integrity self-check for the compiled detection modules.
+    # 3. Binary integrity verification — RECEIPTED.
     #
-    # proxy/license/integrity.py documents itself as "At startup, verifies that
-    # compiled detection modules (.so/.pyd) have not been tampered with" — but
-    # verify_integrity() had ZERO production call sites, so no startup ever
-    # verified anything and the advertised tamper-evidence was inert. This is the
-    # live call site. It mirrors the verify_chain() self-check above (step 0).
-    #
-    # scripts/build_release.py writes an `integrity_manifest.json` into each
-    # compiled-module directory, so the dirs to check are discovered by looking
-    # for that manifest rather than by duplicating COMPILED_MODULES here (which
-    # would silently drift when the build's module list changes).
-    #
-    # FAIL-OPEN / FAIL-CLOSED SPLIT (Codex finding 4, ruled 2026-07-26).
-    # This block used to catch every exception, TamperDetected included, and
-    # continue — so a tampered detection engine produced "error log plus service
-    # ready". Those are two different states and must not be collapsed:
-    #
-    #   ABSENT / UNVERIFIABLE  = absence of evidence. A source checkout has no
-    #       manifest; a module might be unreadable. FAIL OPEN: log, continue, and
-    #       publish the unverified state on app.state.integrity so /admin/health
-    #       shows it. Silence would be the real defect (DONE.md floor invariant
-    #       9(d): an outcome that produced no observation is not a success).
-    #
-    #   TamperDetected         = EVIDENCE. Hash mismatch, a manifest module missing
-    #       from disk, or a manifest that exists and cannot be parsed. DO NOT
-    #       START. A tampered detection engine that reports LOW is worse than no
-    #       detection at all, because it is trusted: every downstream verdict,
-    #       audit record and governance receipt would carry that engine's
-    #       authority. Halting is a deliberate availability trade — see the
-    #       failure mode named in the PR body.
-    integrity_reports = []
-    try:
-        from proxy.license.integrity import TamperDetected, verify_all
+    # The audit writer must already be live: the runtime integrity verdict is a
+    # governed decision, and a refusal that leaves no record is not useful
+    # tamper-evidence. Keep this after the hash-chain startup check and before
+    # any traffic can be served.
+    from proxy.license.integrity import (
+        TamperDetected,
+        runtime_module_dirs,
+        verify_and_receipt,
+    )
 
-        integrity_reports = verify_all()
-    except TamperDetected as exc:
-        logger.critical(
-            "[FATAL] BINARY INTEGRITY TAMPER DETECTED — refusing to start: %s. "
-            "This is a POSITIVE finding, not a failed check: a compiled detection "
-            "module does not match its build-time hash (or its manifest is "
-            "unreadable). A tampered detection engine would be TRUSTED, so the "
-            "proxy must not serve traffic. Restore the verified artifact from the "
-            "release build, or remove the integrity manifest only if you are "
-            "deliberately running unverified from source.",
-            exc,
-        )
-        app.state.integrity = {
-            "status": "TAMPERED",
-            "verified": False,
-            "startup_blocked": True,
-            "detail": str(exc),
-        }
-        raise
-    except Exception as exc:  # fail-open: an UNVERIFIABLE environment may boot
-        logger.error(
-            "Binary integrity self-check could not be completed: %s. Continuing "
-            "(fail-open) because this is an absence of evidence, not a tamper "
-            "finding — but the modules are NOT verified and that is published on "
-            "/admin/health.",
-            exc,
-        )
-        app.state.integrity = {
-            "status": "UNVERIFIABLE",
-            "verified": False,
-            "startup_blocked": False,
-            "detail": f"{type(exc).__name__}: {exc}",
-        }
-    else:
-        verified = all(r.verified for r in integrity_reports)
-        app.state.integrity = {
-            "status": "VERIFIED" if verified else integrity_reports[0].status,
-            "verified": verified,
-            "startup_blocked": False,
-            "directories": [r.module_dir for r in integrity_reports],
-            "modules_checked": sum(r.modules_checked for r in integrity_reports),
-            "detail": "; ".join(r.detail for r in integrity_reports),
-        }
-        if verified:
-            logger.info(
-                "Binary integrity VERIFIED: %d module(s) across %d director%s (%s)",
-                app.state.integrity["modules_checked"],
-                len(integrity_reports),
-                "y" if len(integrity_reports) == 1 else "ies",
-                "; ".join(r.module_dir for r in integrity_reports),
+    integrity_records = []
+    for module_dir in runtime_module_dirs():
+        try:
+            integrity = await verify_and_receipt(module_dir, audit_writer)
+        except TamperDetected as exc:
+            logger.critical(
+                "[FATAL] Binary integrity verification FAILED for %s: %s. "
+                "Refusing to start. The verdict is recorded in the audit log (%s).",
+                module_dir, exc, settings.audit.log_path,
             )
-        else:
-            # WARNING, not INFO: "not verified" must not read like a pass. It is
-            # the normal state for a source deployment, which is why it does not
-            # block startup — but it is published, not swallowed.
-            logger.warning(
-                "Binary integrity NOT VERIFIED (%s) — continuing fail-open: %s",
-                app.state.integrity["status"],
-                app.state.integrity["detail"],
+            app.state.integrity = {
+                "status": "tampered",
+                "verified": False,
+                "startup_blocked": True,
+                "detail": str(exc),
+                "directories": [str(module_dir)],
+            }
+            await audit_writer.stop()
+            raise
+        integrity_records.append(integrity)
+        logger.info(
+            "Integrity %s: %s (%d/%d modules) receipt=%s",
+            module_dir.name,
+            integrity["verdict"],
+            integrity["modules_matched"],
+            integrity["modules_expected"],
+            integrity["receipt_id"],
+        )
+
+    app.state.integrity = {
+        "status": (
+            "not_checked"
+            if not integrity_records
+            else (
+                "verified"
+                if all(r["verdict"] == "verified" for r in integrity_records)
+                else integrity_records[0]["verdict"]
             )
+        ),
+        "verified": bool(integrity_records)
+        and all(r["verdict"] == "verified" for r in integrity_records),
+        "startup_blocked": False,
+        "directories": [r["module_dir"] for r in integrity_records],
+        "modules_checked": sum(r["modules_matched"] for r in integrity_records),
+        "detail": "; ".join(r["detail"] for r in integrity_records)
+        or "no runtime integrity directories discovered",
+    }
 
     # 4. Detection engine
     engine = DetectionEngine(profile_router)

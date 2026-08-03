@@ -119,7 +119,8 @@ async def test_non_serialisable_value_still_reaches_the_read_surface(tmp_path):
 async def test_queue_full_warning_redacts_detection_id(tmp_path, caplog):
     """
     Queue saturation drops before the writer loop can sanitize/redact the record.
-    The diagnostic path must not reach back to the raw caller record for an id.
+    The log must not reach back to the raw caller record for an id; the
+    operator-facing chain detail may carry only a redacted locator.
     """
     writer = _writer(tmp_path)
     n = 0
@@ -138,7 +139,10 @@ async def test_queue_full_warning_redacts_detection_id(tmp_path, caplog):
 
     logged = "\n".join(record.getMessage() for record in caplog.records)
     assert secret_detection_id not in logged, logged
-    assert "[REDACTED:" in logged, logged
+    assert "dropping audit event" in logged, logged
+    chain_detail = writer.chain_status()["detail"]
+    assert secret_detection_id not in chain_detail
+    assert "[REDACTED:" in chain_detail
 
 
 # ---------------------------------------------------------------------------
