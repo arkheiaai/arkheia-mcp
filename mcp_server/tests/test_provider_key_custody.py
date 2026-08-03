@@ -304,7 +304,7 @@ async def test_ollama_loopback_base_url_uses_provider_post_chokepoint(monkeypatc
         def json(self):
             return {"response": "local", "eval_count": 7}
 
-    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/")
     monkeypatch.setattr(providers.httpx, "AsyncClient", _OllamaClient)
     monkeypatch.setattr(providers, "_provider_post", fake_provider_post)
 
