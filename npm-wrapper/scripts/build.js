@@ -464,6 +464,29 @@ function resolveFileUnder(root, relativePath, label) {
   return resolved;
 }
 
+function resolveWritableFileUnder(root, relativePath, label) {
+  const normalised = assertContainedUnder(relativePath, root, label);
+  const resolved = path.resolve(root, normalised);
+  if (fs.existsSync(resolved)) {
+    const stat = fs.lstatSync(resolved);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      fail(`${label} is not a regular file at ${resolved}`);
+    }
+  }
+  return resolved;
+}
+
+function writeTextFileUnder(root, relativePath, label, data) {
+  const resolved = resolveWritableFileUnder(root, relativePath, label);
+  const dir = path.dirname(resolved);
+  if (!inside(dir, root)) {
+    fail(`${label} parent resolves outside ${root}: ${dir}`);
+  }
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(resolved, data, "utf-8");
+  return resolved;
+}
+
 function sha256BundleFile(relativePath) {
   const resolved = resolveFileUnder(BUNDLE_ROOT, relativePath, "bundle file to hash");
   return crypto.createHash("sha256").update(fs.readFileSync(resolved)).digest("hex");
@@ -549,11 +572,11 @@ function writeProvenanceManifest() {
     })),
   };
 
-  const provenancePath = path.join(BUNDLE_ROOT, PROVENANCE_FILE);
-  fs.writeFileSync(
-    provenancePath,
+  const provenancePath = writeTextFileUnder(
+    BUNDLE_ROOT,
+    PROVENANCE_FILE,
+    "bundle provenance manifest",
     JSON.stringify(manifest, null, 2) + "\n",
-    "utf-8"
   );
   console.log(`Wrote bundle provenance for ${files.length} file(s).`);
   return provenancePath;
@@ -572,12 +595,11 @@ function writeBundleTrustRoot(provenancePath) {
     provenance_path: `${toPosix(path.relative(PACKAGE_ROOT, BUNDLE_ROOT))}/${PROVENANCE_FILE}`,
     provenance_sha256: sha256BundleFile(PROVENANCE_FILE),
   };
-  const trustRootPath = path.join(PACKAGE_ROOT, TRUST_ROOT_FILE);
-  fs.mkdirSync(path.dirname(trustRootPath), { recursive: true });
-  fs.writeFileSync(
-    trustRootPath,
+  writeTextFileUnder(
+    PACKAGE_ROOT,
+    TRUST_ROOT_FILE,
+    "bundle provenance trust root",
     JSON.stringify(trustRoot, null, 2) + "\n",
-    "utf-8"
   );
   console.log(`Wrote bundle provenance trust root at ${TRUST_ROOT_FILE}.`);
 }
