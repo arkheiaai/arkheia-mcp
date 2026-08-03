@@ -450,13 +450,8 @@ function toPosix(relativePath) {
 }
 
 function resolveFileUnder(root, relativePath, label) {
-  const resolvedRoot = path.resolve(root);
   const normalised = assertContainedUnder(relativePath, root, label);
-  const resolved = path.resolve(resolvedRoot, normalised);
-  const relative = path.relative(resolvedRoot, resolved);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    fail(`${label} is not contained within the base directory`);
-  }
+  const resolved = path.resolve(root, normalised);
   let stat;
   try {
     stat = fs.lstatSync(resolved);
@@ -470,13 +465,8 @@ function resolveFileUnder(root, relativePath, label) {
 }
 
 function resolveWritableFileUnder(root, relativePath, label) {
-  const resolvedRoot = path.resolve(root);
   const normalised = assertContainedUnder(relativePath, root, label);
-  const resolved = path.resolve(resolvedRoot, normalised);
-  const relative = path.relative(resolvedRoot, resolved);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    fail(`${label} is not contained within the base directory`);
-  }
+  const resolved = path.resolve(root, normalised);
   if (fs.existsSync(resolved)) {
     const stat = fs.lstatSync(resolved);
     if (stat.isSymbolicLink() || !stat.isFile()) {
