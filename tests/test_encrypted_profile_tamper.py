@@ -548,8 +548,13 @@ def test_NOTHING_TO_DECRYPT_does_not_read_as_a_successful_decrypt(tmp_path, mast
     assert rep.encrypted_attempted == 0
     assert rep.encrypted_decrypted == 0
     assert "encrypted 0/0 decrypted" in rep.summary(str(d))
-    # And the plaintext work IS reported as done, so the summary is not vacuous.
-    assert rep.plaintext_loaded == 1
+    # A trusted decryption key means this is a governed encrypted-profile
+    # directory; plaintext still requires the explicit development escape hatch.
+    assert rep.plaintext_present == 1
+    assert rep.plaintext_loaded == 0
+    assert rep.plaintext_rejected == ["a-model.yaml"]
+    assert rep.clean is False
+    assert "plaintext rejected: a-model.yaml" in rep.summary(str(d))
 
 
 def test_a_decrypt_failure_never_falls_back_to_reading_the_file_as_plaintext(tmp_path, master_key):

@@ -25,7 +25,8 @@ import pytest
 import yaml
 
 from proxy.audit.decision_journal import (
-    PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
+    PLAINTEXT_POLICY_ENCRYPTED_INVENTORY,
+    PROFILE_AUTH_PLAINTEXT_REJECTED,
     PROFILE_AUTH_SKIPPED_NO_KEY,
 )
 from proxy.router.profile_router import ProfileRouter
@@ -240,9 +241,11 @@ class TestProfileRouterLicenseTrust:
         rows, dropped = router.decision_journal.drain()
         assert dropped == 0
         assert {row["outcome"] for row in rows} == {
-            PROFILE_AUTH_PLAINTEXT_REJECTED_ENCRYPTED_DIR,
+            PROFILE_AUTH_PLAINTEXT_REJECTED,
             PROFILE_AUTH_SKIPPED_NO_KEY,
         }
+        plaintext_row = next(row for row in rows if row["outcome"] == PROFILE_AUTH_PLAINTEXT_REJECTED)
+        assert plaintext_row["plaintext_policy_state"] == PLAINTEXT_POLICY_ENCRYPTED_INVENTORY
 
     def test_plaintext_profile_in_encrypted_dir_requires_explicit_escape_hatch(
         self, tmp_path
