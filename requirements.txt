@@ -29,7 +29,7 @@ pydantic-settings>=2.0.0
 # and, more importantly, the CVE floor already pinned in proxy/requirements.txt
 # was NOT enforced on this install path at all. Declared explicitly so the pin is
 # real and so an upstream dropping `[crypto]` cannot silently break the proxy.
-cryptography>=48.0.1  # CVE-2026-39892 (buffer overflow) + CVE-2026-26007 (EC key validation) + GHSA-537c-gmf6-5ccf (bundled OpenSSL, high; fixed 48.0.1) fixes -- mirrors proxy/requirements.txt
+cryptography>=50.0.0  # CVE-2026-39892 + CVE-2026-26007 + GHSA-537c-gmf6-5ccf + CVE-2026-69247 fixes -- mirrors proxy/requirements.txt
 python-dotenv>=1.2.2  # CVE-2026-28684 (symlink attack in set_key/unset_key) fix -- imported unconditionally by proxy/main.py; mirrors proxy/requirements.txt
 
 # YAML
