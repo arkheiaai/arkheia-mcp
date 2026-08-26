@@ -411,6 +411,7 @@ def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, An
 
     risk_weights: Dict[str, float] = {"LOW": 0.0, "MEDIUM": 0.0, "HIGH": 0.0}
     computed_features: Dict[str, float] = {}
+    feature_votes: Dict[str, str] = {}
     features_used = 0
 
     for feat_name, feat_cfg in features_config.items():
@@ -452,13 +453,37 @@ def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, An
             feat_name, value, polarity, thresh_low, thresh_medium, feat_risk, weight,
         )
         risk_weights[feat_risk] += weight
+        feature_votes[feat_name] = feat_risk
 
     if features_used == 0:
         return None
 
-    risk = max(risk_weights, key=risk_weights.get)
-    total_weight = sum(risk_weights.values())
-    confidence = round(risk_weights[risk] / total_weight, 2) if total_weight > 0 else 0.5
+    # --- Decision rule (2026-08-26, parity with arkheia-proxy) ---
+    # "weighted_vote" (default) preserves historical behaviour exactly.
+    # "best_single" scores from one designated feature. Calibrating on the v2
+    # corpus and scoring an unseen v1 corpus gave SINGLE 85.8% recall / 8.0% FPR
+    # against VOTE 78.5% / 7.3% and OR-ensemble 96.2% / 76.5%: one well-chosen
+    # feature beat the vote on both axes, while OR compounded false positives
+    # without adding discrimination.
+    decision_rule = detection_cfg.get("decision_rule", "weighted_vote")
+    primary_feature = detection_cfg.get("primary_feature")
+
+    risk = None
+    if decision_rule == "best_single" and primary_feature:
+        primary_vote = feature_votes.get(primary_feature)
+        if primary_vote is not None:
+            risk = primary_vote
+            total_weight = sum(risk_weights.values())
+            confidence = (
+                round(risk_weights[risk] / total_weight, 2) if total_weight > 0 else 0.5
+            )
+        # primary not computable (e.g. provider exposes no logprobs) -> fall
+        # through to the weighted vote rather than failing shut
+
+    if risk is None:
+        risk = max(risk_weights, key=risk_weights.get)
+        total_weight = sum(risk_weights.values())
+        confidence = round(risk_weights[risk] / total_weight, 2) if total_weight > 0 else 0.5
 
     # Evidence depth assessment
     min_features = detection_cfg.get("min_required_features", 3)
