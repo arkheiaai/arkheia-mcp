@@ -239,6 +239,28 @@ def compute_feature(feature_name: str, signals: dict) -> Optional[float]:
             return None
         return 1.0 if val == 0 else 0.0
 
+    # Semantic grounding signals. reasoning_chars measures how much the model
+    # deliberated; grounding markers count its own stated doubt ("I don't think
+    # X exists", "no such function"). Both come from the chain of thought where
+    # a provider exposes one -- currently xAI only.
+    #
+    # These matter most where the statistical surface is weak. grok-4.3 scores
+    # 0.65 AUC on reasoning burn but 0.71 on reasoning_chars and 0.66 on
+    # grounding markers, so for that model the semantic signal is primary.
+    if feature_name == "reasoning_chars":
+        return _as_float(signals.get("reasoning_chars"))
+
+    if feature_name == "reasoning_hedging":
+        v = signals.get("reasoning_hedging")
+        return float(v) if v is not None else None
+
+    if feature_name == "visible_hedging":
+        v = signals.get("visible_hedging")
+        return float(v) if v is not None else None
+
+    if feature_name == "total_generated":
+        return _as_float(signals.get("total_generated"))
+
     # Early-termination + TTFT signals (2026-08-26, parity with arkheia-proxy).
     # stopped_early: 1.0 when the model finished of its own accord rather than
     # running to the token ceiling. Measured across five characterised Claude
@@ -469,7 +491,30 @@ def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, An
     primary_feature = detection_cfg.get("primary_feature")
 
     risk = None
-    if decision_rule == "best_single" and primary_feature:
+    if decision_rule == "any_fires":
+        # OR across features. Justified ONLY when the added features are SPARSE
+        # and high-precision -- measured on grok-4.3, whose statistical surface
+        # is weak but whose hedging markers fire on 0-2% of truthful responses
+        # and 29-38% of fabrications:
+        #
+        #   best_single (reasoning_chars)     57.8% recall / 25.9% FPR
+        #   + visible_hedging + reasoning_hedging  75.5% recall / 28.1% FPR
+        #
+        # +18 points of recall for 2 points of FPR. This does NOT generalise to
+        # dense features: an OR over five dense features measured 96.2% recall
+        # at 76.5% FPR, i.e. it had stopped discriminating. Only put sparse
+        # near-zero-FP features behind this rule.
+        if any(v in ("HIGH", "MEDIUM") for v in feature_votes.values()):
+            risk = "HIGH" if "HIGH" in feature_votes.values() else "MEDIUM"
+        else:
+            risk = "LOW"
+        fired = sum(w for f, w in
+                    ((f, abs(float(features_config[f].get("weight", 1.0) or 1.0)))
+                     for f in feature_votes if feature_votes[f] != "LOW"))
+        total_weight = sum(risk_weights.values())
+        confidence = round(min(fired / total_weight, 1.0), 2) if total_weight > 0 else 0.5
+
+    if risk is None and decision_rule == "best_single" and primary_feature:
         primary_vote = feature_votes.get(primary_feature)
         if primary_vote is not None:
             risk = primary_vote
