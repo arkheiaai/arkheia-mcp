@@ -239,6 +239,31 @@ def compute_feature(feature_name: str, signals: dict) -> Optional[float]:
             return None
         return 1.0 if val == 0 else 0.0
 
+    # Early-termination + TTFT signals (2026-08-26, parity with arkheia-proxy).
+    # stopped_early: 1.0 when the model finished of its own accord rather than
+    # running to the token ceiling. Measured across five characterised Claude
+    # models: TRUTH ended with max_tokens in 100% of rows, early end_turn
+    # occurred only in the fabrication class. None when no stop-reason telemetry
+    # is present, so existing profiles are unaffected.
+    if feature_name == "stopped_early":
+        se = signals.get("stopped_early")
+        if se is None:
+            sr = signals.get("stop_reason")
+            if sr is None:
+                return None
+            se = sr not in ("max_tokens", "length")
+        return 1.0 if se else 0.0
+
+    # time_to_first_token_ms: preferred over total_time_s on streaming paths —
+    # measured before any downstream yield, so consumer back-pressure cannot
+    # inflate it.
+    if feature_name == "time_to_first_token_ms":
+        v = signals.get("time_to_first_token_ms")
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
     return None
 
 
