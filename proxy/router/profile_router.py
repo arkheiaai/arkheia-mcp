@@ -118,6 +118,7 @@ class ProfileRouter:
         self.profile_dir = profile_dir
         self._loaded_count = 0
         self._decryption_key = decryption_key
+        self._manifest: Optional[dict] = None
         self.load_all()
 
     def set_decryption_key(self, key: bytes) -> None:
@@ -184,6 +185,74 @@ class ProfileRouter:
             len(profiles),
             self.profile_dir,
         )
+
+    # -----------------------------------------------------------------------
+    # Detection manifest
+    #
+    # A profile says HOW to score. It says nothing about how well that scoring
+    # was shown to work, or when it was last confirmed -- so a model measured
+    # last week at 98% and one measured in March at 62% produce results of
+    # identical shape and a caller cannot tell them apart.
+    #
+    # The manifest is exported from the lab (export_detection_manifest.py) and
+    # is DERIVED, never authored: every field traces to a held-out measurement.
+    # Absent or unreadable, detection continues exactly as before and results
+    # simply carry no provenance -- annotation must never break scoring.
+    # -----------------------------------------------------------------------
+
+    MANIFEST_FILE = "_detection_manifest.json"
+
+    @staticmethod
+    def _normalise_model(name: str) -> str:
+        """Lowercase and collapse separators. Deliberately minimal: the lab
+        strips run-label decoration that never reaches a server, and doing more
+        here would risk the two sides disagreeing about a model's name."""
+        import re as _re
+        return _re.sub(r"[\s_]+", " ", str(name or "").lower()).strip()
+
+    def _load_manifest(self) -> dict:
+        if self._manifest is not None:
+            return self._manifest
+        path = Path(self.profile_dir) / self.MANIFEST_FILE
+        try:
+            self._manifest = json.loads(path.read_text(encoding="utf-8"))
+            logger.info("Detection manifest loaded: %d models (as of %s)",
+                        len(self._manifest.get("models") or {}),
+                        self._manifest.get("as_of"))
+        except FileNotFoundError:
+            logger.info("No detection manifest at %s - results carry no provenance", path)
+            self._manifest = {"models": {}}
+        except Exception as exc:  # noqa: BLE001 - never let annotation break scoring
+            logger.warning("Detection manifest unreadable (%s) - continuing without it", exc)
+            self._manifest = {"models": {}}
+        return self._manifest
+
+    def get_detection_provenance(self, model_name: str,
+                                 domain: Optional[str] = None) -> Optional[dict]:
+        """What the lab measured for this model, if anything.
+
+        Returns None for a model never characterised -- worth surfacing, because
+        scoring a model we have never measured is a different claim from scoring
+        one we have.
+        """
+        models = self._load_manifest().get("models") or {}
+        rec = models.get(self._normalise_model(model_name))
+        domains = (rec or {}).get("domains") or {}
+        if not domains:
+            return None
+        chosen = domains.get(domain) if domain else None
+        if chosen is None:
+            # No domain given, or none measured for it: report the WEAKEST
+            # measurement. A caller who does not say where they are should get
+            # the conservative number, not the flattering one.
+            chosen = min(domains.values(),
+                         key=lambda d: (d.get("held_out_recall") or 0))
+        out = {k: chosen.get(k) for k in (
+            "measured_on", "domain", "capability", "currency", "held_out_recall",
+            "held_out_fpr", "auc", "auc_ci_95", "primary_feature", "risk_grade",
+            "limiting_dimension", "statement")}
+        out["domains_measured"] = sorted(domains)
+        return out
 
     def _load_plaintext(self, f: Path) -> Optional[dict]:
         """Load and validate a plaintext YAML profile."""

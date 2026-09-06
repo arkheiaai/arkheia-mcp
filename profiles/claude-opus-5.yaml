@@ -1,0 +1,74 @@
+model: claude-opus-5
+version: '4.0'
+type: api
+characterization:
+  status: collecting
+  min_samples: 300
+  events_collected: 0
+  date: '2026-08-27'
+  domains_tested:
+  - code
+  note: Benchmark characterisation gave 78.4% recall at 41.5% false alarms on the
+    false-premise corpus. Those thresholds are not applied here — session traffic
+    is a different distribution.
+  observing:
+  - word_count
+  - char_count
+  - unique_word_ratio
+  - avg_word_length
+  - grounding_uncertainty
+  - token_count
+api:
+  provider: anthropic
+  logprobs_available: false
+  reasoning_tokens_available: true
+detection:
+  strategy: weighted_vote
+  decision_rule: weighted_vote
+  polarity: normal
+  min_required_features: 2
+  min_contribution_threshold: 0.0
+  features:
+    word_count:
+      enabled: true
+      polarity: positive
+      threshold_low: 1.0e+18
+      threshold_medium: 1.0e+18
+      note: observed only — threshold placed by calibrate_from_session_traffic.py
+    char_count:
+      enabled: true
+      polarity: positive
+      threshold_low: 1.0e+18
+      threshold_medium: 1.0e+18
+      note: observed only — threshold placed by calibrate_from_session_traffic.py
+    unique_word_ratio:
+      enabled: true
+      polarity: positive
+      threshold_low: 1.0e+18
+      threshold_medium: 1.0e+18
+      note: observed only — threshold placed by calibrate_from_session_traffic.py
+    avg_word_length:
+      enabled: true
+      polarity: positive
+      threshold_low: 1.0e+18
+      threshold_medium: 1.0e+18
+      note: observed only — threshold placed by calibrate_from_session_traffic.py
+    grounding_uncertainty:
+      enabled: true
+      polarity: positive
+      threshold_low: 1.0e+18
+      threshold_medium: 1.0e+18
+      note: observed only — threshold placed by calibrate_from_session_traffic.py
+    token_count:
+      enabled: true
+      polarity: positive
+      threshold_low: 1.0e+18
+      threshold_medium: 1.0e+18
+      note: observed only — threshold placed by calibrate_from_session_traffic.py
+disclosure:
+  status: collecting
+  statement: No verdicts are issued while collecting. Recording only, so that thresholds
+    are placed on this workload rather than carried over from a benchmark.
+metadata:
+  generator: seeded by hand, 2026-08-28
+  next_step: calibrate_from_session_traffic.py --model claude-opus-5

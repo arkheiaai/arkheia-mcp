@@ -1,0 +1,2495 @@
+{
+  "generated_from": "C:\\arkheia-model-lab\\data\\results\\lab_summary.json",
+  "as_of": "2026-08-27",
+  "recall_floor": 0.6,
+  "caveat": "Every figure is measured on a FALSE-PREMISE corpus. Models often answer such prompts correctly, so these numbers describe detection of a questionable request, not of a fabrication the model believes. Do not quote recall without its false positive rate.",
+  "usage": "Annotate a detection result with the provenance of the profile that produced it. Never author a field here by hand: every value is derived from a measurement, and a claim that cannot be traced to one does not belong in a result.",
+  "models": {
+    "claude-sonnet-5": {
+      "model": "claude-sonnet-5",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-27",
+          "held_out_recall": 0.7448,
+          "held_out_fpr": 0.1205,
+          "auc": 0.8324,
+          "auc_ci_95": [
+            0.738,
+            0.907
+          ],
+          "primary_feature": "time_to_first_token_ms",
+          "risk_grade": "SOUND",
+          "limiting_dimension": [],
+          "statement": "As measured on 2026-08-27, claude-sonnet-5 flags 74% of affected responses and 12% of unaffected ones on our false-premise benchmark."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-27",
+          "held_out_recall": 0.9375,
+          "held_out_fpr": 0.1928,
+          "auc": 0.0567,
+          "auc_ci_95": [
+            0.017,
+            0.12
+          ],
+          "primary_feature": "visible_tokens",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "corpus_independence"
+          ],
+          "statement": "As measured on 2026-08-27, claude-sonnet-5 flags 94% of affected responses and 19% of unaffected ones on our false-premise benchmark. Known limits: visible_tokens tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        }
+      }
+    },
+    "claude-fable-5": {
+      "model": "claude-fable-5",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-27",
+          "held_out_recall": 0.9971,
+          "held_out_fpr": 0.1953,
+          "auc": 0.9869,
+          "auc_ci_95": [
+            0.96,
+            1.0
+          ],
+          "primary_feature": "reasoning_ratio",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "target_reachability"
+          ],
+          "statement": "As measured on 2026-08-27, claude-fable-5 flags 100% of affected responses and 20% of unaffected ones on our false-premise benchmark. Known limits: 8% of targets produce no output and are structurally unreachable."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-27",
+          "held_out_recall": 0.7141,
+          "held_out_fpr": 0.1516,
+          "auc": 0.9482,
+          "auc_ci_95": [
+            0.885,
+            0.996
+          ],
+          "primary_feature": "reasoning_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "target_reachability"
+          ],
+          "statement": "As measured on 2026-08-27, claude-fable-5 flags 71% of affected responses and 15% of unaffected ones on our false-premise benchmark. Known limits: 26% of targets produce no output at all; no feature in this profile can reach them."
+        }
+      }
+    },
+    "claude-opus-4-8": {
+      "model": "claude-opus-4-8",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-27",
+          "held_out_recall": 0.9777,
+          "held_out_fpr": 0.2011,
+          "auc": 0.0246,
+          "auc_ci_95": [
+            0.004,
+            0.055
+          ],
+          "primary_feature": "char_count",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "corpus_independence"
+          ],
+          "statement": "As measured on 2026-08-27, claude-opus-4-8 flags 98% of affected responses and 20% of unaffected ones on our false-premise benchmark. Known limits: char_count tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        },
+        "code": {
+          "domain": "code",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-27",
+          "held_out_recall": 0.6623,
+          "held_out_fpr": 0.4275,
+          "auc": 0.3184,
+          "auc_ci_95": [
+            0.214,
+            0.417
+          ],
+          "primary_feature": "visible_tokens",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "detection_strength"
+          ],
+          "statement": "As measured on 2026-08-27, claude-opus-4-8 flags 66% of affected responses and 43% of unaffected ones on our false-premise benchmark. Known limits: 43% of clean responses are flagged; at this rate the signal is close to indiscriminate; interval [0.21-0.42] straddles the production bar -- more samples needed before this is settled; visible_tokens tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        }
+      }
+    },
+    "claude-opus-5": {
+      "model": "claude-opus-5",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-27",
+          "held_out_recall": 0.8297,
+          "held_out_fpr": 0.3139,
+          "auc": 0.1498,
+          "auc_ci_95": [
+            0.084,
+            0.242
+          ],
+          "primary_feature": "char_count",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "corpus_independence",
+            "target_reachability"
+          ],
+          "statement": "As measured on 2026-08-27, claude-opus-5 flags 83% of affected responses and 31% of unaffected ones on our false-premise benchmark. Known limits: 83% recall costs 31% false alarms -- workable only where a regeneration is cheap; char_count tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; 2% of targets produce no output and are structurally unreachable."
+        },
+        "code": {
+          "domain": "code",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-27",
+          "held_out_recall": 0.7837,
+          "held_out_fpr": 0.4155,
+          "auc": 0.7304,
+          "auc_ci_95": [
+            0.624,
+            0.834
+          ],
+          "primary_feature": "reasoning_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "detection_strength"
+          ],
+          "statement": "As measured on 2026-08-27, claude-opus-5 flags 78% of affected responses and 42% of unaffected ones on our false-premise benchmark. Known limits: 42% of clean responses are flagged; at this rate the signal is close to indiscriminate; interval [0.62-0.83] straddles the production bar -- more samples needed before this is settled."
+        }
+      }
+    },
+    "claude opus 4.6": {
+      "model": "claude opus 4.6",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-19",
+          "held_out_recall": 0.9473,
+          "held_out_fpr": 0.2602,
+          "auc": 0.9418,
+          "auc_ci_95": [
+            0.913,
+            0.969
+          ],
+          "primary_feature": "total_time_s",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-19, Claude Opus 4.6 flags 95% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 95% recall costs 26% false alarms -- workable only where a regeneration is cheap; total_time_s tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 189 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "claude sonnet 4.5": {
+      "model": "claude sonnet 4.5",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-19",
+          "held_out_recall": 0.6751,
+          "held_out_fpr": 0.2583,
+          "auc": 0.7838,
+          "auc_ci_95": [
+            0.72,
+            0.84
+          ],
+          "primary_feature": "total_time_s",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-19, Claude Sonnet 4.5 flags 68% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 68% recall costs 26% false alarms -- workable only where a regeneration is cheap; total_time_s tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 189 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "claude sonnet 4.6": {
+      "model": "claude sonnet 4.6",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-20",
+          "held_out_recall": 0.7601,
+          "held_out_fpr": 0.2562,
+          "auc": 0.8425,
+          "auc_ci_95": [
+            0.782,
+            0.897
+          ],
+          "primary_feature": "total_time_s",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-20, Claude Sonnet 4.6 flags 76% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 76% recall costs 26% false alarms -- workable only where a regeneration is cheap; total_time_s tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 188 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "claude-haiku-4-5": {
+      "model": "claude-haiku-4-5",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-12",
+          "held_out_recall": 0.9973,
+          "held_out_fpr": 0.2573,
+          "auc": 0.9556,
+          "auc_ci_95": [
+            0.921,
+            0.98
+          ],
+          "primary_feature": "unique_token_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-12, claude-haiku-4-5 flags 100% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 100% recall costs 26% false alarms -- workable only where a regeneration is cheap; unique_token_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 107 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "claude-haiku-4-5 \u25c6": {
+      "model": "claude-haiku-4-5 \u25c6",
+      "domains": {
+        "hard_negatives": {
+          "domain": "hard_negatives",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-24",
+          "held_out_recall": 0.8748,
+          "held_out_fpr": 0.266,
+          "auc": 0.1073,
+          "auc_ci_95": [
+            0.062,
+            0.164
+          ],
+          "primary_feature": "unique_word_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-24, claude-haiku-4-5 \u25c6 hard_negatives_150 flags 87% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 87% recall costs 27% false alarms -- workable only where a regeneration is cheap; unique_word_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 156 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-24",
+          "held_out_recall": 0.7145,
+          "held_out_fpr": 0.2521,
+          "auc": 0.7925,
+          "auc_ci_95": [
+            0.729,
+            0.849
+          ],
+          "primary_feature": "unique_token_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-24, claude-haiku-4-5 \u25c6 prose_v2_matched_200 flags 71% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 71% recall costs 25% false alarms -- workable only where a regeneration is cheap; unique_token_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 156 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "claude-opus-4-6 \u25c6": {
+      "model": "claude-opus-4-6 \u25c6",
+      "domains": {
+        "hard_negatives": {
+          "domain": "hard_negatives",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-24",
+          "held_out_recall": 0.7987,
+          "held_out_fpr": 0.2689,
+          "auc": 0.1324,
+          "auc_ci_95": [
+            0.074,
+            0.192
+          ],
+          "primary_feature": "unique_word_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-24, claude-opus-4-6 \u25c6 hard_negatives_150 flags 80% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 80% recall costs 27% false alarms -- workable only where a regeneration is cheap; unique_word_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 156 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-24",
+          "held_out_recall": 0.7081,
+          "held_out_fpr": 0.2549,
+          "auc": 0.8138,
+          "auc_ci_95": [
+            0.755,
+            0.871
+          ],
+          "primary_feature": "total_time_s",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-24, claude-opus-4-6 \u25c6 prose_v2_matched_200 flags 71% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 71% recall costs 25% false alarms -- workable only where a regeneration is cheap; total_time_s tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 156 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "claude-sonnet-4-6 \u25c6": {
+      "model": "claude-sonnet-4-6 \u25c6",
+      "domains": {
+        "hard_negatives": {
+          "domain": "hard_negatives",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-24",
+          "held_out_recall": 0.8331,
+          "held_out_fpr": 0.2684,
+          "auc": 0.1393,
+          "auc_ci_95": [
+            0.074,
+            0.207
+          ],
+          "primary_feature": "unique_word_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-24, claude-sonnet-4-6 \u25c6 hard_negatives_150 flags 83% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 83% recall costs 27% false alarms -- workable only where a regeneration is cheap; unique_word_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 156 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-24",
+          "held_out_recall": 0.6232,
+          "held_out_fpr": 0.2553,
+          "auc": 0.7435,
+          "auc_ci_95": [
+            0.672,
+            0.807
+          ],
+          "primary_feature": "total_time_s",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-24, claude-sonnet-4-6 \u25c6 prose_v2_matched_200 flags 62% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 62% recall costs 26% false alarms -- workable only where a regeneration is cheap; interval [0.67-0.81] straddles the production bar -- more samples needed before this is settled; total_time_s tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        }
+      }
+    },
+    "gemini-2.0-flash": {
+      "model": "gemini-2.0-flash",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-12",
+          "held_out_recall": 0.6307,
+          "held_out_fpr": 0.2621,
+          "auc": 0.7665,
+          "auc_ci_95": [
+            0.693,
+            0.83
+          ],
+          "primary_feature": "total_time_s",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-12, gemini-2.0-flash flags 63% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 63% recall costs 26% false alarms -- workable only where a regeneration is cheap; interval [0.69-0.83] straddles the production bar -- more samples needed before this is settled; total_time_s tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        }
+      }
+    },
+    "gemma 4": {
+      "model": "gemma 4",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-07",
+          "held_out_recall": 0.7329,
+          "held_out_fpr": 0.2572,
+          "auc": 0.8161,
+          "auc_ci_95": [
+            0.751,
+            0.866
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-07, Gemma 4 flags 73% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 73% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 142 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "gemma 4 26b moe": {
+      "model": "gemma 4 26b moe",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-13",
+          "held_out_recall": 0.8575,
+          "held_out_fpr": 0.2533,
+          "auc": 0.9037,
+          "auc_ci_95": [
+            0.856,
+            0.941
+          ],
+          "primary_feature": "entropy_mean",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-13, Gemma 4 26B MoE flags 86% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 86% recall costs 25% false alarms -- workable only where a regeneration is cheap; last confirmed 136 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-13",
+          "held_out_recall": 0.8751,
+          "held_out_fpr": 0.2505,
+          "auc": 0.8984,
+          "auc_ci_95": [
+            0.853,
+            0.937
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-13, Gemma 4 26B MoE flags 88% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 88% recall costs 25% false alarms -- workable only where a regeneration is cheap; last confirmed 136 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "gemma 4 e4b": {
+      "model": "gemma 4 e4b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-15",
+          "held_out_recall": 0.9001,
+          "held_out_fpr": 0.2522,
+          "auc": 0.928,
+          "auc_ci_95": [
+            0.889,
+            0.956
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-15, Gemma 4 E4B flags 90% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 90% recall costs 25% false alarms -- workable only where a regeneration is cheap; last confirmed 134 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-11",
+          "held_out_recall": 0.7248,
+          "held_out_fpr": 0.2515,
+          "auc": 0.7983,
+          "auc_ci_95": [
+            0.726,
+            0.859
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-11, Gemma 4 E4B flags 72% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 72% recall costs 25% false alarms -- workable only where a regeneration is cheap; last confirmed 138 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "gemma4-e4b-high-temp": {
+      "model": "gemma4-e4b-high-temp",
+      "domains": {
+        "unknown": {
+          "domain": "unknown",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-18",
+          "held_out_recall": 0.8027,
+          "held_out_fpr": 0.2577,
+          "auc": 0.85,
+          "auc_ci_95": [
+            0.785,
+            0.9
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-18, gemma4-e4b-high-temp flags 80% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 80% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 131 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "gemma4-e4b-low-temp": {
+      "model": "gemma4-e4b-low-temp",
+      "domains": {
+        "unknown": {
+          "domain": "unknown",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-17",
+          "held_out_recall": 0.6664,
+          "held_out_fpr": 0.272,
+          "auc": 0.7549,
+          "auc_ci_95": [
+            0.684,
+            0.816
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-17, gemma4-e4b-low-temp flags 67% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 67% recall costs 27% false alarms -- workable only where a regeneration is cheap; interval [0.68-0.82] straddles the production bar -- more samples needed before this is settled; last confirmed 132 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "gemma4:26b": {
+      "model": "gemma4:26b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-13",
+          "held_out_recall": 0.6705,
+          "held_out_fpr": 0.2499,
+          "auc": 0.2055,
+          "auc_ci_95": [
+            0.167,
+            0.234
+          ],
+          "primary_feature": "median_logprob",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-13, gemma4:26b flags 67% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: last confirmed 136 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-14",
+          "held_out_recall": 0.9326,
+          "held_out_fpr": 0.2578,
+          "auc": 0.9185,
+          "auc_ci_95": [
+            0.88,
+            0.953
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-14, gemma4:26b flags 93% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 93% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 135 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "gemma4:31b": {
+      "model": "gemma4:31b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-17",
+          "held_out_recall": 0.6084,
+          "held_out_fpr": 0.2553,
+          "auc": 0.7684,
+          "auc_ci_95": [
+            0.733,
+            0.803
+          ],
+          "primary_feature": "entropy_mean",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-17, gemma4:31b flags 61% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 61% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 132 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-17",
+          "held_out_recall": 1.0,
+          "held_out_fpr": 0.2599,
+          "auc": 0.0232,
+          "auc_ci_95": [
+            0.009,
+            0.039
+          ],
+          "primary_feature": "total_time_s",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-17, gemma4:31b flags 100% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 100% recall costs 26% false alarms -- workable only where a regeneration is cheap; total_time_s tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 132 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "gemma4:e4b": {
+      "model": "gemma4:e4b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-14",
+          "held_out_recall": 0.6525,
+          "held_out_fpr": 0.26,
+          "auc": 0.7565,
+          "auc_ci_95": [
+            0.707,
+            0.805
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-14, gemma4:e4b flags 65% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 65% recall costs 26% false alarms -- workable only where a regeneration is cheap; interval [0.71-0.81] straddles the production bar -- more samples needed before this is settled; last confirmed 135 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-14",
+          "held_out_recall": 0.9043,
+          "held_out_fpr": 0.2589,
+          "auc": 0.9292,
+          "auc_ci_95": [
+            0.881,
+            0.968
+          ],
+          "primary_feature": "total_time_s",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-14, gemma4:e4b flags 90% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 90% recall costs 26% false alarms -- workable only where a regeneration is cheap; total_time_s tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 135 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "gemma4:latest": {
+      "model": "gemma4:latest",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-14",
+          "held_out_recall": 0.6408,
+          "held_out_fpr": 0.2559,
+          "auc": 0.7577,
+          "auc_ci_95": [
+            0.707,
+            0.801
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-14, gemma4:latest flags 64% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 64% recall costs 26% false alarms -- workable only where a regeneration is cheap; interval [0.71-0.80] straddles the production bar -- more samples needed before this is settled; last confirmed 135 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "ornith-1.5-9b": {
+      "model": "ornith-1.5-9b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.7485,
+          "held_out_fpr": 0.2532,
+          "auc": 0.1515,
+          "auc_ci_95": [
+            0.1,
+            0.206
+          ],
+          "primary_feature": "unique_word_ratio",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "corpus_independence"
+          ],
+          "statement": "As measured on 2026-08-26, ornith-1.5-9b flags 75% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 75% recall costs 25% false alarms -- workable only where a regeneration is cheap; unique_word_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        }
+      }
+    },
+    "rechar glm4:9b": {
+      "model": "rechar glm4:9b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "LIMITED",
+          "currency": "STALE",
+          "measured_on": "2026-06-17",
+          "held_out_recall": 0.8373,
+          "held_out_fpr": 0.2586,
+          "auc": 0.8633,
+          "auc_ci_95": [
+            0.808,
+            0.909
+          ],
+          "primary_feature": "entropy_mean",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-06-17, rechar glm4:9b 2026-06-17T14:38:49Z flags 84% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 84% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 71 days ago."
+        }
+      }
+    },
+    "together minimax-m3": {
+      "model": "together minimax-m3",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-20",
+          "held_out_recall": 0.9613,
+          "held_out_fpr": 0.2274,
+          "auc": 0.0779,
+          "auc_ci_95": [
+            0.041,
+            0.122
+          ],
+          "primary_feature": "token_count",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "corpus_independence"
+          ],
+          "statement": "As measured on 2026-08-20, rechar-together minimax-m3 2026-06-17T14:55:37Z flags 96% of affected responses and 23% of unaffected ones on our false-premise benchmark. Known limits: token_count tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        }
+      }
+    },
+    "together qwen3.7-plus": {
+      "model": "together qwen3.7-plus",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-20",
+          "held_out_recall": 0.8491,
+          "held_out_fpr": 0.2572,
+          "auc": 0.8963,
+          "auc_ci_95": [
+            0.853,
+            0.937
+          ],
+          "primary_feature": "latency_ms",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "corpus_independence"
+          ],
+          "statement": "As measured on 2026-08-20, rechar-together qwen3.7-plus 2026-06-17T16:20:47Z flags 85% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 85% recall costs 26% false alarms -- workable only where a regeneration is cheap; latency_ms tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        }
+      }
+    },
+    "deepseek-coder 33b": {
+      "model": "deepseek-coder 33b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-01",
+          "held_out_recall": 0.7764,
+          "held_out_fpr": 0.256,
+          "auc": 0.8401,
+          "auc_ci_95": [
+            0.783,
+            0.891
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-01, DeepSeek-Coder 33B flags 78% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 78% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 179 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "falcon 40b": {
+      "model": "falcon 40b",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-14",
+          "held_out_recall": 0.7036,
+          "held_out_fpr": 0.2512,
+          "auc": 0.796,
+          "auc_ci_95": [
+            0.74,
+            0.857
+          ],
+          "primary_feature": "std_logprob",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-14, Falcon 40B flags 70% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 70% recall costs 25% false alarms -- workable only where a regeneration is cheap; 2% of targets produce no output and are structurally unreachable; last confirmed 194 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "kimi k2.5 together": {
+      "model": "kimi k2.5 together",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-16",
+          "held_out_recall": 0.7363,
+          "held_out_fpr": 0.2584,
+          "auc": 0.1727,
+          "auc_ci_95": [
+            0.118,
+            0.233
+          ],
+          "primary_feature": "median_logprob",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-16, Kimi K2.5 Together flags 74% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 74% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 192 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-16",
+          "held_out_recall": 0.8508,
+          "held_out_fpr": 0.2528,
+          "auc": 0.1297,
+          "auc_ci_95": [
+            0.082,
+            0.186
+          ],
+          "primary_feature": "unique_word_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-16, Kimi K2.5 Together flags 85% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 85% recall costs 25% false alarms -- workable only where a regeneration is cheap; unique_word_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 192 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "llama 3.1 70b": {
+      "model": "llama 3.1 70b",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-15",
+          "held_out_recall": 0.8657,
+          "held_out_fpr": 0.2658,
+          "auc": 0.9031,
+          "auc_ci_95": [
+            0.861,
+            0.943
+          ],
+          "primary_feature": "unique_word_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-15, Llama 3.1 70B flags 87% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 87% recall costs 27% false alarms -- workable only where a regeneration is cheap; unique_word_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 193 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "llama 34b": {
+      "model": "llama 34b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-14",
+          "held_out_recall": 0.8453,
+          "held_out_fpr": 0.2606,
+          "auc": 0.8772,
+          "auc_ci_95": [
+            0.828,
+            0.924
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-14, Llama 34B flags 85% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 85% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 194 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-13",
+          "held_out_recall": 0.6999,
+          "held_out_fpr": 0.2647,
+          "auc": 0.8147,
+          "auc_ci_95": [
+            0.749,
+            0.87
+          ],
+          "primary_feature": "avg_word_length",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-13, Llama 34B flags 70% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 70% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 195 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "mixtral 8x7b": {
+      "model": "mixtral 8x7b",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-13",
+          "held_out_recall": 0.6389,
+          "held_out_fpr": 0.2589,
+          "auc": 0.7682,
+          "auc_ci_95": [
+            0.71,
+            0.832
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-13, Mixtral 8x7B flags 64% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 64% recall costs 26% false alarms -- workable only where a regeneration is cheap; interval [0.71-0.83] straddles the production bar -- more samples needed before this is settled; last confirmed 195 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "phi-4 14b": {
+      "model": "phi-4 14b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-28",
+          "held_out_recall": 0.8877,
+          "held_out_fpr": 0.2503,
+          "auc": 0.9184,
+          "auc_ci_95": [
+            0.881,
+            0.953
+          ],
+          "primary_feature": "entropy_mean",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-28, Phi-4 14B flags 89% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 89% recall costs 25% false alarms -- workable only where a regeneration is cheap; last confirmed 180 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "phi-4 reasoning 14b": {
+      "model": "phi-4 reasoning 14b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-28",
+          "held_out_recall": 0.7795,
+          "held_out_fpr": 0.2585,
+          "auc": 0.8072,
+          "auc_ci_95": [
+            0.744,
+            0.88
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-28, Phi-4 Reasoning 14B flags 78% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 78% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 180 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "qwen 2 72b": {
+      "model": "qwen 2 72b",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-05",
+          "held_out_recall": 0.8806,
+          "held_out_fpr": 0.2649,
+          "auc": 0.879,
+          "auc_ci_95": [
+            0.817,
+            0.926
+          ],
+          "primary_feature": "unique_word_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-05, Qwen 2 72B [] flags 88% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 88% recall costs 26% false alarms -- workable only where a regeneration is cheap; unique_word_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 175 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "qwen 72b": {
+      "model": "qwen 72b",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-14",
+          "held_out_recall": 0.8461,
+          "held_out_fpr": 0.2609,
+          "auc": 0.8889,
+          "auc_ci_95": [
+            0.844,
+            0.93
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-14, Qwen 72B flags 85% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 85% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 194 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "deepseek-v4-pro": {
+      "model": "deepseek-v4-pro",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-12",
+          "held_out_recall": 0.6143,
+          "held_out_fpr": 0.2527,
+          "auc": 0.7698,
+          "auc_ci_95": [
+            0.7,
+            0.836
+          ],
+          "primary_feature": "time_to_first_token_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-12, deepseek-v4-pro flags 61% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 61% recall costs 25% false alarms -- workable only where a regeneration is cheap; interval [0.70-0.84] straddles the production bar -- more samples needed before this is settled; last confirmed 107 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "granite4.1:30b": {
+      "model": "granite4.1:30b",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-11",
+          "held_out_recall": 0.6155,
+          "held_out_fpr": 0.2476,
+          "auc": 0.7653,
+          "auc_ci_95": [
+            0.694,
+            0.829
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-11, granite4.1:30b flags 62% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: interval [0.69-0.83] straddles the production bar -- more samples needed before this is settled; last confirmed 108 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "granite4.1:3b": {
+      "model": "granite4.1:3b",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-11",
+          "held_out_recall": 0.6666,
+          "held_out_fpr": 0.2571,
+          "auc": 0.7922,
+          "auc_ci_95": [
+            0.729,
+            0.848
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-11, granite4.1:3b flags 67% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 67% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 108 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "granite4.1:8b": {
+      "model": "granite4.1:8b",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-15",
+          "held_out_recall": 0.7165,
+          "held_out_fpr": 0.2654,
+          "auc": 0.8118,
+          "auc_ci_95": [
+            0.751,
+            0.869
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-15, granite4.1:8b flags 72% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 72% recall costs 27% false alarms -- workable only where a regeneration is cheap; last confirmed 104 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "nemotron3:33b": {
+      "model": "nemotron3:33b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-13",
+          "held_out_recall": 0.7525,
+          "held_out_fpr": 0.2482,
+          "auc": 0.1681,
+          "auc_ci_95": [
+            0.119,
+            0.23
+          ],
+          "primary_feature": "logprob_q75",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-13, nemotron3:33b flags 75% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: last confirmed 106 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-15",
+          "held_out_recall": 0.6857,
+          "held_out_fpr": 0.2545,
+          "auc": 0.7911,
+          "auc_ci_95": [
+            0.729,
+            0.846
+          ],
+          "primary_feature": "entropy_mean",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-15, nemotron3:33b flags 69% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 69% recall costs 25% false alarms -- workable only where a regeneration is cheap; last confirmed 104 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "qwen2:72b-instruct \u25c6": {
+      "model": "qwen2:72b-instruct \u25c6",
+      "domains": {
+        "hard_negatives": {
+          "domain": "hard_negatives",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-25",
+          "held_out_recall": 0.71,
+          "held_out_fpr": 0.2724,
+          "auc": 0.196,
+          "auc_ci_95": [
+            0.135,
+            0.268
+          ],
+          "primary_feature": "chars_per_token",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-25, qwen2:72b-instruct \u25c6 hard_negatives_150 flags 71% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 71% recall costs 27% false alarms -- workable only where a regeneration is cheap; last confirmed 155 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "qwen3-coder-next:latest": {
+      "model": "qwen3-coder-next:latest",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-03",
+          "held_out_recall": 0.8029,
+          "held_out_fpr": 0.2489,
+          "auc": 0.8661,
+          "auc_ci_95": [
+            0.85,
+            0.881
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-03, qwen3-coder-next:latest flags 80% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: last confirmed 116 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "qwen3.5:27b": {
+      "model": "qwen3.5:27b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-08",
+          "held_out_recall": 0.7294,
+          "held_out_fpr": 0.25,
+          "auc": 0.18,
+          "auc_ci_95": [
+            0.158,
+            0.203
+          ],
+          "primary_feature": "logprob_q75",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-08, qwen3.5:27b flags 73% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: last confirmed 111 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-07",
+          "held_out_recall": 0.794,
+          "held_out_fpr": 0.2498,
+          "auc": 0.1747,
+          "auc_ci_95": [
+            0.154,
+            0.194
+          ],
+          "primary_feature": "max_logprob",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-07, qwen3.5:27b flags 79% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: last confirmed 112 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "qwen3.6:27b": {
+      "model": "qwen3.6:27b",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-15",
+          "held_out_recall": 0.8457,
+          "held_out_fpr": 0.2546,
+          "auc": 0.1294,
+          "auc_ci_95": [
+            0.082,
+            0.186
+          ],
+          "primary_feature": "logprob_q75",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-15, qwen3.6:27b flags 85% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 85% recall costs 25% false alarms -- workable only where a regeneration is cheap; last confirmed 104 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "qwen3.6:35b-a3b": {
+      "model": "qwen3.6:35b-a3b",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-13",
+          "held_out_recall": 0.6652,
+          "held_out_fpr": 0.2571,
+          "auc": 0.7646,
+          "auc_ci_95": [
+            0.697,
+            0.823
+          ],
+          "primary_feature": "std_logprob",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-13, qwen3.6:35b-a3b flags 67% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 67% recall costs 26% false alarms -- workable only where a regeneration is cheap; interval [0.70-0.82] straddles the production bar -- more samples needed before this is settled; last confirmed 106 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "qwen3:14b": {
+      "model": "qwen3:14b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-12",
+          "held_out_recall": 0.6666,
+          "held_out_fpr": 0.254,
+          "auc": 0.8019,
+          "auc_ci_95": [
+            0.736,
+            0.859
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-12, qwen3:14b flags 67% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 67% recall costs 25% false alarms -- workable only where a regeneration is cheap; last confirmed 107 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-14",
+          "held_out_recall": 0.7119,
+          "held_out_fpr": 0.2561,
+          "auc": 0.8095,
+          "auc_ci_95": [
+            0.748,
+            0.871
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-14, qwen3:14b flags 71% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 71% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 105 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "qwen3:8b": {
+      "model": "qwen3:8b",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-12",
+          "held_out_recall": 0.7331,
+          "held_out_fpr": 0.2531,
+          "auc": 0.7903,
+          "auc_ci_95": [
+            0.715,
+            0.852
+          ],
+          "primary_feature": "entropy_mean",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-12, qwen3:8b flags 73% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 73% recall costs 25% false alarms -- workable only where a regeneration is cheap; last confirmed 107 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "gpt-5.4-nano": {
+      "model": "gpt-5.4-nano",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.9572,
+          "held_out_fpr": 0.2575,
+          "auc": 0.9526,
+          "auc_ci_95": [
+            0.92,
+            0.977
+          ],
+          "primary_feature": "entropy_mean",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength"
+          ],
+          "statement": "As measured on 2026-08-26, gpt-5.4-nano--v1xval flags 96% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 96% recall costs 26% false alarms -- workable only where a regeneration is cheap."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 1.0,
+          "held_out_fpr": 0.2511,
+          "auc": 0.9851,
+          "auc_ci_95": [
+            0.968,
+            0.996
+          ],
+          "primary_feature": "logprob_iqr",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength"
+          ],
+          "statement": "As measured on 2026-08-26, gpt-5.4-nano--v1xval flags 100% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 100% recall costs 25% false alarms -- workable only where a regeneration is cheap."
+        }
+      }
+    },
+    "gpt-5.4-mini": {
+      "model": "gpt-5.4-mini",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.9819,
+          "held_out_fpr": 0.2557,
+          "auc": 0.9774,
+          "auc_ci_95": [
+            0.957,
+            0.991
+          ],
+          "primary_feature": "entropy_mean",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength"
+          ],
+          "statement": "As measured on 2026-08-26, gpt-5.4-mini--v1xval flags 98% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 98% recall costs 26% false alarms -- workable only where a regeneration is cheap."
+        },
+        "code": {
+          "domain": "code",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.9557,
+          "held_out_fpr": 0.2557,
+          "auc": 0.9725,
+          "auc_ci_95": [
+            0.949,
+            0.99
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength"
+          ],
+          "statement": "As measured on 2026-08-26, gpt-5.4-mini--v1xval flags 96% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 96% recall costs 26% false alarms -- workable only where a regeneration is cheap."
+        }
+      }
+    },
+    "gpt-5.6-luna": {
+      "model": "gpt-5.6-luna",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.9178,
+          "held_out_fpr": 0.2705,
+          "auc": 0.9197,
+          "auc_ci_95": null,
+          "primary_feature": "reasoning_tokens",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "statistical_confidence",
+            "corpus_independence",
+            "target_reachability"
+          ],
+          "statement": "As measured on 2026-08-26, gpt-5.6-luna flags 92% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 92% recall costs 27% false alarms -- workable only where a regeneration is cheap; assessment incomplete -- no interval computed yet. This is arithmetic over stored data, not a new measurement; run add_intervals.py; reasoning_tokens tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.9907,
+          "held_out_fpr": 0.2717,
+          "auc": 0.971,
+          "auc_ci_95": null,
+          "primary_feature": "reasoning_ratio",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "statistical_confidence",
+            "target_reachability"
+          ],
+          "statement": "As measured on 2026-08-26, gpt-5.6-luna flags 99% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 99% recall costs 27% false alarms -- workable only where a regeneration is cheap; assessment incomplete -- no interval computed yet. This is arithmetic over stored data, not a new measurement; run add_intervals.py; unmeasured -- zero-output responses were not counted."
+        }
+      }
+    },
+    "gpt-5.6-sol": {
+      "model": "gpt-5.6-sol",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.9017,
+          "held_out_fpr": 0.2624,
+          "auc": 0.9304,
+          "auc_ci_95": null,
+          "primary_feature": "reasoning_tokens",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "statistical_confidence",
+            "corpus_independence",
+            "target_reachability"
+          ],
+          "statement": "As measured on 2026-08-26, gpt-5.6-sol flags 90% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 90% recall costs 26% false alarms -- workable only where a regeneration is cheap; assessment incomplete -- no interval computed yet. This is arithmetic over stored data, not a new measurement; run add_intervals.py; reasoning_tokens tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.9955,
+          "held_out_fpr": 0.267,
+          "auc": 0.9795,
+          "auc_ci_95": null,
+          "primary_feature": "reasoning_ratio",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "statistical_confidence",
+            "target_reachability"
+          ],
+          "statement": "As measured on 2026-08-26, gpt-5.6-sol flags 100% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 100% recall costs 27% false alarms -- workable only where a regeneration is cheap; assessment incomplete -- no interval computed yet. This is arithmetic over stored data, not a new measurement; run add_intervals.py; unmeasured -- zero-output responses were not counted."
+        }
+      }
+    },
+    "gpt-5.6-terra": {
+      "model": "gpt-5.6-terra",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.9577,
+          "held_out_fpr": 0.2742,
+          "auc": 0.9416,
+          "auc_ci_95": null,
+          "primary_feature": "reasoning_tokens",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "statistical_confidence",
+            "corpus_independence",
+            "target_reachability"
+          ],
+          "statement": "As measured on 2026-08-26, gpt-5.6-terra flags 96% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 96% recall costs 27% false alarms -- workable only where a regeneration is cheap; assessment incomplete -- no interval computed yet. This is arithmetic over stored data, not a new measurement; run add_intervals.py; reasoning_tokens tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.899,
+          "held_out_fpr": 0.2771,
+          "auc": 0.9203,
+          "auc_ci_95": null,
+          "primary_feature": "reasoning_ratio",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "statistical_confidence",
+            "target_reachability"
+          ],
+          "statement": "As measured on 2026-08-26, gpt-5.6-terra flags 90% of affected responses and 28% of unaffected ones on our false-premise benchmark. Known limits: 90% recall costs 28% false alarms -- workable only where a regeneration is cheap; assessment incomplete -- no interval computed yet. This is arithmetic over stored data, not a new measurement; run add_intervals.py; unmeasured -- zero-output responses were not counted."
+        }
+      }
+    },
+    "gpt-4o": {
+      "model": "gpt-4o",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-15",
+          "held_out_recall": 0.8674,
+          "held_out_fpr": 0.2603,
+          "auc": 0.9158,
+          "auc_ci_95": [
+            0.879,
+            0.951
+          ],
+          "primary_feature": "entropy_mean",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-15, GPT-4o flags 87% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 87% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 193 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "gpt-5.3-codex \u25c6": {
+      "model": "gpt-5.3-codex \u25c6",
+      "domains": {
+        "hard_negatives": {
+          "domain": "hard_negatives",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-24",
+          "held_out_recall": 0.7989,
+          "held_out_fpr": 0.2676,
+          "auc": 0.1518,
+          "auc_ci_95": [
+            0.085,
+            0.22
+          ],
+          "primary_feature": "unique_word_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-24, gpt-5.3-codex \u25c6 hard_negatives_150 flags 80% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 80% recall costs 27% false alarms -- workable only where a regeneration is cheap; unique_word_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 156 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-24",
+          "held_out_recall": 0.6509,
+          "held_out_fpr": 0.2604,
+          "auc": 0.765,
+          "auc_ci_95": [
+            0.695,
+            0.831
+          ],
+          "primary_feature": "unique_token_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-24, gpt-5.3-codex \u25c6 prose_v2_matched_200 flags 65% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 65% recall costs 26% false alarms -- workable only where a regeneration is cheap; interval [0.69-0.83] straddles the production bar -- more samples needed before this is settled; unique_token_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        }
+      }
+    },
+    "gpt-5.4": {
+      "model": "gpt-5.4",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-04",
+          "held_out_recall": 0.9022,
+          "held_out_fpr": 0.2593,
+          "auc": 0.9261,
+          "auc_ci_95": [
+            0.892,
+            0.956
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-04, gpt-5.4 [] flags 90% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 90% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 145 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "gpt-oss:120b": {
+      "model": "gpt-oss:120b",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-04-22",
+          "held_out_recall": 0.8019,
+          "held_out_fpr": 0.2538,
+          "auc": 0.838,
+          "auc_ci_95": [
+            0.793,
+            0.874
+          ],
+          "primary_feature": "latency_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-04-22, gpt-oss:120b flags 80% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 80% recall costs 25% false alarms -- workable only where a regeneration is cheap; latency_ms tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 127 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok-4.3": {
+      "model": "grok-4.3",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.7258,
+          "held_out_fpr": 0.2935,
+          "auc": 0.7058,
+          "auc_ci_95": [
+            0.653,
+            0.789
+          ],
+          "primary_feature": "reasoning_chars",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "statistical_confidence",
+            "corpus_independence"
+          ],
+          "statement": "As measured on 2026-08-26, grok-4.3 flags 73% of affected responses and 29% of unaffected ones on our false-premise benchmark. Known limits: 73% recall costs 29% false alarms -- workable only where a regeneration is cheap; interval [0.65-0.79] straddles the production bar -- more samples needed before this is settled; reasoning_chars tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        }
+      }
+    },
+    "grok-4.5": {
+      "model": "grok-4.5",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.9839,
+          "held_out_fpr": 0.2558,
+          "auc": 0.9768,
+          "auc_ci_95": [
+            0.945,
+            0.993
+          ],
+          "primary_feature": "reasoning_tokens",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "engine_reachability",
+            "corpus_independence"
+          ],
+          "statement": "As measured on 2026-08-26, grok-4.5 flags 98% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 98% recall costs 26% false alarms -- workable only where a regeneration is cheap; primary is computable, but 2 secondary feature(s) are not: logprob_std, perplexity; reasoning_tokens tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.9288,
+          "held_out_fpr": 0.2679,
+          "auc": 0.8998,
+          "auc_ci_95": [
+            0.852,
+            0.94
+          ],
+          "primary_feature": "reasoning_ratio",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "engine_reachability"
+          ],
+          "statement": "As measured on 2026-08-26, grok-4.5 flags 93% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 93% recall costs 27% false alarms -- workable only where a regeneration is cheap; primary is computable, but 2 secondary feature(s) are not: logprob_std, perplexity."
+        }
+      }
+    },
+    "grok-4.6": {
+      "model": "grok-4.6",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "LIMITED",
+          "currency": "CURRENT",
+          "measured_on": "2026-08-26",
+          "held_out_recall": 0.9277,
+          "held_out_fpr": 0.2736,
+          "auc": 0.9215,
+          "auc_ci_95": [
+            0.894,
+            0.957
+          ],
+          "primary_feature": "reasoning_tokens",
+          "risk_grade": "WATCH",
+          "limiting_dimension": [
+            "detection_strength",
+            "engine_reachability",
+            "corpus_independence"
+          ],
+          "statement": "As measured on 2026-08-26, grok-4.6 flags 93% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 93% recall costs 27% false alarms -- workable only where a regeneration is cheap; primary is computable, but 2 secondary feature(s) are not: logprob_std, perplexity; reasoning_tokens tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model."
+        }
+      }
+    },
+    "grok 3": {
+      "model": "grok 3",
+      "domains": {
+        "hard_negatives": {
+          "domain": "hard_negatives",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-17",
+          "held_out_recall": 0.803,
+          "held_out_fpr": 0.2396,
+          "auc": 0.1284,
+          "auc_ci_95": [
+            0.095,
+            0.174
+          ],
+          "primary_feature": "unique_token_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-17, Grok 3 flags 80% of affected responses and 24% of unaffected ones on our false-premise benchmark. Known limits: unique_token_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 163 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok 3 fast": {
+      "model": "grok 3 fast",
+      "domains": {
+        "hard_negatives": {
+          "domain": "hard_negatives",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-17",
+          "held_out_recall": 0.809,
+          "held_out_fpr": 0.2355,
+          "auc": 0.13,
+          "auc_ci_95": [
+            0.094,
+            0.177
+          ],
+          "primary_feature": "unique_token_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-17, Grok 3 Fast flags 81% of affected responses and 24% of unaffected ones on our false-premise benchmark. Known limits: unique_token_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 163 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok 3 mini": {
+      "model": "grok 3 mini",
+      "domains": {
+        "hard_negatives": {
+          "domain": "hard_negatives",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-17",
+          "held_out_recall": 0.7894,
+          "held_out_fpr": 0.2394,
+          "auc": 0.1331,
+          "auc_ci_95": [
+            0.098,
+            0.178
+          ],
+          "primary_feature": "unique_token_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-17, Grok 3 Mini flags 79% of affected responses and 24% of unaffected ones on our false-premise benchmark. Known limits: unique_token_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 163 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-17",
+          "held_out_recall": 0.8657,
+          "held_out_fpr": 0.2581,
+          "auc": 0.8877,
+          "auc_ci_95": [
+            0.851,
+            0.922
+          ],
+          "primary_feature": "time_to_first_token_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-17, Grok 3 Mini flags 87% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 87% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 163 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok 3 mini fast": {
+      "model": "grok 3 mini fast",
+      "domains": {
+        "hard_negatives": {
+          "domain": "hard_negatives",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-17",
+          "held_out_recall": 0.8344,
+          "held_out_fpr": 0.2388,
+          "auc": 0.1243,
+          "auc_ci_95": [
+            0.087,
+            0.169
+          ],
+          "primary_feature": "unique_token_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-17, Grok 3 Mini Fast flags 83% of affected responses and 24% of unaffected ones on our false-premise benchmark. Known limits: unique_token_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 163 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-17",
+          "held_out_recall": 0.8697,
+          "held_out_fpr": 0.2599,
+          "auc": 0.8935,
+          "auc_ci_95": [
+            0.86,
+            0.924
+          ],
+          "primary_feature": "time_to_first_token_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-17, Grok 3 Mini Fast flags 87% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 87% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 163 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok--fast-1": {
+      "model": "grok--fast-1",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-27",
+          "held_out_recall": 0.7793,
+          "held_out_fpr": 0.2723,
+          "auc": 0.1732,
+          "auc_ci_95": [
+            0.109,
+            0.248
+          ],
+          "primary_feature": "unique_token_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-27, grok--fast-1 flags 78% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 78% recall costs 27% false alarms -- workable only where a regeneration is cheap; unique_token_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 181 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-26",
+          "held_out_recall": 0.9614,
+          "held_out_fpr": 0.2593,
+          "auc": 0.9332,
+          "auc_ci_95": [
+            0.893,
+            0.965
+          ],
+          "primary_feature": "time_to_first_token_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-26, grok--fast-1 flags 96% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 96% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 182 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok-3-mini": {
+      "model": "grok-3-mini",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-27",
+          "held_out_recall": 0.9622,
+          "held_out_fpr": 0.2572,
+          "auc": 0.945,
+          "auc_ci_95": [
+            0.906,
+            0.973
+          ],
+          "primary_feature": "time_to_first_token_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-27, grok-3-mini flags 96% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 96% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 181 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "unknown": {
+          "domain": "unknown",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-27",
+          "held_out_recall": 0.8499,
+          "held_out_fpr": 0.2651,
+          "auc": 0.1074,
+          "auc_ci_95": [
+            0.06,
+            0.166
+          ],
+          "primary_feature": "unique_token_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-27, grok-3-mini flags 85% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 85% recall costs 27% false alarms -- workable only where a regeneration is cheap; unique_token_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 181 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok-4": {
+      "model": "grok-4",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-12",
+          "held_out_recall": 0.7619,
+          "held_out_fpr": 0.2541,
+          "auc": 0.7973,
+          "auc_ci_95": [
+            0.727,
+            0.864
+          ],
+          "primary_feature": "time_to_first_token_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-12, grok-4 flags 76% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 76% recall costs 25% false alarms -- workable only where a regeneration is cheap; last confirmed 107 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok-4-0709": {
+      "model": "grok-4-0709",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-17",
+          "held_out_recall": 0.8461,
+          "held_out_fpr": 0.2455,
+          "auc": 0.8641,
+          "auc_ci_95": [
+            0.81,
+            0.912
+          ],
+          "primary_feature": "time_to_first_token_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-17, grok-4-0709 flags 85% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: last confirmed 163 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "hard_negatives": {
+          "domain": "hard_negatives",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-17",
+          "held_out_recall": 0.8401,
+          "held_out_fpr": 0.2597,
+          "auc": 0.1055,
+          "auc_ci_95": [
+            0.055,
+            0.166
+          ],
+          "primary_feature": "unique_token_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-17, grok-4-0709 flags 84% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 84% recall costs 26% false alarms -- workable only where a regeneration is cheap; unique_token_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 163 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-17",
+          "held_out_recall": 1.0,
+          "held_out_fpr": 0.2578,
+          "auc": 0.9972,
+          "auc_ci_95": [
+            0.993,
+            1.0
+          ],
+          "primary_feature": "latency_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-17, grok-4-0709 flags 100% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 100% recall costs 26% false alarms -- workable only where a regeneration is cheap; latency_ms tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 163 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok-4-1-fast": {
+      "model": "grok-4-1-fast",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-05-12",
+          "held_out_recall": 0.8338,
+          "held_out_fpr": 0.2588,
+          "auc": 0.8816,
+          "auc_ci_95": [
+            0.839,
+            0.924
+          ],
+          "primary_feature": "entropy_std",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-05-12, grok-4-1-fast flags 83% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 83% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 107 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok-4-1-fast-non-reasoning": {
+      "model": "grok-4-1-fast-non-reasoning",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-26",
+          "held_out_recall": 0.9115,
+          "held_out_fpr": 0.2488,
+          "auc": 0.9241,
+          "auc_ci_95": [
+            0.887,
+            0.953
+          ],
+          "primary_feature": "entropy_mean",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-26, grok-4-1-fast-non-reasoning flags 91% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: last confirmed 182 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "unknown": {
+          "domain": "unknown",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-26",
+          "held_out_recall": 0.7851,
+          "held_out_fpr": 0.2593,
+          "auc": 0.1571,
+          "auc_ci_95": [
+            0.086,
+            0.224
+          ],
+          "primary_feature": "unique_token_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-26, grok-4-1-fast-non-reasoning flags 79% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 79% recall costs 26% false alarms -- workable only where a regeneration is cheap; unique_token_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 182 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok-4-1-fast-reasoning": {
+      "model": "grok-4-1-fast-reasoning",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-27",
+          "held_out_recall": 0.733,
+          "held_out_fpr": 0.2521,
+          "auc": 0.8555,
+          "auc_ci_95": [
+            0.799,
+            0.906
+          ],
+          "primary_feature": "time_to_first_token_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-27, grok-4-1-fast-reasoning flags 73% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: 73% recall costs 25% false alarms -- workable only where a regeneration is cheap; last confirmed 181 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-27",
+          "held_out_recall": 0.9654,
+          "held_out_fpr": 0.2569,
+          "auc": 0.9552,
+          "auc_ci_95": [
+            0.923,
+            0.977
+          ],
+          "primary_feature": "time_to_first_token_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-27, grok-4-1-fast-reasoning flags 97% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 97% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 181 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "unknown": {
+          "domain": "unknown",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-27",
+          "held_out_recall": 0.7497,
+          "held_out_fpr": 0.2565,
+          "auc": 0.1849,
+          "auc_ci_95": [
+            0.123,
+            0.268
+          ],
+          "primary_feature": "unique_word_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-27, grok-4-1-fast-reasoning flags 75% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 75% recall costs 26% false alarms -- workable only where a regeneration is cheap; unique_word_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 181 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok-4-fast-non-reasoning": {
+      "model": "grok-4-fast-non-reasoning",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-26",
+          "held_out_recall": 0.9418,
+          "held_out_fpr": 0.2551,
+          "auc": 0.9529,
+          "auc_ci_95": [
+            0.922,
+            0.976
+          ],
+          "primary_feature": "entropy_mean",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-26, grok-4-fast-non-reasoning flags 94% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 94% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 182 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "unknown": {
+          "domain": "unknown",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-26",
+          "held_out_recall": 0.7662,
+          "held_out_fpr": 0.27,
+          "auc": 0.1528,
+          "auc_ci_95": [
+            0.094,
+            0.213
+          ],
+          "primary_feature": "unique_token_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-26, grok-4-fast-non-reasoning flags 77% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 77% recall costs 27% false alarms -- workable only where a regeneration is cheap; unique_token_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 182 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok-4-fast-reasoning": {
+      "model": "grok-4-fast-reasoning",
+      "domains": {
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-27",
+          "held_out_recall": 0.9116,
+          "held_out_fpr": 0.2494,
+          "auc": 0.9372,
+          "auc_ci_95": [
+            0.902,
+            0.966
+          ],
+          "primary_feature": "time_to_first_token_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-27, grok-4-fast-reasoning flags 91% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: last confirmed 181 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "unknown": {
+          "domain": "unknown",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-02-27",
+          "held_out_recall": 0.796,
+          "held_out_fpr": 0.2636,
+          "auc": 0.1448,
+          "auc_ci_95": [
+            0.087,
+            0.207
+          ],
+          "primary_feature": "unique_token_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-02-27, grok-4-fast-reasoning flags 80% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 80% recall costs 26% false alarms -- workable only where a regeneration is cheap; unique_token_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 181 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok-4.20-beta-0309-non-reasoning": {
+      "model": "grok-4.20-beta-0309-non-reasoning",
+      "domains": {
+        "hard_negatives": {
+          "domain": "hard_negatives",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-17",
+          "held_out_recall": 0.8713,
+          "held_out_fpr": 0.2693,
+          "auc": 0.0998,
+          "auc_ci_95": [
+            0.053,
+            0.157
+          ],
+          "primary_feature": "unique_word_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-17, grok-4.20-beta-0309-non-reasoning flags 87% of affected responses and 27% of unaffected ones on our false-premise benchmark. Known limits: 87% recall costs 27% false alarms -- workable only where a regeneration is cheap; unique_word_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 163 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    },
+    "grok-4.20-beta-0309-reasoning": {
+      "model": "grok-4.20-beta-0309-reasoning",
+      "domains": {
+        "code": {
+          "domain": "code",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-17",
+          "held_out_recall": 0.7629,
+          "held_out_fpr": 0.248,
+          "auc": 0.836,
+          "auc_ci_95": [
+            0.779,
+            0.89
+          ],
+          "primary_feature": "time_to_first_token_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-17, grok-4.20-beta-0309-reasoning flags 76% of affected responses and 25% of unaffected ones on our false-premise benchmark. Known limits: last confirmed 163 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "hard_negatives": {
+          "domain": "hard_negatives",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-17",
+          "held_out_recall": 0.931,
+          "held_out_fpr": 0.262,
+          "auc": 0.0612,
+          "auc_ci_95": [
+            0.028,
+            0.103
+          ],
+          "primary_feature": "unique_word_ratio",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-17, grok-4.20-beta-0309-reasoning flags 93% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 93% recall costs 26% false alarms -- workable only where a regeneration is cheap; unique_word_ratio tracks response length; part of its separation may come from the corpus prompt-length asymmetry rather than the model; last confirmed 163 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        },
+        "prose": {
+          "domain": "prose",
+          "capability": "PROVEN",
+          "currency": "STALE",
+          "measured_on": "2026-03-17",
+          "held_out_recall": 0.9607,
+          "held_out_fpr": 0.2578,
+          "auc": 0.9398,
+          "auc_ci_95": [
+            0.898,
+            0.97
+          ],
+          "primary_feature": "time_to_first_token_ms",
+          "risk_grade": "FRAGILE",
+          "limiting_dimension": [
+            "temporal_stability"
+          ],
+          "statement": "As measured on 2026-03-17, grok-4.20-beta-0309-reasoning flags 96% of affected responses and 26% of unaffected ones on our false-premise benchmark. Known limits: 96% recall costs 26% false alarms -- workable only where a regeneration is cheap; last confirmed 163 days ago; on this corpus an unconfirmed threshold moved within six weeks."
+        }
+      }
+    }
+  }
+}
