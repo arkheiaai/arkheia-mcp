@@ -118,6 +118,7 @@ class ProfileRouter:
         self.profile_dir = profile_dir
         self._loaded_count = 0
         self._decryption_key = decryption_key
+        self._manifest: Optional[dict] = None
         self.load_all()
 
     def set_decryption_key(self, key: bytes) -> None:
@@ -185,6 +186,74 @@ class ProfileRouter:
             self.profile_dir,
         )
 
+    # -----------------------------------------------------------------------
+    # Detection manifest
+    #
+    # A profile says HOW to score. It says nothing about how well that scoring
+    # was shown to work, or when it was last confirmed -- so a model measured
+    # last week at 98% and one measured in March at 62% produce results of
+    # identical shape and a caller cannot tell them apart.
+    #
+    # The manifest is exported from the lab (export_detection_manifest.py) and
+    # is DERIVED, never authored: every field traces to a held-out measurement.
+    # Absent or unreadable, detection continues exactly as before and results
+    # simply carry no provenance -- annotation must never break scoring.
+    # -----------------------------------------------------------------------
+
+    MANIFEST_FILE = "_detection_manifest.json"
+
+    @staticmethod
+    def _normalise_model(name: str) -> str:
+        """Lowercase and collapse separators. Deliberately minimal: the lab
+        strips run-label decoration that never reaches a server, and doing more
+        here would risk the two sides disagreeing about a model's name."""
+        import re as _re
+        return _re.sub(r"[\s_]+", " ", str(name or "").lower()).strip()
+
+    def _load_manifest(self) -> dict:
+        if self._manifest is not None:
+            return self._manifest
+        path = Path(self.profile_dir) / self.MANIFEST_FILE
+        try:
+            self._manifest = json.loads(path.read_text(encoding="utf-8"))
+            logger.info("Detection manifest loaded: %d models (as of %s)",
+                        len(self._manifest.get("models") or {}),
+                        self._manifest.get("as_of"))
+        except FileNotFoundError:
+            logger.info("No detection manifest at %s - results carry no provenance", path)
+            self._manifest = {"models": {}}
+        except Exception as exc:  # noqa: BLE001 - never let annotation break scoring
+            logger.warning("Detection manifest unreadable (%s) - continuing without it", exc)
+            self._manifest = {"models": {}}
+        return self._manifest
+
+    def get_detection_provenance(self, model_name: str,
+                                 domain: Optional[str] = None) -> Optional[dict]:
+        """What the lab measured for this model, if anything.
+
+        Returns None for a model never characterised -- worth surfacing, because
+        scoring a model we have never measured is a different claim from scoring
+        one we have.
+        """
+        models = self._load_manifest().get("models") or {}
+        rec = models.get(self._normalise_model(model_name))
+        domains = (rec or {}).get("domains") or {}
+        if not domains:
+            return None
+        chosen = domains.get(domain) if domain else None
+        if chosen is None:
+            # No domain given, or none measured for it: report the WEAKEST
+            # measurement. A caller who does not say where they are should get
+            # the conservative number, not the flattering one.
+            chosen = min(domains.values(),
+                         key=lambda d: (d.get("held_out_recall") or 0))
+        out = {k: chosen.get(k) for k in (
+            "measured_on", "domain", "capability", "currency", "held_out_recall",
+            "held_out_fpr", "auc", "auc_ci_95", "primary_feature", "risk_grade",
+            "limiting_dimension", "statement")}
+        out["domains_measured"] = sorted(domains)
+        return out
+
     def _load_plaintext(self, f: Path) -> Optional[dict]:
         """Load and validate a plaintext YAML profile."""
         try:
@@ -211,6 +280,60 @@ class ProfileRouter:
             return None
         return model_id
 
+    def _by_model_id(self, target: str) -> Optional[dict]:
+        """Case-insensitive direct lookup of a profile by its model id (no fuzzy)."""
+        t = target.lower()
+        if t in self._profiles:
+            return self._profiles[t]
+        for key, profile in self._profiles.items():
+            stored = (profile.get("model") or profile.get("metadata", {}).get("model_id", "")).lower()
+            if key.lower() == t or stored == t:
+                return profile
+        return None
+
+    def _resolve_recent_gpt(self, model_lower: str) -> Optional[dict]:
+        """Explicit, logged resolution for recent GPT-5.x IDs (surface-strategy 2026-06-30).
+        Returns None to fall through when not a recent-GPT id."""
+        if not model_lower.startswith("gpt-5"):
+            return None
+        if "codex" in model_lower:
+            if "5.2-codex" in model_lower or "5.3-codex" in model_lower:
+                return self._by_model_id("gpt-5.2-codex")
+            if "5.1-codex-mini" in model_lower:
+                return self._by_model_id("gpt-5.1-codex-mini")
+            prof = self._by_model_id("gpt-5-codex")
+            if prof is not None:
+                logger.warning("Model %s: no dedicated Codex profile -- gpt-5-codex FALLBACK "
+                               "pending subscription characterisation", model_lower)
+            return prof
+        # public-API GPT-5.x: prefer a version-specific profile if characterised
+        # (gpt-5.5 covers gpt-5.5*, etc.), else nearest characterised API surface gpt-5.4.
+        import re as _re
+        _vm = _re.match(r"(gpt-5(?:\.\d+)?)", model_lower)
+        if _vm:
+            vprof = self._by_model_id(_vm.group(1))
+            if vprof is not None:
+                return vprof
+        prof = self._by_model_id("gpt-5.4")
+        if prof is not None and "5.4" not in model_lower:
+            logger.warning("Model %s: no dedicated API profile -- gpt-5.4 (nearest API "
+                           "surface) pending per-version drift validation", model_lower)
+        return prof
+
+    def _resolve_glm(self, model_lower: str) -> Optional[dict]:
+        """Explicit version routing for GLM (Together) ids so a bare 'glm-5.2' or a canonical
+        'zai-org/glm-5.2' resolves to the RIGHT together-glm-<ver> surface and never borrows a
+        wrong-version GLM profile via the fuzzy prefix/family match below. Returns None to fall
+        through when not a GLM-5.x id (glm4-9b keeps its own path). Parity with the API Proxy
+        MODEL_PROFILE_MAP GLM entries (2026-07-05)."""
+        if "glm" not in model_lower:
+            return None
+        import re as _re
+        m = _re.search(r"glm-?(5(?:\.\d+)?)", model_lower)
+        if not m:
+            return None
+        return self._by_model_id(f"zai-org/glm-{m.group(1)}")
+
     def get(self, model_id: str) -> Optional[dict]:
         """Return profile for model_id, or None if no match."""
         if not model_id:
@@ -230,6 +353,22 @@ class ProfileRouter:
             ).lower()
             if stored_id == model_lower:
                 return profile
+
+        # 1b. Recent GPT-5.x explicit resolution (parity with the API Proxy loader,
+        # 2026-06-30). Without this, recent IDs hit the crude family match below and could
+        # borrow a wrong-surface profile (e.g. a Codex profile for an API model, or vice
+        # versa). Route explicitly: Codex/subscription IDs -> gpt-5-codex; public-API
+        # versions -> nearest characterised API surface (gpt-5.4) pending drift. A real
+        # gpt-5.5.yaml dropped in supersedes this via the exact match above.
+        gpt5 = self._resolve_recent_gpt(model_lower)
+        if gpt5 is not None:
+            return gpt5
+
+        # 1c. GLM (Together) explicit version routing — before the fuzzy match, so a GLM id
+        # resolves to its exact together-glm-<ver> surface and never borrows a wrong version.
+        glm = self._resolve_glm(model_lower)
+        if glm is not None:
+            return glm
 
         # 2. Prefix match (either direction)
         for key in self._profiles:

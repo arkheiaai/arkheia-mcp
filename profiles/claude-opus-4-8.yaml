@@ -1,0 +1,116 @@
+model: "claude-opus-4-8"
+version: "1.0"
+type: api
+generated: "2026-06-04T15:47:46.269243+00:00"
+
+characterization:
+  date: "2026-06-04"
+  prompts: 200
+  features: 4
+  token_limit: 250
+  notes: "Code+Prose domain characterization (50 TRUTH + 50 FAB per domain = 200 total). Server-side telemetry only. No logprobs available from Anthropic API."
+
+api:
+  provider: anthropic
+  endpoint: "Anthropic Messages API (https://api.anthropic.com/v1/messages)"
+  logprobs_available: false
+  thinking_model: false
+
+detection:
+  strategy: ensemble
+  polarity: normal
+  alpha: 0.05
+  bias: 0.40
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  evidence_depth_limited: false
+  thresholds:
+    low: 0.7532
+    medium: 0.784
+  features:
+    unique_word_ratio:
+      weight: 1.2633
+      polarity: positive
+      threshold_low: 0.7532
+      threshold_medium: 0.784
+      cohens_d: -1.2633
+      effect_size: very large
+      truth_mean: 0.7225
+      truth_std: 0.0616
+      fab_mean: 0.7903
+      fab_std: 0.038
+      enabled: true
+    word_count:
+      weight: 1.181
+      polarity: positive
+      threshold_low: 103.1035
+      threshold_medium: 107.757
+      cohens_d: -1.181
+      effect_size: large
+      truth_mean: 98.45
+      truth_std: 9.307
+      fab_mean: 112.31
+      fab_std: 14.7769
+      enabled: true
+    tokens_per_second:
+      weight: 0.9806
+      polarity: negative
+      threshold_low: 56.066
+      threshold_medium: 49.6553
+      cohens_d: 0.9806
+      effect_size: large
+      truth_mean: 62.4767
+      truth_std: 12.8215
+      fab_mean: 50.8205
+      fab_std: 10.5044
+      enabled: true
+    total_time_s:
+      weight: 0.065
+      polarity: positive
+      threshold_low: 8.1194
+      threshold_medium: 11.2993
+      cohens_d: -0.065
+      effect_size: negligible
+      truth_mean: 4.9396
+      truth_std: 6.3598
+      fab_mean: 5.0921
+      fab_std: 1.6359
+      enabled: true
+
+performance:
+  truth_accuracy: null
+  fab_accuracy: null
+  combined_accuracy: null
+  precision: null
+  recall: null
+  f1: null
+  n_truth: 100
+  n_fab: 100
+  notes: "4 server-side feature(s). unique_word_ratio d=-1.2633 (very large), word_count d=-1.1810 (large), tokens_per_second d=0.9806 (large), total_time_s d=-0.0650 (negligible). No logprobs - detection from telemetry only."
+
+mode_gate:
+  enabled: true
+  tool_surface:
+    action: suppress
+    triggers:
+      token_count_max: 80
+      is_function_call: true
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+  detection_capability: strong
+
+signals:
+  enabled: [latency, tokens]
+  required: [latency]
+
+metadata:
+  generator: arkheia-model-lab
+  generator_version: "3.0.0"
+  validation_date: "2026-06-04"
+  status: validated
+  dataset_size: 200
+  max_cohen_d: 1.2633
+  notes: "Fabrication takes ~3.1% longer (4.94s vs 5.09s). ~18.7% fewer tokens/second. Privacy-preserving - no response text reading required."

@@ -7,3 +7,4 @@ audit.jsonl
 *.bak.yaml
 .pytest_cache/
 install_service.bat
+start-enterprise-proxy.bat

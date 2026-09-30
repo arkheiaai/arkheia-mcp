@@ -9,11 +9,33 @@ detection engine. Extend only.
 """
 
 import math
+import re
 import statistics
 import logging
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Grounding-review signal (2026-07-01, parity with arkheia-proxy). Reasoning models flag
+# their own uncertainty in the response ("not in the sources", "I'm inferring this", "can't
+# confirm"). Validated ~100% precision on the InTouch grounding corpus. Elevated to a
+# first-class runtime signal so a caveat buried in prose becomes an actionable route-to-review.
+_GROUNDING_CAVEAT_RE = re.compile(
+    r"(not (?:in|contained in|provided in|available in|stated in|supported by) the sources?|"
+    r"sources? (?:do|does)(?:n'?t| not) (?:contain|provide|include|support|specify|say)|"
+    r"no (?:article|kb|information|record|matching|source|grounding)(?:\b|\s)|"
+    r"can'?t (?:determine|confirm|find|verify)|cannot (?:determine|confirm|find|verify|be (?:confirmed|determined))|"
+    r"i'?m inferring|i am inferring|inferring (?:this|that|it)|"
+    r"would need (?:to|more|the|access)|not enough (?:information|detail|context)|insufficient (?:information|detail|context|grounding)|"
+    r"unable to (?:confirm|determine|verify)|isn'?t (?:in|grounded|supported)|not grounded|"
+    r"i don'?t have (?:grounding|the source|access|information)|no source confirms|"
+    r"flag(?:ged)? (?:for|to) (?:review|follow-?up|product|kb|eng)|"
+    r"you may (?:want to|need to) (?:confirm|verify|check))", re.I)
+
+
+def grounding_uncertainty(text: str) -> float:
+    """Count of grounding-uncertainty markers (0,1,2,...); >=1 => route to review."""
+    return float(len(_GROUNDING_CAVEAT_RE.findall(text or "")))
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +61,7 @@ def extract_structural_features(text: str, token_count: int = 0) -> dict:
         "unique_word_ratio": len(set(w.lower() for w in words)) / len(words),
         "avg_word_length": sum(len(w) for w in words) / len(words),
         "sentence_count": len(sentences),
+        "grounding_uncertainty": grounding_uncertainty(text),
     }
     if token_count > 0:
         features["words_per_token"] = len(words) / token_count
@@ -204,12 +227,114 @@ def compute_feature(feature_name: str, signals: dict) -> Optional[float]:
     if feature_name == "chars_per_token":
         return signals.get("chars_per_token")
 
+    # Grounding-review signals (2026-07-01, parity with arkheia-proxy).
+    if feature_name == "grounding_uncertainty":
+        return signals.get("grounding_uncertainty")
+
+    if feature_name == "reasoning_flatline":
+        rt = signals.get("reasoning_tokens")
+        tt = signals.get("thinking_token_count")
+        val = rt if rt is not None else tt
+        if val is None:
+            return None
+        return 1.0 if val == 0 else 0.0
+
+    # Semantic grounding signals. reasoning_chars measures how much the model
+    # deliberated; grounding markers count its own stated doubt ("I don't think
+    # X exists", "no such function"). Both come from the chain of thought where
+    # a provider exposes one -- currently xAI only.
+    #
+    # These matter most where the statistical surface is weak. grok-4.3 scores
+    # 0.65 AUC on reasoning burn but 0.71 on reasoning_chars and 0.66 on
+    # grounding markers, so for that model the semantic signal is primary.
+    if feature_name == "reasoning_chars":
+        return _as_float(signals.get("reasoning_chars"))
+
+    if feature_name == "reasoning_hedging":
+        v = signals.get("reasoning_hedging")
+        return float(v) if v is not None else None
+
+    if feature_name == "visible_hedging":
+        v = signals.get("visible_hedging")
+        return float(v) if v is not None else None
+
+    if feature_name == "total_generated":
+        return _as_float(signals.get("total_generated"))
+
+    # Early-termination + TTFT signals (2026-08-26, parity with arkheia-proxy).
+    # stopped_early: 1.0 when the model finished of its own accord rather than
+    # running to the token ceiling. Measured across five characterised Claude
+    # models: TRUTH ended with max_tokens in 100% of rows, early end_turn
+    # occurred only in the fabrication class. None when no stop-reason telemetry
+    # is present, so existing profiles are unaffected.
+    if feature_name == "stopped_early":
+        se = signals.get("stopped_early")
+        if se is None:
+            sr = signals.get("stop_reason")
+            if sr is None:
+                return None
+            se = sr not in ("max_tokens", "length")
+        return 1.0 if se else 0.0
+
+    # time_to_first_token_ms: preferred over total_time_s on streaming paths —
+    # measured before any downstream yield, so consumer back-pressure cannot
+    # inflate it.
+    if feature_name == "time_to_first_token_ms":
+        v = signals.get("time_to_first_token_ms")
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
     return None
 
 
 # ---------------------------------------------------------------------------
 # Mode gate: suppress generative scoring for tool/short responses
 # ---------------------------------------------------------------------------
+
+def check_empty_output_gate(profile: dict, signals: dict) -> Optional[Dict[str, Any]]:
+    """
+    Empty-output gate: a response that emitted zero output tokens has no generative
+    surface to score, so it cannot be a fabrication — return LOW and stop.
+
+    This is the dominant false-positive source (confirmed with Codex): output_tokens == 0
+    (a truncated, empty, refused, or pure tool-call response) leaves reasoning_ratio / burn
+    features dividing by ~zero and saturating HIGH, flagging a response that said nothing.
+
+    output_tokens is server-side API usage metadata (a count), NOT the response text —
+    gating on it preserves the "we do not inspect inputs/outputs" guarantee.
+
+    Fires ONLY when output_tokens is explicitly present and < 1. If the provider gave no
+    usage metadata (None), we cannot confirm zero, so we carry on detecting.
+    """
+    ot = signals.get("output_tokens")
+    if ot is None:
+        return None
+    try:
+        ot = float(ot)
+    except (TypeError, ValueError):
+        return None
+    if ot >= 1:
+        return None
+
+    features_config = profile.get("detection", {}).get("features", {})
+    logger.debug("empty_output_gate fired: output_tokens=%s < 1", ot)
+    return {
+        "risk": "LOW",
+        "confidence": 0.0,
+        "evidence_depth_limited": True,
+        "model_detected": profile.get("model", "unknown"),
+        "detection_method": "empty_output_suppressed",
+        "profile_version": profile.get("version", "unknown"),
+        "metrics": {
+            "features_used": 0,
+            "features_total": len(features_config),
+            "computed_features": {},
+            "gate_reason": "output_tokens_below_1",
+        },
+    }
+
 
 def check_mode_gate(profile: dict, signals: dict) -> Optional[Dict[str, Any]]:
     """
@@ -261,12 +386,43 @@ def check_mode_gate(profile: dict, signals: dict) -> Optional[Dict[str, Any]]:
 # Profile-based classification
 # ---------------------------------------------------------------------------
 
+# Gate-action containment (2026-06-28, parity with arkheia-proxy). A profile may only
+# HARD-BLOCK when it has earned it with real measured performance; everything else is
+# advisory. Consumers must only block when result["gate_action"] == "block".
+_GATE_FP_CEILING = 0.05
+
+
+def resolve_gate_action(profile: dict) -> str:
+    """Returns "block" ONLY when the profile declares gate_action: block AND carries
+    non-null precision + f1 (and false_positive_rate within ceiling, if present).
+    Otherwise "advise". Default advise — no unvalidated profile can hard-block."""
+    detection_cfg = profile.get("detection", {}) or {}
+    declared = str(profile.get("gate_action") or detection_cfg.get("gate_action") or "advise").lower()
+    if declared != "block":
+        return "advise"
+    perf = profile.get("performance") or {}
+    if perf.get("precision") is None or perf.get("f1") is None:
+        return "advise"
+    fp = perf.get("false_positive_rate")
+    try:
+        if fp is not None and float(fp) > _GATE_FP_CEILING:
+            return "advise"
+    except (TypeError, ValueError):
+        return "advise"
+    return "block"
+
+
 def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, Any]]:
     """
     Classify fabrication risk using a YAML model profile.
 
     Returns None if no features could be computed (caller should treat as UNKNOWN).
     """
+    # Empty-output gate: zero output tokens == no generative surface -> LOW (top false positive).
+    empty_result = check_empty_output_gate(profile, signals)
+    if empty_result is not None:
+        return empty_result
+
     # Mode gate check first
     gate_result = check_mode_gate(profile, signals)
     if gate_result is not None:
@@ -277,6 +433,7 @@ def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, An
 
     risk_weights: Dict[str, float] = {"LOW": 0.0, "MEDIUM": 0.0, "HIGH": 0.0}
     computed_features: Dict[str, float] = {}
+    feature_votes: Dict[str, str] = {}
     features_used = 0
 
     for feat_name, feat_cfg in features_config.items():
@@ -318,13 +475,60 @@ def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, An
             feat_name, value, polarity, thresh_low, thresh_medium, feat_risk, weight,
         )
         risk_weights[feat_risk] += weight
+        feature_votes[feat_name] = feat_risk
 
     if features_used == 0:
         return None
 
-    risk = max(risk_weights, key=risk_weights.get)
-    total_weight = sum(risk_weights.values())
-    confidence = round(risk_weights[risk] / total_weight, 2) if total_weight > 0 else 0.5
+    # --- Decision rule (2026-08-26, parity with arkheia-proxy) ---
+    # "weighted_vote" (default) preserves historical behaviour exactly.
+    # "best_single" scores from one designated feature. Calibrating on the v2
+    # corpus and scoring an unseen v1 corpus gave SINGLE 85.8% recall / 8.0% FPR
+    # against VOTE 78.5% / 7.3% and OR-ensemble 96.2% / 76.5%: one well-chosen
+    # feature beat the vote on both axes, while OR compounded false positives
+    # without adding discrimination.
+    decision_rule = detection_cfg.get("decision_rule", "weighted_vote")
+    primary_feature = detection_cfg.get("primary_feature")
+
+    risk = None
+    if decision_rule == "any_fires":
+        # OR across features. Justified ONLY when the added features are SPARSE
+        # and high-precision -- measured on grok-4.3, whose statistical surface
+        # is weak but whose hedging markers fire on 0-2% of truthful responses
+        # and 29-38% of fabrications:
+        #
+        #   best_single (reasoning_chars)     57.8% recall / 25.9% FPR
+        #   + visible_hedging + reasoning_hedging  75.5% recall / 28.1% FPR
+        #
+        # +18 points of recall for 2 points of FPR. This does NOT generalise to
+        # dense features: an OR over five dense features measured 96.2% recall
+        # at 76.5% FPR, i.e. it had stopped discriminating. Only put sparse
+        # near-zero-FP features behind this rule.
+        if any(v in ("HIGH", "MEDIUM") for v in feature_votes.values()):
+            risk = "HIGH" if "HIGH" in feature_votes.values() else "MEDIUM"
+        else:
+            risk = "LOW"
+        fired = sum(w for f, w in
+                    ((f, abs(float(features_config[f].get("weight", 1.0) or 1.0)))
+                     for f in feature_votes if feature_votes[f] != "LOW"))
+        total_weight = sum(risk_weights.values())
+        confidence = round(min(fired / total_weight, 1.0), 2) if total_weight > 0 else 0.5
+
+    if risk is None and decision_rule == "best_single" and primary_feature:
+        primary_vote = feature_votes.get(primary_feature)
+        if primary_vote is not None:
+            risk = primary_vote
+            total_weight = sum(risk_weights.values())
+            confidence = (
+                round(risk_weights[risk] / total_weight, 2) if total_weight > 0 else 0.5
+            )
+        # primary not computable (e.g. provider exposes no logprobs) -> fall
+        # through to the weighted vote rather than failing shut
+
+    if risk is None:
+        risk = max(risk_weights, key=risk_weights.get)
+        total_weight = sum(risk_weights.values())
+        confidence = round(risk_weights[risk] / total_weight, 2) if total_weight > 0 else 0.5
 
     # Evidence depth assessment
     min_features = detection_cfg.get("min_required_features", 3)
@@ -356,6 +560,7 @@ def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, An
     return {
         "risk": risk,
         "confidence": confidence,
+        "gate_action": resolve_gate_action(profile),
         "evidence_depth_limited": evidence_limited,
         "model_detected": profile.get("model", "unknown"),
         "detection_method": "profile_" + detection_cfg.get("strategy", "ensemble"),

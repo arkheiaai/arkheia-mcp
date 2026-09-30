@@ -24,16 +24,16 @@ api:
 
 detection:
   strategy: multi_feature
-  polarity: normal
+  polarity: inverted
   min_required_features: 2
   min_contribution_threshold: 1.0
   cross_domain_validated: true
   features:
     entropy_mean:
       weight: 2.4279
-      polarity: negative
-      threshold_low: 0.178249
-      threshold_medium: 0.203779
+      polarity: positive
+      threshold_low: 0.176371
+      threshold_medium: 0.19218
       cohens_d: -2.4279
       cohens_d_code: -0.6114
       effect_size: huge
@@ -46,9 +46,9 @@ detection:
       notes: "FAB responses show higher average token entropy."
     entropy_std:
       weight: 2.3295
-      polarity: negative
-      threshold_low: 0.29804
-      threshold_medium: 0.320415
+      polarity: positive
+      threshold_low: 0.299594
+      threshold_medium: 0.314981
       cohens_d: -2.3295
       cohens_d_code: -0.5929
       effect_size: huge
@@ -61,9 +61,9 @@ detection:
       notes: "FAB responses show more variable token entropy."
     top1_confidence_mean:
       weight: 2.2633
-      polarity: positive
-      threshold_low: 0.880173
-      threshold_medium: 0.892362
+      polarity: negative
+      threshold_low: 0.891696
+      threshold_medium: 0.868832
       cohens_d: 2.2633
       cohens_d_code: 0.5263
       effect_size: huge
@@ -76,9 +76,9 @@ detection:
       notes: "TRUTH responses show higher top-1 token confidence."
     mean_logprob:
       weight: 2.1677
-      polarity: positive
-      threshold_low: -0.203006
-      threshold_medium: -0.178316
+      polarity: negative
+      threshold_low: -0.155227
+      threshold_medium: -0.172118
       cohens_d: 2.1677
       cohens_d_code: 0.5021
       effect_size: huge
@@ -91,9 +91,9 @@ detection:
       notes: "TRUTH responses have higher (less negative) mean logprob."
     perplexity_mean:
       weight: 2.1509
-      polarity: negative
-      threshold_low: 1.163981
-      threshold_medium: 1.196281
+      polarity: positive
+      threshold_low: 1.177737
+      threshold_medium: 1.206463
       cohens_d: -2.1509
       cohens_d_code: -0.5016
       effect_size: huge
@@ -106,9 +106,9 @@ detection:
       notes: "FAB responses have higher average perplexity."
     logprob_iqr:
       weight: 2.0657
-      polarity: negative
-      threshold_low: 0.065142
-      threshold_medium: 0.096373
+      polarity: positive
+      threshold_low: 0.064299
+      threshold_medium: 0.080211
       cohens_d: -2.0657
       cohens_d_code: -0.5378
       effect_size: huge
@@ -121,9 +121,9 @@ detection:
       notes: "FAB responses show wider IQR in logprob distribution."
     logprob_q25:
       weight: 2.0656
-      polarity: positive
-      threshold_low: -0.128135
-      threshold_medium: -0.096374
+      polarity: negative
+      threshold_low: -0.064299
+      threshold_medium: -0.080211
       cohens_d: 2.0656
       cohens_d_code: 0.5378
       effect_size: huge

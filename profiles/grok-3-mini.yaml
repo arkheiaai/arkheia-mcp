@@ -23,16 +23,16 @@ api:
 
 detection:
   strategy: multi_feature
-  polarity: normal
+  polarity: inverted
   min_required_features: 2
   min_contribution_threshold: 1.0
   cross_domain_validated: false
   features:
     entropy_std:
       weight: 1.7546
-      polarity: negative
-      threshold_low: 0.222312
-      threshold_medium: 0.241062
+      polarity: positive
+      threshold_low: 0.22986
+      threshold_medium: 0.243092
       cohens_d: -1.7546
       effect_size: very large
       truth_mean: 0.216628
@@ -44,9 +44,9 @@ detection:
       notes: "FAB responses show more variable token entropy. Prose-only validation."
     entropy_mean:
       weight: 1.6959
-      polarity: negative
-      threshold_low: 0.091692
-      threshold_medium: 0.107101
+      polarity: positive
+      threshold_low: 0.097317
+      threshold_medium: 0.107116
       cohens_d: -1.6959
       effect_size: very large
       truth_mean: 0.087518
@@ -58,9 +58,9 @@ detection:
       notes: "FAB responses show higher average token entropy. Prose-only validation."
     top1_confidence_mean:
       weight: 1.5479
-      polarity: positive
-      threshold_low: 0.923579
-      threshold_medium: 0.933838
+      polarity: negative
+      threshold_low: 0.922033
+      threshold_medium: 0.898391
       cohens_d: 1.5479
       effect_size: very large
       truth_mean: 0.945675
@@ -72,9 +72,9 @@ detection:
       notes: "TRUTH responses show higher top-1 token confidence. Prose-only validation."
     top1_confidence_std:
       weight: 1.4538
-      polarity: negative
-      threshold_low: 0.159629
-      threshold_medium: 0.17471
+      polarity: positive
+      threshold_low: 0.169941
+      threshold_medium: 0.181443
       cohens_d: -1.4538
       effect_size: very large
       truth_mean: 0.158439
@@ -86,9 +86,9 @@ detection:
       notes: "FAB responses show more variable top-1 confidence. Prose-only validation."
     mean_logprob:
       weight: 1.4157
-      polarity: positive
-      threshold_low: -0.132271
-      threshold_medium: -0.110436
+      polarity: negative
+      threshold_low: -0.099407
+      threshold_medium: -0.111902
       cohens_d: 1.4157
       effect_size: very large
       truth_mean: -0.086912
@@ -100,9 +100,9 @@ detection:
       notes: "TRUTH responses have higher (less negative) mean logprob. Prose-only validation."
     perplexity_mean:
       weight: 1.3832
-      polarity: negative
-      threshold_low: 1.092655
-      threshold_medium: 1.1177
+      polarity: positive
+      threshold_low: 1.118418
+      threshold_medium: 1.145697
       cohens_d: -1.3832
       effect_size: very large
       truth_mean: 1.09114
@@ -114,9 +114,9 @@ detection:
       notes: "FAB responses have higher average perplexity. Prose-only validation."
     unique_token_ratio:
       weight: 0.8427
-      polarity: negative
-      threshold_low: 0.556844
-      threshold_medium: 0.581834
+      polarity: positive
+      threshold_low: 0.584008
+      threshold_medium: 0.601816
       cohens_d: -0.8427
       effect_size: large
       truth_mean: 0.5662
@@ -128,9 +128,9 @@ detection:
       notes: "FAB responses show higher unique token ratio. Prose-only validation."
     logprob_q25:
       weight: 0.6751
-      polarity: positive
-      threshold_low: -0.021613
-      threshold_medium: -0.00866
+      polarity: negative
+      threshold_low: -0.004203
+      threshold_medium: -0.007507
       cohens_d: 0.6751
       effect_size: medium
       truth_mean: -0.0009

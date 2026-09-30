@@ -1,0 +1,128 @@
+model: "claude-opus-4-7"
+version: "1.0"
+type: api
+generated: "2026-06-04T15:47:46.351745+00:00"
+
+characterization:
+  date: "2026-06-04"
+  prompts: 200
+  features: 5
+  token_limit: 250
+  notes: "Code+Prose domain characterization (50 TRUTH + 50 FAB per domain = 200 total). Server-side telemetry only. No logprobs available from Anthropic API."
+
+api:
+  provider: anthropic
+  endpoint: "Anthropic Messages API (https://api.anthropic.com/v1/messages)"
+  logprobs_available: false
+  thinking_model: false
+
+detection:
+  strategy: ensemble
+  polarity: normal
+  alpha: 0.05
+  bias: 0.40
+  min_required_features: 2
+  min_contribution_threshold: 1.0
+  evidence_depth_limited: false
+  thresholds:
+    low: 0.7532
+    medium: 0.7835
+  features:
+    unique_word_ratio:
+      weight: 1.0501
+      polarity: positive
+      threshold_low: 0.7532
+      threshold_medium: 0.7835
+      cohens_d: -1.0501
+      effect_size: large
+      truth_mean: 0.7229
+      truth_std: 0.0606
+      fab_mean: 0.7823
+      fab_std: 0.047
+      enabled: true
+    tokens_per_second:
+      weight: 0.969
+      polarity: negative
+      threshold_low: 51.797
+      threshold_medium: 45.63
+      cohens_d: 0.969
+      effect_size: large
+      truth_mean: 57.9639
+      truth_std: 12.3339
+      fab_mean: 46.985
+      fab_std: 10.0327
+      enabled: true
+    word_count:
+      weight: 0.827
+      polarity: positive
+      threshold_low: 101.5242
+      threshold_medium: 106.7285
+      cohens_d: -0.827
+      effect_size: large
+      truth_mean: 96.32
+      truth_std: 10.4085
+      fab_mean: 107.32
+      fab_std: 15.9655
+      enabled: true
+    char_count:
+      weight: 0.5391
+      polarity: positive
+      threshold_low: 717.179
+      threshold_medium: 748.418
+      cohens_d: -0.5391
+      effect_size: medium
+      truth_mean: 685.94
+      truth_std: 62.478
+      fab_mean: 718.44
+      fab_std: 81.2987
+      enabled: true
+    total_time_s:
+      weight: 0.1121
+      polarity: positive
+      threshold_low: 7.7689
+      threshold_medium: 10.3197
+      cohens_d: -0.1121
+      effect_size: negligible
+      truth_mean: 5.218
+      truth_std: 5.1016
+      fab_mean: 5.6497
+      fab_std: 2.6697
+      enabled: true
+
+performance:
+  truth_accuracy: null
+  fab_accuracy: null
+  combined_accuracy: null
+  precision: null
+  recall: null
+  f1: null
+  n_truth: 100
+  n_fab: 100
+  notes: "5 server-side feature(s). unique_word_ratio d=-1.0501 (large), tokens_per_second d=0.9690 (large), word_count d=-0.8270 (large), char_count d=-0.5391 (medium), total_time_s d=-0.1121 (negligible). No logprobs - detection from telemetry only."
+
+mode_gate:
+  enabled: true
+  tool_surface:
+    action: suppress
+    triggers:
+      token_count_max: 80
+      is_function_call: true
+
+deployment:
+  recommended_for_production: true
+  requires_api_key: true
+  cost_per_query: variable
+  detection_capability: moderate
+
+signals:
+  enabled: [latency, tokens]
+  required: [latency]
+
+metadata:
+  generator: arkheia-model-lab
+  generator_version: "3.0.0"
+  validation_date: "2026-06-04"
+  status: validated
+  dataset_size: 200
+  max_cohen_d: 1.0501
+  notes: "Fabrication takes ~8.3% longer (5.22s vs 5.65s). ~18.9% fewer tokens/second. Privacy-preserving - no response text reading required."

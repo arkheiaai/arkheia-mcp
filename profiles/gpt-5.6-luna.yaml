@@ -1,0 +1,52 @@
+model: gpt-5.6-luna
+version: '1.0'
+type: detection_profile
+generated: '2026-07-15'
+characterization:
+  source_model: gpt-5.6-luna
+  corpus: v2_matched_200 (code+prose)
+  prompts: 400
+  surface: responses_api_reasoning
+  max_output_tokens: 4000
+  reasoning_effort: medium
+  truncated_rows: 0
+  notes: Reasoning-model surface (no logprobs). Fabrication signature = reasoning
+    burn. Run uncapped-equivalent (4000 tok, 0 truncations) so reasoning_ratio is
+    a measured burn fraction, not a cap artifact.
+api:
+  provider: openai
+  endpoint: https://api.openai.com/v1/responses
+  logprobs_available: false
+  reasoning_model: true
+detection:
+  strategy: ensemble
+  polarity: mixed
+  alpha: 0.05
+  bias: 0.0
+  min_required_features: 1
+  min_contribution_threshold: 1.0
+  evidence_depth_limited: false
+  features:
+    reasoning_ratio:
+      weight: 2.4073
+      polarity: positive
+      threshold_low: 0.529774
+      threshold_medium: 0.529774
+      cohens_d: 2.4073
+      truth_mean: 0.23602
+      truth_std: 0.132394
+      fab_mean: 0.591109
+      fab_std: 0.161205
+      train_single_f1: 0.795
+      enabled: true
+performance:
+  truth_accuracy: 0.9667
+  precision: 0.9565
+  recall: 0.7333
+  f1: 0.8302
+  false_positive_rate: 0.0333
+  accuracy: 0.85
+  validated_on: held-out 120 (60 fab / 60 truth)
+gate_action: advise
+recommended_for_production: true
+detection_capability: moderate

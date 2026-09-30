@@ -1,0 +1,52 @@
+model: gpt-5.6-sol
+version: '1.0'
+type: detection_profile
+generated: '2026-07-15'
+characterization:
+  source_model: gpt-5.6-sol
+  corpus: v2_matched_200 (code+prose)
+  prompts: 400
+  surface: responses_api_reasoning
+  max_output_tokens: 4000
+  reasoning_effort: medium
+  truncated_rows: 1
+  notes: Reasoning-model surface (no logprobs). Fabrication signature = reasoning
+    burn. Run uncapped-equivalent (4000 tok, 0 truncations) so reasoning_ratio is
+    a measured burn fraction, not a cap artifact.
+api:
+  provider: openai
+  endpoint: https://api.openai.com/v1/responses
+  logprobs_available: false
+  reasoning_model: true
+detection:
+  strategy: ensemble
+  polarity: mixed
+  alpha: 0.05
+  bias: 0.0
+  min_required_features: 1
+  min_contribution_threshold: 1.0
+  evidence_depth_limited: false
+  features:
+    reasoning_ratio:
+      weight: 1.9925
+      polarity: positive
+      threshold_low: 0.523702
+      threshold_medium: 0.523702
+      cohens_d: 1.9925
+      truth_mean: 0.140937
+      truth_std: 0.159888
+      fab_mean: 0.516106
+      fab_std: 0.21293
+      train_single_f1: 0.6604
+      enabled: true
+performance:
+  truth_accuracy: 0.9833
+  precision: 0.9792
+  recall: 0.7833
+  f1: 0.8704
+  false_positive_rate: 0.0167
+  accuracy: 0.8833
+  validated_on: held-out 120 (60 fab / 60 truth)
+gate_action: advise
+recommended_for_production: true
+detection_capability: moderate

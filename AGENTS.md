@@ -31,10 +31,12 @@ Edit your Claude Desktop config file:
 | Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
 | Linux | `~/.config/Claude/claude_desktop_config.json` |
 
-First, clone the repo (one time only):
+First, clone the repo and create a virtual environment (one time only):
 ```bash
 git clone https://github.com/arkheiaai/arkheia-mcp.git ~/.arkheia-mcp
 cd ~/.arkheia-mcp
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
@@ -46,7 +48,7 @@ Then add this to the config file (create it if it doesn't exist):
 {
   "mcpServers": {
     "arkheia": {
-      "command": "python",
+      "command": "~/.arkheia-mcp/.venv/bin/python",
       "args": ["-m", "mcp_server.server"],
       "cwd": "~/.arkheia-mcp",
       "env": {
@@ -70,7 +72,7 @@ Add to `~/.claude/settings.json`:
 {
   "mcpServers": {
     "arkheia": {
-      "command": "python",
+      "command": "~/.arkheia-mcp/.venv/bin/python",
       "args": ["-m", "mcp_server.server"],
       "cwd": "~/.arkheia-mcp",
       "env": {
@@ -148,3 +150,10 @@ Free tier is 1,500/month. Check usage or upgrade at https://arkheia.ai.
 - GitHub Issues: https://github.com/arkheiaai/arkheia-mcp/issues
 - Email: support@arkheia.ai
 - Website: https://arkheia.ai
+
+## For AI Agents Contributing to This Repo
+
+- Never push directly to main — work on feature branches and open a PR
+- Destructive git operations (rewriting history, discarding commits) are permanently prohibited on any pushed branch
+- All Arkheia repos have branch protection enforced by GitHub — violations will be rejected server-side
+- If a push is rejected, resolve the divergence via rebase or merge; never attempt to override the rejection
