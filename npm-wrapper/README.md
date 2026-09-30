@@ -6,13 +6,26 @@ Arkheia screens model responses for fabrication using behavioural fingerprinting
 
 Free tier: 1,500 detections/month. No credit card.
 
-## Quick Start
+## Prerequisites
 
-```bash
-npx @arkheia/mcp-server
+```
+Requires:
+  - Node 18+
+  - Python 3.10–3.13 with working pyexpat
+
+macOS note: Homebrew's current `brew install python` installs 3.14,
+which has a broken pyexpat link. Use `brew install python@3.12` until
+Homebrew ships a fix. Verify with:
+  python3.12 -c "import pyexpat, ensurepip"
 ```
 
-Get a free API key:
+## Install
+
+```bash
+npm install -g @arkheia/mcp-server
+```
+
+Get a free API key at [arkheia.ai/mcp/account](https://arkheia.ai/mcp/account), or via the CLI:
 
 ```bash
 curl -X POST https://arkheia-proxy-production.up.railway.app/v1/provision \
@@ -20,29 +33,79 @@ curl -X POST https://arkheia-proxy-production.up.railway.app/v1/provision \
   -d '{"email": "you@example.com"}'
 ```
 
-Add to your agent config (Claude Code, Claude Desktop, Cursor, or any MCP-compatible tool):
+Set your key:
 
-```json
-{
-  "mcpServers": {
-    "arkheia": {
-      "command": "python",
-      "args": ["-m", "mcp_server.server"],
-      "cwd": "~/.arkheia/mcp",
-      "env": {
-        "PYTHONPATH": "~/.arkheia/mcp",
-        "ARKHEIA_API_KEY": "ak_live_your_key_here"
-      }
-    }
-  }
-}
+```bash
+export ARKHEIA_API_KEY="ak_live_..."
 ```
 
-Restart your agent. Then ask it:
+## Register with your CLI
 
-> "Use arkheia_verify to check this response: The Kafka 4.1 ConsumerLease API introduces a lease-based partition ownership model."
+Each AI CLI has a slightly different `mcp add` command. Use the one that matches your tool. All assume you've installed globally with `npm install -g`.
 
-It should flag this as **HIGH** risk — because the Kafka 4.1 ConsumerLease API doesn't exist.
+### Claude Code
+
+```bash
+claude mcp add arkheia -s user \
+  -e ARKHEIA_API_KEY="$ARKHEIA_API_KEY" \
+  -- mcp-server
+```
+
+Config lands in: `~/.claude.json` under `mcpServers.arkheia`
+
+### Codex
+
+```bash
+codex mcp add arkheia \
+  --env ARKHEIA_API_KEY="$ARKHEIA_API_KEY" \
+  -- mcp-server
+```
+
+Config lands in: `~/.codex/config.toml` under `[mcp_servers.arkheia.env]`
+
+Note: `codex login --api-key` is deprecated. Use `printenv OPENAI_API_KEY | codex login --with-api-key` instead.
+
+### Gemini
+
+```bash
+gemini mcp add -s user \
+  -e ARKHEIA_API_KEY="$ARKHEIA_API_KEY" \
+  arkheia mcp-server
+```
+
+Config lands in: `~/.gemini/settings.json` under `mcpServers.arkheia`
+
+**Gotcha:** `gemini mcp list` only shows project-scope servers. If you registered with `-s user`, verify by reading `~/.gemini/settings.json` directly.
+
+**Gotcha:** Don't use `npx -y @arkheia/mcp-server` with Gemini — the `-y` flag gets eaten by Gemini's yargs parser as `--yolo`. Use the globally-installed `mcp-server` binary directly.
+
+### Grok
+
+```bash
+grok mcp add arkheia \
+  -t stdio \
+  -c mcp-server \
+  -e ARKHEIA_API_KEY="$ARKHEIA_API_KEY"
+```
+
+Config lands in: `~/.grok/settings.json` under `mcpServers.arkheia` (note: env is nested under `transport`, unlike other CLIs)
+
+## Verify it works
+
+```bash
+# Claude Code — live connection test
+claude mcp list
+
+# Codex — shows 'enabled' (not a live check)
+codex mcp list
+
+# Grok — best: spawns the server and lists all 9 tools
+grok mcp test arkheia
+
+# Gemini — no built-in test; start a session and try the tool
+```
+
+**Important:** MCP registrations are not hot-reloaded. Restart your CLI session after running `mcp add`.
 
 ## What You Get
 
@@ -54,6 +117,9 @@ It should flag this as **HIGH** risk — because the Kafka 4.1 ConsumerLease API
 | `run_gemini` | Call Gemini + screen for fabrication |
 | `run_ollama` | Call local Ollama model + screen |
 | `run_together` | Call Together AI (Kimi, DeepSeek) + screen |
+| `memory_store` | Persistent knowledge graph — upsert entity |
+| `memory_retrieve` | Knowledge graph lookup |
+| `memory_relate` | Create relationship between entities |
 
 ## 35+ Model Profiles
 
@@ -67,6 +133,27 @@ GPT-4o, GPT-5.4, Claude Opus/Sonnet/Haiku, Gemini 2.5/3.0, Grok 4, Llama, Mixtra
 | Single Contributor | $99/month | Unlimited |
 | Professional | $499/month | Unlimited |
 | Team | $1,999/month | Unlimited |
+
+Manage your account at [arkheia.ai/mcp/account](https://arkheia.ai/mcp/account).
+
+## Where API keys are stored
+
+| CLI | Config file | Key location |
+|-----|-------------|-------------|
+| Claude Code | `~/.claude.json` | `mcpServers.arkheia.env.ARKHEIA_API_KEY` |
+| Codex | `~/.codex/config.toml` | `[mcp_servers.arkheia.env]` section |
+| Gemini | `~/.gemini/settings.json` | `mcpServers.arkheia.env.ARKHEIA_API_KEY` |
+| Grok | `~/.grok/settings.json` | `mcpServers.arkheia.transport.env.ARKHEIA_API_KEY` |
+
+## Troubleshooting
+
+**"Python 3.10+ is required but not found"** — Install Python 3.12: `brew install python@3.12` (macOS) or download from [python.org](https://python.org).
+
+**"No module named pip"** — Your Python installation has broken pip (common with Python 3.14 on macOS). Delete `~/.arkheia/venv` and switch to Python 3.12: `brew install python@3.12`.
+
+**Server registered but tools not showing** — Restart your CLI session. MCP registrations are not hot-reloaded.
+
+**API key rejected** — Check for trailing whitespace or `\r` characters. If your env file was created on Windows, run `dos2unix` on it. The server will warn about this on startup.
 
 ## Full Documentation
 
@@ -86,4 +173,5 @@ Every message is read by the founder.
 ## Links
 
 - Website: https://arkheia.ai
+- MCP Account: https://arkheia.ai/mcp/account
 - GitHub: https://github.com/arkheiaai/arkheia-mcp
