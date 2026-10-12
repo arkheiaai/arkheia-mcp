@@ -29,6 +29,8 @@ jobs:
     steps:
       # Pin: actions/checkout v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         # Pin: actions/setup-python v5.3.0
@@ -63,6 +65,8 @@ jobs:
     steps:
       # Pin: actions/checkout v4.2.2
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         # Pin: actions/setup-python v5.3.0
@@ -121,6 +125,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
         with:
           fetch-depth: 0   # full history for secret scanning
+          persist-credentials: false
 
       - name: Scan for secrets with trufflehog
         # Pin: trufflesecurity/trufflehog v3.88.22

@@ -1,5 +1,5 @@
 # MCP Trust Server requirements (subset of top-level requirements.txt)
-mcp==1.28.1  # CVE-2026-59950 (high) - fixed in 1.28.1
+mcp==1.30.0  # AIKIDO-2026-404389/639016/705470/821108 security floor
 httpx>=0.27.1
 pydantic>=2.10.0
 

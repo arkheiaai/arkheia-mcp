@@ -510,7 +510,8 @@ def main() -> int:
             (REPO / rel).write_text(text, encoding="utf-8")
 
     for rel, text in originals.items():
-        assert (REPO / rel).read_text(encoding="utf-8") == text, f"{rel} not restored"
+        if (REPO / rel).read_text(encoding="utf-8") != text:
+            raise RuntimeError(f"{rel} not restored")
     rc, _ = run_pytest(NEW_TIER)
     restored_green = rc == 0
 

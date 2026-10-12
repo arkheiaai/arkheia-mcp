@@ -585,7 +585,8 @@ def main() -> int:
             mutated = original
             for old, new in pairs:
                 mutated = mutated.replace(old, new)
-            assert mutated != original, f"{mutant.mid} produced no textual change"
+            if mutated == original:
+                raise RuntimeError(f"{mutant.mid} produced no textual change")
             TARGET.write_text(mutated, encoding="utf-8")
             try:
                 rc, out = run_pytest(NEW_TIER)
@@ -616,7 +617,8 @@ def main() -> int:
         TARGET.write_text(original, encoding="utf-8")
         PREEXISTING_TMP.unlink(missing_ok=True)
 
-    assert TARGET.read_text(encoding="utf-8") == original, "target not restored"
+    if TARGET.read_text(encoding="utf-8") != original:
+        raise RuntimeError("target not restored")
     rc, out = run_pytest(NEW_TIER)
     restored_green = rc == 0
 

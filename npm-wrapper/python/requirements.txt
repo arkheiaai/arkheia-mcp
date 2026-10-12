@@ -1,4 +1,4 @@
-mcp>=1.28.1  # CVE-2026-59950 (high) - fixed in 1.28.1
+mcp>=1.30.0,<2  # stay on the compatible 1.x API while clearing current advisories
 httpx>=0.27.1
 pydantic>=2.10.0
 pyyaml>=6.0

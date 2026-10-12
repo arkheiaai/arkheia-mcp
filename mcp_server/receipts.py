@@ -173,7 +173,16 @@ def _path_lock(path: Path) -> asyncio.Lock:
 def _exclusive_file_lock(path: Path):
     path = _validate_receipt_log_path(path)
     lock_path = path.with_name(f".{path.name}.lock")
-    with open(lock_path, "a", encoding="utf-8") as lock_file:
+    lock_fd = os.open(
+        lock_path,
+        os.O_APPEND
+        | os.O_CREAT
+        | os.O_WRONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        _RECEIPT_FILE_MODE,
+    )
+    with os.fdopen(lock_fd, "a", encoding="utf-8") as lock_file:
         if fcntl is not None:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         try:
@@ -202,8 +211,13 @@ def _redact_receipt_record(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def log_safe_value(value: Any) -> Any:
-    """Return a receipt subject value safe for diagnostic logging."""
-    return redact_in_credential_context(value)
+    """Return a non-tainted marker for a receipt subject in diagnostic logs.
+
+    Receipt subjects can originate from attacker-controlled tool names and may be
+    credentials.  Do not derive log content from the value: even a best-effort
+    redactor can miss a future credential shape.
+    """
+    return None if value is None else "[REDACTED:receipt-subject]"
 
 
 def _append_record_and_confirm(path: Path, record: dict[str, Any], receipt_id: object) -> bool:
@@ -217,7 +231,16 @@ def _append_record_and_confirm(path: Path, record: dict[str, Any], receipt_id: o
         clean["prev_hash"] = last_hash
         clean["this_hash"] = _compute_hash(clean, last_hash)
 
-        with open(path, "a", encoding="utf-8") as f:
+        append_fd = os.open(
+            path,
+            os.O_APPEND
+            | os.O_CREAT
+            | os.O_WRONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            _RECEIPT_FILE_MODE,
+        )
+        with os.fdopen(append_fd, "a", encoding="utf-8") as f:
             f.write(json.dumps(clean) + "\n")
             f.flush()
             os.fsync(f.fileno())

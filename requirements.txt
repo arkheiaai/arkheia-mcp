@@ -1,7 +1,7 @@
 # Arkheia MCP Trust Server + Enterprise Proxy -- top-level requirements
 
 # MCP SDK (pinned to installed version)
-mcp==1.28.1  # CVE-2026-59950 (high) - fixed in 1.28.1
+mcp==1.30.0  # AIKIDO-2026-404389/639016/705470/821108 security floor
 
 # HTTP
 httpx>=0.27.1
@@ -12,7 +12,7 @@ uvicorn[standard]>=0.31.1
 starlette==1.3.1  # CVE-2025-62727 fix (DoS via Range header); CVE-2025-54121 fix (multipart DoS)
 
 # Auth
-PyJWT>=2.13.0  # CVE-2026-32597: crit header validation
+PyJWT>=2.15.1  # current security floor for header/claim validation advisories
 
 # Pydantic
 pydantic>=2.10.0  # regex DoS fix

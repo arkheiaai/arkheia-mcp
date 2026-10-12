@@ -260,14 +260,16 @@ def main() -> int:
         print(out[-4000:])
         return 2
     base = re.search(r"(\d+) passed", out)
-    assert base, "baseline reported no passing tests — the harness would measure nothing"
+    if base is None:
+        raise RuntimeError("baseline reported no passing tests — the harness would measure nothing")
     print(f"baseline: green ({base.group(1)} passed)\n")
 
     # ── self-controls first; a void harness must not be allowed to report 0/0 ──
     control_failures = []
     try:
         for mut, expected in CONTROLS:
-            assert original.count(mut.find) == 1, f"{mut.mid} pattern miss"
+            if original.count(mut.find) != 1:
+                raise RuntimeError(f"{mut.mid} pattern miss")
             TARGET.write_text(original.replace(mut.find, mut.replace, 1), encoding="utf-8")
             clear_pycache()
             rc, out = run_suite(args.python)
