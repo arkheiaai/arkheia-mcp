@@ -489,7 +489,8 @@ async def check_receipted(
     )
     if decision.violation is not None:
         raise decision.violation
-    assert decision.policy is not None
+    if decision.policy is None:
+        raise RuntimeError("policy gate allowed a tool without returning its policy")
     return decision
 
 

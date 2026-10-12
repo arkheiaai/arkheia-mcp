@@ -44,6 +44,7 @@ PASSING CRITERIA
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import logging
 import multiprocessing
@@ -141,6 +142,13 @@ def _opaque_receipt_secret() -> str:
     rng = random.Random("arkheia-receipt-opaque-secret")
     alphabet = string.ascii_letters + string.digits + "+/"
     return "".join(rng.choice(alphabet) for _ in range(48))
+
+
+def _synthetic_google_client_secret() -> str:
+    """Create a detector-shaped test value without committing credential-shaped material."""
+    rng = random.Random("arkheia-synthetic-google-client-secret")
+    alphabet = string.ascii_letters + string.digits
+    return "GOCSPX-" + "".join(rng.choice(alphabet) for _ in range(21))
 
 
 def _emit_receipts_in_process(
@@ -1244,8 +1252,8 @@ class TestReceiptedGate:
         self, tmp_path
     ):
         log_path = tmp_path / "gate.jsonl"
-        google_client_secret = "GOCSPX-1a2b3c4d5e6f7g8h9i0j"
-        hex_secret = "0123456789abcdef0123456789abcdef"
+        google_client_secret = _synthetic_google_client_secret()
+        hex_secret = hashlib.sha256(b"synthetic short hexadecimal receipt subject").hexdigest()[:32]
         receipt_id = receipts.new_receipt_id()
         record = receipts.build_record(
             receipt_id=receipt_id,
@@ -1290,7 +1298,9 @@ class TestReceiptedGate:
         self, tmp_path, monkeypatch, caplog
     ):
         log_path = tmp_path / "gate.jsonl"
-        secret = "0123456789abcdef0123456789abcdef"
+        # Construct synthetic high-entropy-looking material at runtime so secret scanners do not
+        # mistake a committed test fixture for a live credential.
+        secret = hashlib.sha256(b"synthetic receipt subject for redaction test").hexdigest()
         record = receipts.build_record(
             receipt_id=receipts.new_receipt_id(),
             tool=secret,
@@ -1315,7 +1325,7 @@ class TestReceiptedGate:
     async def test_receipt_path_failure_logs_redact_tool_subject(
         self, tmp_path, caplog
     ):
-        secret = "GOCSPX-1a2b3c4d5e6f7g8h9i0j"
+        secret = _synthetic_google_client_secret()
         caplog.set_level(logging.ERROR, logger="mcp_server.tool_registry")
 
         decision = await decide(secret, log_path=tmp_path / ".hidden.jsonl")

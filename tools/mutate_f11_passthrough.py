@@ -546,7 +546,8 @@ def main() -> int:
     print(f"  new tier          : {baseline_line.strip()}")
 
     rc0, out0 = run_pytest(PREEXISTING_TIER)
-    assert rc0 == 0, out0[-2000:]
+    if rc0 != 0:
+        raise RuntimeError(out0[-2000:])
     print(f"  pre-existing tier : "
           f"{[ln for ln in out0.splitlines() if ' passed' in ln][-1].strip()}")
     print()
@@ -571,7 +572,8 @@ def main() -> int:
             mutated = original
             for old, new in pairs:
                 mutated = mutated.replace(old, new)
-            assert mutated != original
+            if mutated == original:
+                raise RuntimeError(f"{mutant.mid} produced no textual change")
             TARGET.write_text(mutated, encoding="utf-8")
             try:
                 rc, out = run_pytest(NEW_TIER)
@@ -601,7 +603,8 @@ def main() -> int:
     # Post-campaign baseline: prove the target was restored byte-for-byte, then
     # drop the sidecar — its presence is the signal that a run died holding a
     # mutant, so it is removed only here, on the clean path.
-    assert TARGET.read_text(encoding="utf-8") == original, "target not restored"
+    if TARGET.read_text(encoding="utf-8") != original:
+        raise RuntimeError("target not restored")
     BACKUP.unlink(missing_ok=True)
     rc, out = run_pytest(NEW_TIER)
     restored_green = rc == 0
