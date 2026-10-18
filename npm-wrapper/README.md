@@ -48,6 +48,26 @@ Restart your agent. Then ask it:
 
 It should flag this as **HIGH** risk — because the Kafka 4.1 ConsumerLease API doesn't exist.
 
+## Live CLI Routing
+
+MCP gives agents a portable `arkheia_verify` tool. For live vendor CLI detection, route the CLI through the Arkheia API Proxy too.
+
+Codex subscription sessions need both transports routed:
+
+```bash
+codex \
+  -c 'chatgpt_base_url="https://arkheia-proxy-production.up.railway.app/backend-api/"' \
+  -c 'openai_base_url="https://arkheia-proxy-production.up.railway.app/v1"'
+```
+
+API-key based Codex sessions can use the OpenAI-compatible route:
+
+```bash
+OPENAI_BASE_URL=https://arkheia-proxy-production.up.railway.app/v1 codex
+```
+
+Use MCP for targeted checks and the proxy for automatic workflow-level detection.
+
 ## What You Get
 
 | Tool | Description |

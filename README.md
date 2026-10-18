@@ -81,6 +81,26 @@ Restart your agent after adding the configuration.
 
 For local Enterprise Proxy audit-log retrieval, set `ARKHEIA_PROXY_AUTH_TOKEN` to a proxy JWT session token. This is distinct from `ARKHEIA_API_KEY`: the MCP client sends it only to `ARKHEIA_PROXY_URL` as `Authorization: Bearer ...` for protected local endpoints such as `arkheia_audit_log`.
 
+### Live CLI Routing with the API Proxy
+
+MCP is the portable verification surface: any MCP-compatible agent can call `arkheia_verify` for targeted checks. For live vendor CLI detection, route the CLI through the Arkheia API Proxy as well so the workflow gets fresh verdicts automatically.
+
+For Codex subscription sessions, route both Codex transports:
+
+```bash
+codex \
+  -c 'chatgpt_base_url="https://arkheia-proxy-production.up.railway.app/backend-api/"' \
+  -c 'openai_base_url="https://arkheia-proxy-production.up.railway.app/v1"'
+```
+
+For OpenAI API-key based Codex sessions:
+
+```bash
+OPENAI_BASE_URL=https://arkheia-proxy-production.up.railway.app/v1 codex
+```
+
+Use MCP and live proxy routing together when possible: the proxy gives workflow-level detection, and MCP gives agents an explicit tool for targeted verification, sub-agent checks, and high-stakes claims.
+
 ## Your First Detection
 
 Once installed, ask your agent:
