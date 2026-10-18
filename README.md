@@ -79,6 +79,26 @@ Arkheia works with any agent that supports MCP tools — Cursor, Windsurf, Cline
 
 Restart your agent after adding the configuration.
 
+### Live CLI Routing with the API Proxy
+
+MCP is the portable verification surface: any MCP-compatible agent can call `arkheia_verify` for targeted checks. For live vendor CLI detection, route the CLI through the Arkheia API Proxy as well so the workflow gets fresh verdicts automatically.
+
+For Codex subscription sessions, route both Codex transports:
+
+```bash
+codex \
+  -c 'chatgpt_base_url="https://arkheia-proxy-production.up.railway.app/backend-api/"' \
+  -c 'openai_base_url="https://arkheia-proxy-production.up.railway.app/v1"'
+```
+
+For OpenAI API-key based Codex sessions:
+
+```bash
+OPENAI_BASE_URL=https://arkheia-proxy-production.up.railway.app/v1 codex
+```
+
+Use MCP and live proxy routing together when possible: the proxy gives workflow-level detection, and MCP gives agents an explicit tool for targeted verification, sub-agent checks, and high-stakes claims.
+
 ## Your First Detection
 
 Once installed, ask your agent:

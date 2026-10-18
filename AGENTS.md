@@ -94,6 +94,35 @@ Ask Claude: "Use arkheia_verify to check this response for fabrication: 'The Eif
 
 You should see a detection result with `risk_level: HIGH` and a confidence score.
 
+## Detection Intervention Policy
+
+Arkheia is not just an audit log. Agents using this MCP server should treat detection as an intervention signal when alerts are spotted and surfaced to the user.
+
+When a live hook, proxy header, or MCP tool result reports a verdict:
+
+| Verdict | Required agent behaviour |
+|---------|--------------------------|
+| `LOW` | Continue normally. |
+| `MEDIUM` | Pause risky action and verify material claims before edits, commits, deployments, external sends, or confident factual assertions. |
+| `HIGH` | Stop autonomous action. Do not merge, deploy, send externally, or present the flagged output as reliable until the suspicious claims are investigated. Surface the risk, claim(s), verification result, and next step to the user. |
+| `UNKNOWN`, evidence-limited, or detection-off | Treat as unscored, not safe. Increase verification depth or ask the user before irreversible action. |
+
+If a live proxy/hook is already scoring responses, do not add a blanket end-of-answer `arkheia_verify` call. Use the MCP tool for targeted checks, high-stakes answers, sub-agent outputs, and systems that do not have live routing installed.
+
+Sub-agents and background workers must inherit this policy. A `HIGH` result from any worker blocks merge or synthesis until investigated.
+
+### Required Alert Language
+
+When an alert changes behaviour, the agent should show the user the intervention state, not just the verdict:
+
+- Investigating: "Investigating HIGH alert before I rely on that output."
+- Reworking: "The alert showed a critical finding, so I am reworking the original answer with stronger grounding."
+- Confirmed issue: "HIGH alert looks genuine: I appear to have invented or mislocated `<claim/artifact>`. Please point me to the correct repo/doc/source if you have it, otherwise I will proceed without relying on that claim."
+- False positive: "False positive after investigation: `<claim>` is supported by `<source/context>`, so I am carrying on."
+- Detection unavailable: "Detection is off or evidence-limited here, so this is not an all-clear."
+
+The user should be able to tell whether the agent is investigating, correcting, asking for missing grounding, or closing the alert as false positive.
+
 ## Available Tools
 
 | Tool | What it does |
