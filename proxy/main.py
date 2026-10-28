@@ -554,6 +554,11 @@ def create_app() -> FastAPI:
     app.include_router(admin_router)
     app.include_router(passthrough_router)
 
+    @app.get("/health", include_in_schema=False)
+    async def public_health():
+        """Minimal liveness response for container probes; no operator details."""
+        return {"status": "ok"}
+
     if settings.detection.interception_enabled:
         from proxy.middleware.interception import AIInterceptionMiddleware
         app.add_middleware(AIInterceptionMiddleware)
