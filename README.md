@@ -33,7 +33,7 @@ Save the key. You won't see it again.
 
 ### Claude Code
 
-Add to `~/.claude/settings.json`:
+Add to `~/.claude.json`:
 
 ```json
 {

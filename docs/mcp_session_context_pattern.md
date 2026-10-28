@@ -172,7 +172,7 @@ if lines:
   health: `curl http://localhost:8098/health`
 
 ## MCP Tools
-Registered in `~/.claude/settings.json`. Active after IDE restart.
+Registered in `~/.claude.json`. Active after IDE restart.
 | Tool | Signature | Purpose |
 |------|-----------|---------|
 | verify | (prompt, response, model) | Score response for fabrication |
