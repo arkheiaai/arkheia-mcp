@@ -391,7 +391,7 @@ Keys NOT in master.env:
 
 ### MCP Trust Server silently not connecting (Claude Code / Windows)
 
-**Symptom:** After adding `mcpServers` to `~/.claude/settings.json`, the MCP tools
+**Symptom:** After adding `mcpServers` to `~/.claude.json`, the MCP tools
 (`arkheia_verify`, `run_grok`, etc.) never appear in Claude Code — even after restart.
 The CC debug log (`~/.claude/debug/<session-id>.txt`) shows the MCP startup block
 completes (with a multi-second delay) but **zero log entries** for the server name.
@@ -403,7 +403,7 @@ in the MCP server config. Claude Code silently drops the server without logging 
 **Fix:** Use the short command name instead of the full path, provided the executable
 is on PATH.
 
-Change this in `~/.claude/settings.json`:
+Change this in `~/.claude.json`:
 ```json
 "command": "C:/Users/David Murfet/AppData/Local/Programs/Python/Python312/python.exe"
 ```
