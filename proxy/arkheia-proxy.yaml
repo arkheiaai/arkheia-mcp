@@ -10,7 +10,7 @@
 #   ARKHEIA_CONFIG        -- path to this config file
 
 proxy:
-  host: 0.0.0.0
+  host: 127.0.0.1
   port: 8099
   log_level: INFO
 

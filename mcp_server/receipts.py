@@ -86,10 +86,37 @@ def read_rows(log_path: str | Path) -> list[dict[str, Any]]:
 
 def find_receipt(log_path: str | Path, receipt_id: str) -> dict[str, Any] | None:
     """Return the row carrying receipt_id, or None if it did not land."""
-    for row in read_rows(log_path):
+    for row in _rows_reverse(_validate_receipt_log_path(log_path)):
         if row.get("receipt_id") == receipt_id:
             return row
     return None
+
+
+def _rows_reverse(path: Path):
+    """Read JSONL from the tail without loading the entire growing log."""
+    if not path.exists():
+        return
+    with path.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        remaining = stream.tell()
+        pending = b""
+        while remaining:
+            size = min(8192, remaining)
+            remaining -= size
+            stream.seek(remaining)
+            pending = stream.read(size) + pending
+            parts = pending.split(b"\n")
+            pending = parts[0]
+            for raw in reversed(parts[1:]):
+                try:
+                    yield json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+        if pending.strip():
+            try:
+                yield json.loads(pending.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                pass
 
 
 def _path_inside(path: Path, base: Path) -> bool:
@@ -136,16 +163,8 @@ def _load_receipt_chain_state(log_path: Path) -> tuple[str, int]:
     genesis = ("0" * 64, 0)
     if not log_path.exists():
         return genesis
-    last: dict[str, Any] | None = None
     try:
-        for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                last = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+        last = next(_rows_reverse(log_path), None)
     except OSError as exc:
         logger.warning(
             "MCP receipt rail: could not recover chain state from %s: %s",

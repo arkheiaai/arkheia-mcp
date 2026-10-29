@@ -388,21 +388,18 @@ async def test_no_detection_path_available_reports_unknown_with_a_reason(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_local_outage_is_sticky_and_stays_visible(monkeypatch):
+async def test_local_outage_retries_after_cooldown(monkeypatch):
     """
-    ``_local_available`` latches False after one ConnectError and, with no
-    hosted key, is never retried for the lifetime of the process — so a
-    transient proxy blip disables screening until restart.
+    A transient outage opens the local circuit briefly, then retries.
 
-    Pinned because the failure mode that matters is not the outage but the
-    silence: the second call must still say UNKNOWN with a reason, and must
-    demonstrably NOT have re-attempted the local proxy (attempt count stays at
-    1). The count is asserted at both 1 and 1-after-two-calls, so 'no retry'
-    cannot pass by the client never attempting anything at all.
+    During cooldown the unavailable result remains explicit; after cooldown
+    local screening is tried again even without a hosted key.
     """
     import httpx
 
     attempts = {"n": 0}
+    clock = {"now": 1000.0}
+    monkeypatch.setattr("mcp_server.proxy_client.time.monotonic", lambda: clock["now"])
     client = ProxyClient("http://127.0.0.1:9", api_key=None)
 
     class _Refusing:
@@ -422,10 +419,13 @@ async def test_local_outage_is_sticky_and_stays_visible(monkeypatch):
     assert first["error"] == "no_detection_available"
 
     second = await client.verify("q", "a", "gpt-4o")
-    assert attempts["n"] == 1, (
-        "local was re-attempted; if this behaviour is changed to retry, update "
-        "this assertion deliberately"
-    )
+    assert attempts["n"] == 1
     assert second["risk_level"] == "UNKNOWN"
     assert second["error"] == "no_detection_available"
     assert client._local_available is False
+
+    clock["now"] += 61
+    third = await client.verify("q", "a", "gpt-4o")
+    assert attempts["n"] == 2
+    assert third["risk_level"] == "UNKNOWN"
+    assert third["routing"]["attempted_sources"] == ["local"]
