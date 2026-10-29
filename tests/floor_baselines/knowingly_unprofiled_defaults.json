@@ -24,9 +24,10 @@
     {
       "model_id": "grok-4.20-non-reasoning",
       "registered_on": "2026-07-26",
-      "expires": "2026-10-24",
+      "expires": "2026-11-28",
       "owner": "David Murfet",
       "reason": [
+        "Renewed by David 2026-10-29; evidence must be backfilled once fabrication detection is restored (B-001). Board: B-287, backfill B-290.",
         "David's explicit instruction (2026-07-26) is that the fleet defaults to the grok-4.20",
         "pair; a second vendor confirmed against official xAI docs that the alias and pricing",
         "are real and current, so the DEFAULT is correct. What does not exist is a detection",
@@ -94,9 +95,10 @@
     {
       "model_id": "gpt-5.2-codex",
       "registered_on": "2026-07-26",
-      "expires": "2026-09-24",
+      "expires": "2026-11-28",
       "owner": "David Murfet",
       "reason": [
+        "Renewed by David 2026-10-29; evidence must be backfilled once fabrication detection is restored (B-001). Board: B-287, backfill B-290.",
         "FOUND BY THIS FLOOR ON ITS FIRST RUN, not by review. _resolve_recent_gpt routes any",
         "'5.2-codex' or '5.3-codex' id to _by_model_id('gpt-5.2-codex'), but NO loaded profile",
         "has that id — because profiles/gpt-5.2-codex.yaml declares `model: \"gpt-5-codex\"`,",
