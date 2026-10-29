@@ -102,11 +102,16 @@ jobs:
         # receipt outcome floor, which contributes six source-level invariants
         # over writer outcomes and receipt emitters:
         # 452 collected.
+        # Re-measured after adding tests/test_npm_install_home_untouched_floor.py,
+        # which installs the real packed tarball into a throwaway home and fails
+        # on any change to that home (five tests, two of them the negative
+        # self-test). Measured with a bare pytest-only interpreter:
+        # 457 collected.
         run: |
           COUNT="$(pytest tests \
             -o python_files="test_*_floor.py test_floor_*.py" \
             -p no:cacheprovider --collect-only -q 2>/dev/null | grep -c '::' || true)"
-          EXPECTED=452
+          EXPECTED=457
           if [ "$COUNT" -ne "$EXPECTED" ]; then
             echo "::error::floor discovery count changed (collected $COUNT, expected $EXPECTED). If intentional, update EXPECTED in this workflow in the same commit."
             exit 1
