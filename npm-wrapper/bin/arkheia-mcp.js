@@ -26,6 +26,27 @@ const path = require("path");
 const fs = require("fs");
 const os = require("os");
 
+// --version / -v: print the package version and exit before anything else runs. Without this the
+// flag was ignored and the stdio server started, reading standard input until it closed; a shell
+// script read from standard input (curl ... | bash) that called it lost the rest of its own text.
+if (process.argv.slice(2).some((arg) => arg === "--version" || arg === "-v")) {
+  let version;
+  try {
+    version = JSON.parse(
+      fs.readFileSync(path.join(__dirname, "..", "package.json"), "utf-8")
+    ).version;
+  } catch (err) {
+    process.stderr.write(`[arkheia] Error: could not read the package version: ${err.message}\n`);
+    process.exit(1);
+  }
+  if (typeof version !== "string" || version.length === 0) {
+    process.stderr.write("[arkheia] Error: package.json has no version\n");
+    process.exit(1);
+  }
+  fs.writeSync(1, `${version}\n`);
+  process.exit(0);
+}
+
 const PACKAGE_ROOT = path.resolve(__dirname, "..");
 const USER_HOME = process.env.HOME || process.env.USERPROFILE || os.homedir();
 if (!USER_HOME) {
