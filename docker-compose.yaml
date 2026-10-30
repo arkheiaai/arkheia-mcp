@@ -28,8 +28,7 @@ services:
       - ARKHEIA_LICENSE_KEY=${ARKHEIA_LICENSE_KEY:-}   # HMAC key for surface verification
       - ARKHEIA_REQUIRE_LICENSE=${ARKHEIA_REQUIRE_LICENSE:-false}
     volumes:
-      - ./profiles:/app/profiles:ro              # read-only; registry writes go to profile_data
-      - profile_data:/etc/arkheia/profiles       # writable; registry updates land here
+      - profile_data:/app/profiles              # matches image ENV; writable registry cache
       - audit_logs:/var/log/arkheia
     restart: unless-stopped
     healthcheck:
