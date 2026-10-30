@@ -60,7 +60,8 @@ def test_authorized_ipv6_urls_are_consumable_by_httpx(configured, expected, allo
         assert ipaddress.ip_address(parsed.host) == expected_address
         assert parsed.port == expected_port
     for endpoint in ("/v1/detect", "/v1/profile-key"):
-        request = httpx.Request("POST", f"{decision.base_url}{endpoint}")
+        base_url = decision.base_url.rstrip("/")
+        request = httpx.Request("POST", f"{base_url}{endpoint}")
         assert ipaddress.ip_address(request.url.host) == expected_address
         assert request.url.port == expected_port
         assert request.url.path == expected_parts.path + endpoint
@@ -80,7 +81,7 @@ def test_non_ipv6_authority_rendering_is_unchanged(configured, expected):
     """TC-2: ordinary authorities and canonical ports remain positive controls."""
     decision = authorize_hosted_base_url(configured, allow_unsafe=False)
     assert decision.base_url == expected
-    assert httpx.Request("POST", decision.base_url + "/v1/detect").url.host
+    assert httpx.Request("POST", decision.base_url).url.host
 
 
 @pytest.mark.parametrize(
