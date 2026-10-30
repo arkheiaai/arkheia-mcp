@@ -86,7 +86,7 @@ def authorize_hosted_base_url(
     except ValueError as exc:
         raise HostedAuthorityError("hosted URL contains an invalid port") from exc
 
-    normalized_netloc = host
+    normalized_netloc = f"[{host}]" if ":" in host else host
     if port is not None and port != _default_port(scheme):
         normalized_netloc = f"{normalized_netloc}:{port}"
     path = parsed.path.rstrip("/")
