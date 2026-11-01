@@ -10,6 +10,7 @@ Failures surface as UNKNOWN risk with error field set.
 
 import logging
 import os
+import time
 from typing import Any, Optional
 
 import httpx
@@ -38,6 +39,7 @@ _HOSTED_TRANSIENT_ERRORS = frozenset({
     "hosted_timeout",
     "hosted_error",
 })
+_LOCAL_RETRY_SECONDS = 60
 
 
 class ProxyClient:
@@ -62,7 +64,8 @@ class ProxyClient:
         self.hosted_url = (hosted_url or HOSTED_API_URL).rstrip("/")
         self.api_key = api_key or os.environ.get("ARKHEIA_API_KEY")
         self.proxy_auth_token = proxy_auth_token or os.environ.get("ARKHEIA_PROXY_AUTH_TOKEN")
-        self._local_available = True  # optimistic; flips on ConnectError
+        self._local_available = True  # optimistic; pauses briefly on transport failure
+        self._local_retry_at = 0.0
 
     def _proxy_auth_headers(self) -> dict[str, str]:
         """Headers for Enterprise Proxy endpoints protected by proxy.auth.require_auth."""
@@ -94,7 +97,16 @@ class ProxyClient:
         local_result: Optional[dict] = None
         local_transport_failed = False
 
-        # Try local proxy first (if last attempt didn't fail with ConnectError)
+        # A transient outage must not disable local screening for this process's lifetime.
+        if (
+            not self._local_available
+            and self._local_retry_at
+            and time.monotonic() >= self._local_retry_at
+        ):
+            self._local_available = True
+            self._local_retry_at = 0.0
+
+        # Try local proxy first, then back off briefly after a transport failure.
         if self._local_available:
             attempted_sources.append("local")
             local_result = await self._verify_local(
@@ -117,6 +129,7 @@ class ProxyClient:
             if local_transport_failed:
                 # Local transport/service failure: try hosted if available.
                 self._local_available = False
+                self._local_retry_at = time.monotonic() + _LOCAL_RETRY_SECONDS
                 fallback_reason = local_error
                 logger.info(
                     "Local proxy failed with %s, falling back to hosted API at %s",
