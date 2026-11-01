@@ -179,11 +179,19 @@ def _pack_clean(tmp_dir: Path) -> Artifact:
     closure = import_closure.required_files((entry_module,), _ROOT, first_party)
     generated_roots = {p.parts[0] for p in closure}
 
-    with npm_bundle.tree_restored(bundle_dir):
-        pruned = npm_bundle.prune_generated(bundle_dir, generated_roots)
-        tarball = npm_bundle.pack(package_dir, tmp_dir / "tgz")
-        paths = npm_bundle.tarball_paths(tarball)
-        package = npm_bundle.extract(tarball, tmp_dir / "extracted")
+    trust_root = package_dir / _TRUST_ROOT
+    original_trust_root = trust_root.read_bytes() if trust_root.exists() else None
+    try:
+        with npm_bundle.tree_restored(bundle_dir):
+            pruned = npm_bundle.prune_generated(bundle_dir, generated_roots)
+            tarball = npm_bundle.pack(package_dir, tmp_dir / "tgz")
+            paths = npm_bundle.tarball_paths(tarball)
+            package = npm_bundle.extract(tarball, tmp_dir / "extracted")
+    finally:
+        if original_trust_root is None:
+            trust_root.unlink(missing_ok=True)
+        else:
+            trust_root.write_bytes(original_trust_root)
 
     artifact = Artifact(tarball=tarball, paths=paths, package=package)
     artifact.pruned = pruned

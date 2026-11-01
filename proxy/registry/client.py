@@ -16,6 +16,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import httpx
@@ -131,6 +132,7 @@ class RegistryClient:
         self.last_pull_receipts = []
 
         try:
+            pull_started_at = datetime.now(timezone.utc)
             async with egress_async_client(timeout=30.0) as client:
                 resp = await client.get(
                     f"{self.base_url}/profiles",
@@ -164,7 +166,10 @@ class RegistryClient:
                         profile_meta,
                     )
 
-            self.last_pull = datetime.now(timezone.utc)
+            # A failed profile must appear again on the next incremental pull.
+            # Use the pre-listing timestamp so updates during this pull are not skipped.
+            if not errors:
+                self.last_pull = pull_started_at
             logger.info(
                 "Registry pull complete: updated=%s skipped=%s errors=%s",
                 updated, skipped, errors,
@@ -235,9 +240,27 @@ class RegistryClient:
                 OUTCOME_PROFILE_APPLY_FAILED,
                 f"registry profile metadata missing download_url for {model_id}",
             )
+        try:
+            registry_url = urlsplit(self.base_url)
+            profile_url = urlsplit(download_url)
+            same_origin = (
+                profile_url.scheme in {"http", "https"}
+                and profile_url.scheme == registry_url.scheme
+                and profile_url.hostname == registry_url.hostname
+                and profile_url.port == registry_url.port
+                and profile_url.username is None
+                and profile_url.password is None
+            )
+        except ValueError:
+            same_origin = False
+        if not same_origin:
+            raise RegistryApplyError(
+                OUTCOME_PROFILE_DOWNLOAD_FAILED,
+                f"registry profile download URL is outside the configured registry for {model_id}",
+            )
         key_value = self.api_key.get_secret_value()
 
-        async with egress_async_client(timeout=30.0) as client:
+        async with egress_async_client(timeout=30.0, follow_redirects=False) as client:
             resp = await client.get(
                 download_url,
                 headers={"Authorization": f"Bearer {key_value}"},
