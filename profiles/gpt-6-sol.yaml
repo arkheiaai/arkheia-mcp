@@ -1,0 +1,64 @@
+model: gpt-6-sol
+version: '4.0'
+type: detection_profile
+generated: '2026-11-01'
+characterization:
+  source_model: gpt-6-sol
+  corpus: v2_matched_200 (code+prose)
+  prompts: 400
+  surface: codex_exec_chatgpt_subscription
+  reasoning_effort: medium
+  domains_tested: [code, prose]
+  status: advisory_preview
+  domain_results:
+    code: {auc: 0.840, held_out_recall: 0.815, held_out_fpr: 0.273}
+    prose: {auc: 0.924, held_out_recall: 0.956, held_out_fpr: 0.274}
+  notes: Both domains cleared the lab AUC floor. False-positive rates support advisory,
+    not blocking, use. Direct Responses API drift validation remains due.
+api:
+  provider: openai
+  endpoint: https://api.openai.com/v1/responses
+  logprobs_available: false
+  reasoning_model: true
+  reasoning_tokens_available: true
+detection:
+  strategy: best_single
+  decision_rule: best_single
+  primary_feature: reasoning_ratio
+  polarity: normal
+  min_required_features: 1
+  min_contribution_threshold: 0.0
+  evidence_depth_limited: true
+  features:
+    reasoning_ratio:
+      weight: 0.7026
+      polarity: positive
+      threshold_low: 0.226277
+      threshold_medium: 0.255869
+      auc: 0.8513
+      separation: 0.7026
+      cohens_d: 1.5591
+      truth_mean: 0.133207
+      truth_std: 0.124286
+      fab_mean: 0.300915
+      fab_std: 0.087711
+      threshold_percentile: 75
+      enabled: true
+performance:
+  held_out_recall: 0.7898
+  held_out_fpr: 0.2563
+  false_positive_rate: 0.2563
+  auc: 0.8513
+  validated_on: 300 random 50/50 splits of 400 subscription-harness prompts
+gate_action: advise
+recommended_for_production: false
+detection_capability: moderate
+disclosure:
+  status: production_advisory_preview
+  statement: Routing is supported. Detection is advisory and evidence-limited pending
+    direct Responses API drift validation.
+metadata:
+  source_run: gpt6_subscription_raw_n100_20261101_1222.json
+  source_surface: codex_exec_chatgpt
+  portable_to_direct_api: false
+  profile_owner: arkheia-model-lab

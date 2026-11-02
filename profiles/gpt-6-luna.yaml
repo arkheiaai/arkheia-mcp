@@ -1,0 +1,62 @@
+model: gpt-6-luna
+version: '4.0'
+type: detection_profile
+generated: '2026-11-01'
+characterization:
+  source_model: gpt-6-luna
+  corpus: v2_matched_200 (code+prose)
+  prompts: 400
+  surface: codex_exec_chatgpt_subscription
+  reasoning_effort: medium
+  domains_tested: [code, prose]
+  status: collecting
+  min_samples: 300
+  events_collected: 0
+  domain_results:
+    code: {auc: 0.592, status: no_reliable_detector}
+    prose: {auc: 0.723, held_out_recall: 0.613, held_out_fpr: 0.270}
+  notes: Routing is supported, but the mixed-domain surface did not clear the lab's
+    AUC floor and Luna exposed no hidden-reasoning signal. Production traffic is observed
+    without issuing a detection verdict until workload calibration is complete.
+api:
+  provider: openai
+  endpoint: https://api.openai.com/v1/responses
+  logprobs_available: false
+  reasoning_model: true
+  reasoning_tokens_available: true
+detection:
+  strategy: weighted_vote
+  decision_rule: weighted_vote
+  polarity: normal
+  min_required_features: 1
+  min_contribution_threshold: 0.0
+  evidence_depth_limited: true
+  features:
+    reasoning_tokens:
+      enabled: true
+      polarity: positive
+      note: Observed only; no threshold and no vote while collecting.
+    reasoning_ratio:
+      enabled: true
+      polarity: positive
+      note: Observed only; no threshold and no vote while collecting.
+    unique_word_ratio:
+      enabled: true
+      polarity: positive
+      note: Observed only; prose signal did not transfer across mixed-domain traffic.
+    visible_tokens:
+      enabled: true
+      polarity: positive
+      note: Observed only; workload-dependent and not safe to threshold from the benchmark.
+gate_action: advise
+recommended_for_production: false
+detection_capability: collecting
+disclosure:
+  status: collecting
+  statement: GPT-6 Luna routing is supported. No fabrication verdict is issued while
+    production workload calibration is collected.
+metadata:
+  source_run: gpt6_subscription_raw_n100_20261101_1222.json
+  source_surface: codex_exec_chatgpt
+  portable_to_direct_api: false
+  profile_owner: arkheia-model-lab
