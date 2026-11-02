@@ -179,7 +179,7 @@ This catches fabrication that individual agents miss. The draft agent is confide
 
 35+ models with detection profiles:
 
-- **OpenAI:** GPT-4o, GPT-5.4, GPT-5-Codex family
+- **OpenAI:** GPT-4o, GPT-5.4, GPT-5-Codex, GPT-6 and GPT-6.1 families
 - **Anthropic:** Claude Opus 4.6, Sonnet 4.6, Haiku 4.5
 - **Google:** Gemini 2.5 Pro/Flash, Gemini 3 Pro Preview
 - **xAI:** Grok 4, Grok 4 Fast, Grok Code Fast
@@ -208,6 +208,15 @@ Direct API calls without inference data provide structural analysis only. For fu
 | `run_gemini` | Call Gemini + screen for fabrication |
 | `run_ollama` | Call local Ollama model + screen |
 | `run_together` | Call Together AI (Kimi, DeepSeek) + screen |
+
+### GPT-6 / GPT-6.1 support
+
+Arkheia MCP ships dedicated profiles for GPT-6 Astra, Sol and Luna, plus GPT-6.1
+Sol and Terra. Requests can be routed through the Arkheia proxy and verified with
+`arkheia_verify`. The first characterization used the Codex ChatGPT-subscription
+surface, so detection is advisory and evidence-limited pending direct Responses API
+drift validation. GPT-6 Luna is routing-supported in calibration mode and does not
+issue a fabrication verdict yet.
 
 ## Pricing
 

@@ -1,0 +1,64 @@
+model: gpt-6.1-sol
+version: '4.0'
+type: detection_profile
+generated: '2026-11-01'
+characterization:
+  source_model: gpt-6.1-sol
+  corpus: v2_matched_200 (code+prose)
+  prompts: 400
+  surface: codex_exec_chatgpt_subscription
+  reasoning_effort: medium
+  domains_tested: [code, prose]
+  status: advisory_preview
+  domain_results:
+    code: {auc: 0.878, held_out_recall: 0.889, held_out_fpr: 0.148}
+    prose: {auc: 0.994, held_out_recall: 1.0, held_out_fpr: 0.070}
+  notes: Both domains show strong reasoning-burn separation. Direct Responses API drift
+    validation remains due, so production use is advisory and evidence-limited.
+api:
+  provider: openai
+  endpoint: https://api.openai.com/v1/responses
+  logprobs_available: false
+  reasoning_model: true
+  reasoning_tokens_available: true
+detection:
+  strategy: best_single
+  decision_rule: best_single
+  primary_feature: reasoning_tokens
+  polarity: normal
+  min_required_features: 1
+  min_contribution_threshold: 0.0
+  evidence_depth_limited: true
+  features:
+    reasoning_tokens:
+      weight: 0.8659
+      polarity: positive
+      threshold_low: 0.5
+      threshold_medium: 1.0
+      auc: 0.9329
+      separation: 0.8659
+      cohens_d: 1.3371
+      truth_mean: 4.495
+      truth_std: 15.838696
+      fab_mean: 62.45
+      fab_std: 59.215707
+      threshold_percentile: 75
+      enabled: true
+performance:
+  held_out_recall: 0.9454
+  held_out_fpr: 0.1116
+  false_positive_rate: 0.1116
+  auc: 0.9329
+  validated_on: 300 random 50/50 splits of 400 subscription-harness prompts
+gate_action: advise
+recommended_for_production: false
+detection_capability: strong
+disclosure:
+  status: production_advisory_preview
+  statement: Routing is supported. Detection is advisory and evidence-limited pending
+    direct Responses API drift validation.
+metadata:
+  source_run: gpt6_subscription_raw_n100_20261101_1222.json
+  source_surface: codex_exec_chatgpt
+  portable_to_direct_api: false
+  profile_owner: arkheia-model-lab

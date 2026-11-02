@@ -59,9 +59,13 @@ It should flag this as **HIGH** risk — because the Kafka 4.1 ConsumerLease API
 | `run_ollama` | Call local Ollama model + screen |
 | `run_together` | Call Together AI (Kimi, DeepSeek) + screen |
 
-## 35+ Model Profiles
+## 40+ Model Profiles
 
-GPT-4o, GPT-5.4, Claude Opus/Sonnet/Haiku, Gemini 2.5/3.0, Grok 4, Llama, Mixtral, CodeLlama, Falcon, Phi4, Kimi K2.5, and more. If your model isn't listed, [let us know](mailto:dmurfet@arkheia.ai).
+GPT-4o, GPT-5.4, GPT-6 Astra/Sol/Luna, GPT-6.1 Sol/Terra, Claude
+Opus/Sonnet/Haiku, Gemini 2.5/3.0, Grok 4, Llama, Mixtral, CodeLlama,
+Falcon, Phi4, Kimi K2.5, and more. GPT-6 family detection is currently an
+evidence-limited advisory; Luna is calibration-only. If your model isn't listed,
+[let us know](mailto:dmurfet@arkheia.ai).
 
 ## Pricing
 

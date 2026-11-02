@@ -1,0 +1,65 @@
+model: gpt-6-astra
+version: '4.0'
+type: detection_profile
+generated: '2026-11-01'
+characterization:
+  source_model: gpt-6-astra
+  corpus: v2_matched_200 (code+prose)
+  prompts: 400
+  surface: codex_exec_chatgpt_subscription
+  reasoning_effort: medium
+  domains_tested: [code, prose]
+  status: advisory_preview
+  domain_results:
+    code: {auc: 0.609, status: no_reliable_detector}
+    prose: {auc: 0.962, held_out_recall: 0.931, held_out_fpr: 0.009}
+  notes: Combined profile is intentionally advisory. Prose is strongly separated;
+    code alone did not clear the lab's AUC floor. The serving surface was Codex with
+    ChatGPT-plan authentication, so direct Responses API drift validation remains due.
+api:
+  provider: openai
+  endpoint: https://api.openai.com/v1/responses
+  logprobs_available: false
+  reasoning_model: true
+  reasoning_tokens_available: true
+detection:
+  strategy: best_single
+  decision_rule: best_single
+  primary_feature: reasoning_tokens
+  polarity: normal
+  min_required_features: 1
+  min_contribution_threshold: 0.0
+  evidence_depth_limited: true
+  features:
+    reasoning_tokens:
+      weight: 0.561
+      polarity: positive
+      threshold_low: 0.5
+      threshold_medium: 1.0
+      auc: 0.7805
+      separation: 0.561
+      cohens_d: 1.1209
+      truth_mean: 0.505
+      truth_std: 4.448474
+      fab_mean: 26.205
+      fab_std: 32.117763
+      threshold_percentile: 75
+      enabled: true
+performance:
+  held_out_recall: 0.5761
+  held_out_fpr: 0.0204
+  false_positive_rate: 0.0204
+  auc: 0.7805
+  validated_on: 300 random 50/50 splits of 400 subscription-harness prompts
+gate_action: advise
+recommended_for_production: false
+detection_capability: limited
+disclosure:
+  status: production_advisory_preview
+  statement: Routing is supported. Detection is advisory and evidence-limited pending
+    direct Responses API drift validation; Astra code has no reliable standalone detector.
+metadata:
+  source_run: gpt6_subscription_raw_n100_20261101_1222.json
+  source_surface: codex_exec_chatgpt
+  portable_to_direct_api: false
+  profile_owner: arkheia-model-lab

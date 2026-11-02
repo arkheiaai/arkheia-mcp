@@ -504,8 +504,6 @@ def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, An
             continue
 
         computed_features[feat_name] = value
-        features_used += 1
-
         weight = abs(feat_cfg.get("weight", 1.0))
         polarity = feat_cfg.get("polarity", "positive")
         thresh_low = feat_cfg.get("threshold_low")
@@ -513,6 +511,11 @@ def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, An
 
         if thresh_low is None or thresh_medium is None:
             continue
+
+        # A measured-but-unthresholded feature is observation, not evidence. Counting
+        # it would turn a calibration-only profile into an assessed LOW verdict backed
+        # by zero vote weight.
+        features_used += 1
 
         if polarity == "positive":
             if value < thresh_low:
@@ -534,6 +537,36 @@ def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, An
             feat_name, value, polarity, thresh_low, thresh_medium, feat_risk, weight,
         )
         risk_weights[feat_risk] += weight
+
+    if str((profile.get("characterization") or {}).get("status", "")).lower() == "collecting":
+        char = profile.get("characterization") or {}
+        return {
+            "risk": "LOW",
+            "confidence": 0.0,
+            "gate_action": resolve_gate_action(profile),
+            "evidence_depth_limited": True,
+            "model_detected": profile.get("model", "unknown"),
+            "detection_method": "calibration_suppressed",
+            "profile_version": profile.get("version", "unknown"),
+            "features_triggered": [],
+            "workflow_signal": {
+                "surface": False,
+                "code": "profile_calibrating",
+                "reason": "thresholds_not_yet_placed_for_this_workload",
+                "progress": {
+                    "collected": char.get("events_collected", 0),
+                    "required": char.get("min_samples", 300),
+                },
+            },
+            "metrics": {
+                "features_used": 0,
+                "features_total": len(features_config),
+                "computed_features": {
+                    key: round(value, 4) for key, value in computed_features.items()
+                },
+                "gate_reason": "calibration_suppressed",
+            },
+        }
 
     if features_used == 0:
         return None
