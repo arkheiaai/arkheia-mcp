@@ -548,7 +548,6 @@ def classify_with_profile(profile: dict, signals: dict) -> Optional[Dict[str, An
             "model_detected": profile.get("model", "unknown"),
             "detection_method": "calibration_suppressed",
             "profile_version": profile.get("version", "unknown"),
-            "features_triggered": [],
             "workflow_signal": {
                 "surface": False,
                 "code": "profile_calibrating",
