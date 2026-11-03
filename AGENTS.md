@@ -66,7 +66,7 @@ Replace `ak_live_YOUR_KEY_HERE` with your actual API key from Step 1.
 
 ## Step 2 (alt): Configure Claude Code
 
-Add to `~/.claude/settings.json`:
+Add to `~/.claude.json` (Claude Code's user-scoped MCP configuration):
 
 ```json
 {

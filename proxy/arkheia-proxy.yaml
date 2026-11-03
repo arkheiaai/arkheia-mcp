@@ -11,7 +11,7 @@
 
 proxy:
   host: 0.0.0.0
-  port: 8099
+  port: 8098
   log_level: INFO
 
 detection:
@@ -34,4 +34,4 @@ audit:
 mcp_server:
   enabled: true
   port: 8100
-  proxy_url: http://localhost:8099
+  proxy_url: http://localhost:8098
