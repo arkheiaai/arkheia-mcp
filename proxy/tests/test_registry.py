@@ -131,6 +131,25 @@ def registry_client(tmp_path, mock_router):
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("download_url", [
+    "https://other.example/profiles/model.yaml",
+    "http://registry.arkheia.ai/profiles/model.yaml",
+    "https://registry.arkheia.ai.evil.example/profiles/model.yaml",
+    "https://registry.arkheia.ai@other.example/profiles/model.yaml",
+])
+async def test_profile_download_never_sends_key_to_other_origin(registry_client, download_url):
+    meta = {
+        "model_id": "llama-3-70b",
+        "checksum": VALID_CHECKSUM,
+        "download_url": download_url,
+    }
+    with patch("proxy.registry.client.egress_async_client") as client_factory:
+        with pytest.raises(ValueError, match="outside the configured registry"):
+            await registry_client._download_and_apply(meta)
+    client_factory.assert_not_called()
+
+
 def admin_pull_app(registry_client, writer=None):
     lifespan = None
     if writer is not None:
@@ -394,6 +413,8 @@ class TestRegistryClient:
         mock_router.reload.assert_not_called()
         # Old content retained
         assert profile_path.read_bytes() == b"original content"
+        assert result["errors"]
+        assert registry_client.last_pull is None  # The failed profile must be offered again.
 
     @pytest.mark.asyncio
     async def test_missing_checksum_rejects_without_download_and_is_receipted(

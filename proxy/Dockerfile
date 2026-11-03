@@ -32,6 +32,6 @@ ENV ARKHEIA_PROXY_PORT=8098
 EXPOSE 8098
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8098/admin/health').raise_for_status()"
+    CMD python -c "import httpx; httpx.get('http://localhost:8098/').raise_for_status()"
 
 CMD ["python", "-m", "proxy.main"]

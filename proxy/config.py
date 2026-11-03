@@ -25,11 +25,11 @@ def _load_yaml(config_path: Optional[str] = None) -> dict:
     if config_path:
         candidates = [Path(config_path)]
     else:
-        candidates = [
-            Path(os.environ.get("ARKHEIA_CONFIG", "")),
-            Path(__file__).parent / "arkheia-proxy.yaml",
-            Path.cwd() / "arkheia-proxy.yaml",
+        override = os.environ.get("ARKHEIA_CONFIG")
+        candidates = ([Path(override)] if override else []) + [
             Path("/etc/arkheia/arkheia-proxy.yaml"),
+            Path.cwd() / "arkheia-proxy.yaml",
+            Path(__file__).parent / "arkheia-proxy.yaml",
         ]
     for path in candidates:
         if path and str(path) and path.is_file():
@@ -84,7 +84,7 @@ class _DetectionSettings:
 
 
 class _RegistrySettings:
-    url: str = _yaml.get("registry", {}).get("url", "https://registry.arkheia.ai")
+    url: str = os.environ.get("ARKHEIA_REGISTRY_URL", _yaml.get("registry", {}).get("url", "https://registry.arkheia.ai"))
     pull_on_startup: bool = _yaml.get("registry", {}).get("pull_on_startup", False)
     pull_interval_hours: int = _yaml.get("registry", {}).get("pull_interval_hours", 24)
     pin_major_version: Optional[int] = _yaml.get("registry", {}).get("pin_major_version")

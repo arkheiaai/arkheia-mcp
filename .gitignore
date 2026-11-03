@@ -4,7 +4,8 @@ __pycache__/
 .env
 *.log
 audit.jsonl
-registry_audit.jsonl   # registry auth-decision receipts (default path)
+# Registry auth-decision receipts (default path)
+registry_audit.jsonl
 *.bak.yaml
 .pytest_cache/
 install_service.bat
