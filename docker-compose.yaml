@@ -17,12 +17,13 @@ services:
       context: .
       dockerfile: proxy/Dockerfile
     ports:
-      - "8098:8098"                              # Enterprise Proxy on host:8098 (Local Proxy is 8099)
+      - "127.0.0.1:8098:8098"                    # host-local; containers use proxy:8098
     environment:
       - ARKHEIA_API_KEY=${ARKHEIA_API_KEY:-}     # injected from host, empty = registry disabled
       - ARKHEIA_ENV=${ARKHEIA_ENV:-development}
       - ARKHEIA_REGISTRY_URL=http://registry:8200
       - ARKHEIA_PROXY_PORT=8098
+      - ARKHEIA_PROXY_HOST=0.0.0.0                # container peers need the proxy listener
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET must be set}
       - ARKHEIA_LICENSE_KEY=${ARKHEIA_LICENSE_KEY:-}   # HMAC key for surface verification
       - ARKHEIA_REQUIRE_LICENSE=${ARKHEIA_REQUIRE_LICENSE:-false}

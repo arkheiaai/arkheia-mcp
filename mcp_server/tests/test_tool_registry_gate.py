@@ -46,6 +46,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 import logging
 import multiprocessing
 import os
@@ -54,6 +55,7 @@ import random
 import string
 from dataclasses import FrozenInstanceError, fields, replace
 from enum import Enum
+from pathlib import Path
 
 import pytest
 
@@ -1076,6 +1078,27 @@ class TestReceiptedGate:
         assert first.receipt_status == receipts.STATUS_RECORDED
         assert second.receipt_status == receipts.STATUS_RECORDED
         _assert_receipt_chain_is_intact(receipts.read_rows(log_path), 2)
+
+    async def test_receipt_tail_lookup_skips_full_log_reads_and_bad_trailing_row(
+        self, tmp_path, monkeypatch
+    ):
+        log_path = tmp_path / "tail.jsonl"
+        rows = [
+            {"receipt_id": f"receipt-{i}", "seq": i + 1, "this_hash": f"{i:064x}"}
+            for i in range(200)
+        ]
+        log_path.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows) + "{incomplete",
+            encoding="utf-8",
+        )
+
+        def forbidden_full_read(*args, **kwargs):
+            raise AssertionError("receipt lookup reread the full log")
+
+        monkeypatch.setattr(Path, "read_text", forbidden_full_read)
+        assert receipts._load_receipt_chain_state(log_path) == (f"{199:064x}", 200)
+        assert receipts.find_receipt(log_path, "receipt-199") == rows[-1]
+        assert receipts.find_receipt(log_path, "receipt-0") == rows[0]
 
     async def test_denied_dispatch_decision_is_written_before_refusal_reaches_caller(
         self, tmp_path

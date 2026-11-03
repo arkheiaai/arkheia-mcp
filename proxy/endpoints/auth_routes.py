@@ -67,9 +67,9 @@ async def auth_callback(
 
     user = await exchange_google_code(code)
     email = user.get("email", "")
-    if not is_email_whitelisted(email):
+    if user.get("verified_email") is not True or not is_email_whitelisted(email):
         # Do NOT include the email in the response — prevents enumeration
-        logger.warning("Unauthorised login attempt from email not in whitelist")
+        logger.warning("Unauthorised Google login: email unverified or not in whitelist")
         return HTMLResponse(
             "<h1>Access denied</h1><p>This account is not authorised. "
             "Contact your administrator.</p>",

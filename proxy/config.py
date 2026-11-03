@@ -51,7 +51,7 @@ _yaml = _load_yaml()
 class _ProxySettings:
     host: str = os.environ.get(
         "ARKHEIA_PROXY_HOST",
-        _yaml.get("proxy", {}).get("host", "0.0.0.0"),  # nosec B104 — intentional bind-all for container/service use
+        _yaml.get("proxy", {}).get("host", "127.0.0.1"),
     )
     port: int = int(os.environ.get(
         "ARKHEIA_PROXY_PORT",

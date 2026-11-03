@@ -254,7 +254,7 @@ def test_oauth_callback_mints_session_only_after_state_and_whitelist_pass(
     test_client, _ = client
 
     async def _exchange_google_code(code):
-        return {"email": "reviewer@example.com"}
+        return {"email": "reviewer@example.com", "verified_email": True}
 
     monkeypatch.setattr(auth_routes, "exchange_google_code", _exchange_google_code)
 
@@ -269,6 +269,25 @@ def test_oauth_callback_mints_session_only_after_state_and_whitelist_pass(
     assert response.headers["location"] == "/admin/ui"
     assert COOKIE_NAME in set_cookie
     assert CSRF_COOKIE_NAME in set_cookie
+
+
+@pytest.mark.parametrize("verified", [False, None, "true"])
+def test_oauth_callback_rejects_unverified_whitelisted_email(
+    client, monkeypatch, verified
+):
+    test_client, _ = client
+
+    async def _exchange_google_code(code):
+        return {"email": "reviewer@example.com", "verified_email": verified}
+
+    monkeypatch.setattr(auth_routes, "exchange_google_code", _exchange_google_code)
+    response = test_client.get(
+        "/auth/callback?code=code-1&state=state-1",
+        headers={"Cookie": f"{CSRF_COOKIE_NAME}=state-1"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 403
+    assert COOKIE_NAME not in response.headers.get("set-cookie", "")
 
 
 def test_audit_log_requires_authentication(client):
