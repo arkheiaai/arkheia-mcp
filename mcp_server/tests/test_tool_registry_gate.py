@@ -1168,7 +1168,7 @@ class TestReceiptedGate:
     async def test_argument_values_do_not_enter_the_policy_receipt(self, tmp_path, monkeypatch):
         log_path = tmp_path / "gate.jsonl"
         monkeypatch.setenv("ARKHEIA_TOOL_GATE_RECEIPT_LOG", str(log_path))
-        secret = "sk-ant-VERYSECRETTOOLARGUMENTVALUE1234567890"
+        secret = "sk-ant-" + _opaque_receipt_secret()  # synthetic, built at runtime
 
         result = await srv.mcp.call_tool(
             "memory_store",
