@@ -67,15 +67,19 @@ async def auth_callback(
 
     user = await exchange_google_code(code)
     email = user.get("email", "")
-    if not is_email_whitelisted(email):
+    verified_email = user.get("verified_email") is True
+    if not verified_email or not is_email_whitelisted(email):
         # Do NOT include the email in the response — prevents enumeration
-        logger.warning("Unauthorised login attempt from email not in whitelist")
+        if not verified_email:
+            logger.warning("Unauthorised admin login: verified email required")
+        else:
+            logger.warning("Unauthorised login attempt from email not in whitelist")
         return HTMLResponse(
             "<h1>Access denied</h1><p>This account is not authorised. "
             "Contact your administrator.</p>",
             status_code=403,
         )
-    token = create_jwt(email)
+    token = create_jwt(email, verified_email=True)
     redirect = RedirectResponse(url="/admin/ui", status_code=302)
     set_auth_cookie(redirect, token)
     clear_oauth_state_cookie(redirect)

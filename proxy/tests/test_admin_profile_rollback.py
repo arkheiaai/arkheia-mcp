@@ -88,7 +88,7 @@ def _build_app(tmp_path, audit_writer):
 
 
 def _auth_headers(email: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {auth.create_jwt(email)}"}
+    return {"Authorization": f"Bearer {auth.create_jwt(email, verified_email=True)}"}
 
 
 async def _post(app: FastAPI, path: str, email: str | None = ADMIN_EMAIL):

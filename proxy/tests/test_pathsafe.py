@@ -291,7 +291,7 @@ async def test_client_download_caches_separator_id_top_level(tmp_path, mid):
     with patch("httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
         mock_client_cls.return_value.__aenter__.return_value = mock_client
-        download_resp = MagicMock()
+        download_resp = MagicMock(status_code=200)
         download_resp.content = _valid_profile_yaml(mid)
         download_resp.raise_for_status = MagicMock()
         mock_client.get.side_effect = [download_resp]

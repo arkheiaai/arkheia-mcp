@@ -382,7 +382,7 @@ class TestRegistryClient:
             list_resp.json.return_value = registry_response
             list_resp.raise_for_status = MagicMock()
 
-            download_resp = MagicMock()
+            download_resp = MagicMock(status_code=200)
             download_resp.content = VALID_YAML
             download_resp.raise_for_status = MagicMock()
 
@@ -468,7 +468,7 @@ class TestRegistryClient:
             list_resp.json.return_value = registry_response
             list_resp.raise_for_status = MagicMock()
 
-            download_resp = MagicMock()
+            download_resp = MagicMock(status_code=200)
             download_resp.content = VALID_YAML
             download_resp.raise_for_status = MagicMock()
 
@@ -502,7 +502,7 @@ class TestRegistryClient:
             list_resp.json.return_value = registry_response
             list_resp.raise_for_status = MagicMock()
 
-            download_resp = MagicMock()
+            download_resp = MagicMock(status_code=200)
             download_resp.content = VALID_YAML
             download_resp.raise_for_status = MagicMock()
 
@@ -556,7 +556,7 @@ class TestRegistryClient:
             list_resp = MagicMock()
             list_resp.json.return_value = registry_response
             list_resp.raise_for_status = MagicMock()
-            download_resp = MagicMock()
+            download_resp = MagicMock(status_code=200)
             download_resp.content = content
             download_resp.raise_for_status = MagicMock()
             mock_client.get.side_effect = [list_resp, download_resp]
@@ -606,7 +606,7 @@ class TestRegistryClient:
             list_resp = MagicMock()
             list_resp.json.return_value = registry_response
             list_resp.raise_for_status = MagicMock()
-            download_resp = MagicMock()
+            download_resp = MagicMock(status_code=200)
             download_resp.content = VALID_YAML
             download_resp.raise_for_status = MagicMock()
             mock_client.get.side_effect = [list_resp, download_resp]
@@ -751,7 +751,7 @@ class TestRegistryClient:
             list_resp.json.return_value = registry_response
             list_resp.raise_for_status = MagicMock()
 
-            download_resp = MagicMock()
+            download_resp = MagicMock(status_code=200)
             download_resp.content = content
             download_resp.raise_for_status = MagicMock()
 
@@ -789,7 +789,7 @@ class TestRegistryClient:
             list_resp.json.return_value = registry_response
             list_resp.raise_for_status = MagicMock()
 
-            download_resp = MagicMock()
+            download_resp = MagicMock(status_code=200)
             download_resp.content = content
             download_resp.raise_for_status = MagicMock()
 
@@ -829,7 +829,7 @@ class TestRegistryClient:
             list_resp.json.return_value = registry_response
             list_resp.raise_for_status = MagicMock()
 
-            download_resp = MagicMock()
+            download_resp = MagicMock(status_code=503)
             download_resp.raise_for_status.side_effect = _httpx.HTTPStatusError(
                 "download failed",
                 request=request,
@@ -842,7 +842,7 @@ class TestRegistryClient:
 
         assert result["updated"] == []
         assert result["errors"], result
-        assert "download failed" in result["errors"][0]
+        assert result["errors"] == ["llama-3-70b: registry profile download failed"]
         assert not (tmp_path / "llama-3-70b.yaml").exists()
         mock_router.reload.assert_not_called()
 
@@ -880,7 +880,7 @@ class TestRegistryClient:
             mock_client = AsyncMock()
             mock_client_cls.return_value.__aenter__.return_value = mock_client
 
-            download_resp = MagicMock()
+            download_resp = MagicMock(status_code=200)
             download_resp.content = new_content
             download_resp.raise_for_status = MagicMock()
             mock_client.get.return_value = download_resp

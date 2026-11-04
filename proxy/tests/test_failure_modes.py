@@ -170,7 +170,7 @@ class TestFailureModeContracts:
 
         # Patch the HTTP download to return valid YAML but with wrong checksum
         with patch("httpx.AsyncClient") as mock_cls:
-            mock_resp = MagicMock()
+            mock_resp = MagicMock(status_code=200)
             mock_resp.raise_for_status = MagicMock()
             mock_resp.content = valid_yaml
             mock_inst = AsyncMock()

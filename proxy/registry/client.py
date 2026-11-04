@@ -136,6 +136,7 @@ class RegistryClient:
                     f"{self.base_url}/profiles",
                     params=params,
                     headers={"Authorization": f"Bearer {key_value}"},
+                    follow_redirects=False,
                 )
                 resp.raise_for_status()
                 data = resp.json()
@@ -209,6 +210,31 @@ class RegistryClient:
             return OUTCOME_PROFILE_DOWNLOAD_FAILED
         return OUTCOME_PROFILE_APPLY_FAILED
 
+    def _validated_download_url(self, value: object) -> httpx.URL:
+        """Bind untrusted metadata to the configured transport origin."""
+        try:
+            if not isinstance(value, str):
+                raise ValueError("download URL must be a string")
+            candidate = httpx.URL(value)
+            configured = httpx.URL(self.base_url)
+
+            def origin(url: httpx.URL) -> tuple[str, bytes, int]:
+                if url.scheme not in {"http", "https"} or not url.is_absolute_url or not url.raw_host:
+                    raise ValueError("unsupported origin")
+                port = url.port if url.port is not None else {"http": 80, "https": 443}[url.scheme]
+                return url.scheme, url.raw_host, port
+
+            if candidate.userinfo or candidate.fragment or origin(candidate) != origin(configured):
+                raise ValueError("download origin refused")
+        except (httpx.InvalidURL, TypeError, ValueError):
+            # Metadata can contain credentials, malformed authorities or signed
+            # query strings. None belong in errors, receipts or tracebacks.
+            raise RegistryApplyError(
+                OUTCOME_PROFILE_DOWNLOAD_FAILED,
+                "registry profile download URL refused",
+            ) from None
+        return candidate
+
     async def _download_and_apply(self, meta: dict) -> bool:
         """
         Download, validate, and apply a single profile.
@@ -230,20 +256,33 @@ class RegistryClient:
             )
             raise RegistryApplyError(outcome, str(exc)) from exc
         download_url = meta.get("download_url")
-        if not download_url:
+        if download_url is None or download_url == "":
             raise RegistryApplyError(
                 OUTCOME_PROFILE_APPLY_FAILED,
                 f"registry profile metadata missing download_url for {model_id}",
             )
+        download_url = self._validated_download_url(download_url)
         key_value = self.api_key.get_secret_value()
 
-        async with egress_async_client(timeout=30.0) as client:
-            resp = await client.get(
-                download_url,
-                headers={"Authorization": f"Bearer {key_value}"},
-            )
-            resp.raise_for_status()
-            content = resp.content
+        try:
+            async with egress_async_client(timeout=30.0) as client:
+                resp = await client.get(
+                    download_url,
+                    headers={"Authorization": f"Bearer {key_value}"},
+                    follow_redirects=False,
+                )
+                if 300 <= resp.status_code < 400:
+                    raise RegistryApplyError(
+                        OUTCOME_PROFILE_DOWNLOAD_FAILED,
+                        "registry profile download redirect refused",
+                    )
+                resp.raise_for_status()
+                content = resp.content
+        except httpx.HTTPError:
+            raise RegistryApplyError(
+                OUTCOME_PROFILE_DOWNLOAD_FAILED,
+                "registry profile download failed",
+            ) from None
 
         # 1. Verify checksum
         if not self.validator.verify_checksum(content, checksum):
