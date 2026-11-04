@@ -30,10 +30,15 @@ the pull result and its audit receipts rather than treating a missing receipt as
 proof that nothing changed.
 
 The registry server's advertised base URL must agree with the client setting.
-After correcting a previously refused URL, use a full refresh/restart through
-the normal operating procedure: the existing incremental watermark limitation
-can prevent an unchanged failed profile from being offered again. This change
-does not repair that separate retry limitation.
+After correcting a previously refused URL, restart the proxy and then trigger
+an authenticated `POST /admin/registry/pull`. A restart clears the in-memory
+incremental watermark; it does not necessarily pull immediately. The explicit
+pull avoids waiting for the next scheduled interval. This change does not repair
+the separate retry limitation that can hide an unchanged failed profile.
+
+Rolling back restores the previous sign-in and registry-download rules, including
+the old security limitations. Do not treat administrator sessions or download
+origin checks as protected by this repair after a rollback.
 
 Do not put keys in download URLs. No live credential, signing key, configuration
 or profile-encryption master key is changed by this source repair.

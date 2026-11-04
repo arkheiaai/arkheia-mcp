@@ -842,7 +842,7 @@ class TestRegistryClient:
 
         assert result["updated"] == []
         assert result["errors"], result
-        assert "download failed" in result["errors"][0]
+        assert result["errors"] == ["llama-3-70b: registry profile download failed"]
         assert not (tmp_path / "llama-3-70b.yaml").exists()
         mock_router.reload.assert_not_called()
 

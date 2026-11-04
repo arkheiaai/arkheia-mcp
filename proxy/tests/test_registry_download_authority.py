@@ -3,6 +3,7 @@ import json
 import logging
 import traceback
 from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -153,6 +154,13 @@ async def test_pull_receipts_every_refused_url_and_continues(tmp_path, monkeypat
         assert len(refused) == 1
         missing = url is None or url == ""
         assert refused[0]["outcome"] == (OUTCOME_PROFILE_APPLY_FAILED if missing else OUTCOME_PROFILE_DOWNLOAD_FAILED)
+        origin = refused[0]["download_origin"]
+        if origin is not None:
+            parsed = urlsplit(origin)
+            assert parsed.scheme and parsed.netloc
+            assert parsed.username is None and parsed.password is None
+            assert parsed.path == parsed.query == parsed.fragment == ""
+            assert origin == f"{parsed.scheme}://{parsed.netloc}"
         if isinstance(url, str) and "user:local@" in url:
             assert "user:local" not in json.dumps(rows)
     finally:
