@@ -222,7 +222,7 @@ class TestTheDashboardShowsWhyItCouldNotAssess:
         app = FastAPI()
         app.include_router(admin_router)
         client = TestClient(app)
-        client.cookies.set(COOKIE_NAME, create_jwt("operator@arkheia.ai"))
+        client.cookies.set(COOKIE_NAME, create_jwt("operator@arkheia.ai", verified_email=True))
         return client.get("/admin/ui")
 
     def test_the_ui_is_served(self, ui):

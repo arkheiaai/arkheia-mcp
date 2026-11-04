@@ -84,12 +84,15 @@ GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
 # JWT helpers
 # ---------------------------------------------------------------------------
 
-def create_jwt(email: str) -> str:
-    """Create a signed JWT for the given email address."""
+def create_jwt(email: str, *, verified_email: bool = False) -> str:
+    """Mint an admin session only for an explicitly verified identity."""
+    if verified_email is not True:
+        raise ValueError("Verified email required for admin session")
     payload = {
         "sub": email,
         "iat": int(time.time()),
         "exp": int(time.time()) + JWT_EXPIRY_SECONDS,
+        "email_verified": True,
     }
     return jwt.encode(payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
 
@@ -98,6 +101,8 @@ def verify_jwt(token: str) -> str | None:
     """Verify a JWT and return the email (sub) or None if invalid/expired."""
     try:
         payload = jwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+        if payload.get("email_verified") is not True:
+            return None
         return payload.get("sub")
     except jwt.ExpiredSignatureError:
         logger.debug("JWT expired")

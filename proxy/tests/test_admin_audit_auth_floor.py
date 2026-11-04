@@ -73,7 +73,7 @@ def client():
 
 
 def _bearer(email: str = "reviewer@example.com") -> dict[str, str]:
-    return {"Authorization": f"Bearer {create_jwt(email)}"}
+    return {"Authorization": f"Bearer {create_jwt(email, verified_email=True)}"}
 
 
 def _dependency_calls(route: APIRoute) -> set[object]:
@@ -174,7 +174,7 @@ def test_admin_ui_redirects_without_valid_session_cookie(client):
 
 def test_admin_ui_accepts_valid_session_cookie(client):
     test_client, _ = client
-    token = create_jwt("reviewer@example.com")
+    token = create_jwt("reviewer@example.com", verified_email=True)
 
     response = test_client.get(
         "/admin/ui",
@@ -232,7 +232,7 @@ def test_oauth_callback_rejects_non_whitelisted_email_without_session_cookie(
     test_client, _ = client
 
     async def _exchange_google_code(code):
-        return {"email": "intruder@example.com"}
+        return {"email": "intruder@example.com", "verified_email": True}
 
     monkeypatch.setattr(auth_routes, "exchange_google_code", _exchange_google_code)
 
@@ -254,7 +254,7 @@ def test_oauth_callback_mints_session_only_after_state_and_whitelist_pass(
     test_client, _ = client
 
     async def _exchange_google_code(code):
-        return {"email": "reviewer@example.com"}
+        return {"email": "reviewer@example.com", "verified_email": True}
 
     monkeypatch.setattr(auth_routes, "exchange_google_code", _exchange_google_code)
 
