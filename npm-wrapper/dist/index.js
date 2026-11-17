@@ -91,7 +91,7 @@ function handleError(toolName, e) {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
-const CURRENT_VERSION = "0.1.7";
+const CURRENT_VERSION = "1.2.2";
 async function checkForUpdate() {
     // Check once per day — skip if checked recently
     const markerPath = path.join(os.homedir(), '.arkheia', '.update-check');
@@ -134,7 +134,10 @@ async function main() {
     }
     loadConfig();
     checkCRLF();
-    checkForUpdate(); // fire-and-forget, don't await — never blocks startup
+    // Opt-in only: the check writes ~/.arkheia/.update-check, and a default run must change nothing in the user's
+    // home (B-288, Codex R1). Set ARKHEIA_UPDATE_CHECK=1 to enable it.
+    if (process.env.ARKHEIA_UPDATE_CHECK === "1")
+        checkForUpdate(); // fire-and-forget, never blocks startup
     const ARKHEIA_PROXY_URL = process.env.ARKHEIA_PROXY_URL || "http://localhost:8098";
     const ARKHEIA_HOSTED_URL = process.env.ARKHEIA_HOSTED_URL || "https://arkheia-proxy-production.up.railway.app";
     const ARKHEIA_API_KEY = process.env.ARKHEIA_API_KEY;
@@ -144,7 +147,7 @@ async function main() {
             "Then set: export ARKHEIA_API_KEY=ak_live_...\n\n");
     }
     const proxy = new proxy_client_js_1.ProxyClient(ARKHEIA_PROXY_URL, 10.0, ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
-    const server = new mcp_js_1.McpServer({ name: "arkheia-trust", version: "0.1.6" });
+    const server = new mcp_js_1.McpServer({ name: "arkheia-trust", version: "1.2.2" });
     // ── Detection & audit ──────────────────────────────────────────
     server.tool("arkheia_verify", "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief confidence note. LOW = show normally. Never hide or suppress a response — always surface it to the user with the appropriate risk context.", { prompt: zod_1.z.string(), response: zod_1.z.string(), model: zod_1.z.string() }, async ({ prompt, response, model }) => {
         try {

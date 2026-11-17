@@ -48,3 +48,42 @@ class PostinstallTouchesNothing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FirstRunAndSetupLeakNothing(unittest.TestCase):
+    """Codex B288 R1: default first run must not write in home; optional setup must never print the key."""
+
+    def test_update_check_is_opt_in(self):
+        src = (ROOT / "npm-wrapper" / "src" / "index.ts").read_text()
+        dist = (ROOT / "npm-wrapper" / "dist" / "index.js").read_text()
+        for name, text in (("src/index.ts", src), ("dist/index.js", dist)):
+            self.assertIn("ARKHEIA_UPDATE_CHECK", text, f"{name}: the update check (which writes ~/.arkheia/.update-check) must be opt-in")
+
+    @unittest.skipUnless(shutil.which("node"), "node is required")
+    def test_setup_claude_never_prints_the_key_when_registration_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            home = pathlib.Path(d) / "home"; home.mkdir()
+            bindir = pathlib.Path(d) / "bin"; bindir.mkdir()
+            for cli in ("claude", "codex"):
+                f = bindir / cli; f.write_text("#!/bin/sh\nexit 1\n"); f.chmod(0o755)
+            env = {"PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(home), "USERPROFILE": str(home),
+                   "ARKHEIA_API_KEY": FAKE_KEY}
+            r = subprocess.run(["node", str(ROOT / "npm-wrapper" / "scripts" / "setup-claude.js")],
+                               env=env, capture_output=True, text=True, timeout=60)
+            out = r.stdout + r.stderr
+            self.assertIn("ARKHEIA_API_KEY", out, "the manual command should reference the variable")
+            for fragment in (FAKE_KEY, FAKE_KEY[-12:]):
+                self.assertNotIn(fragment, out, "setup printed the API key")
+
+
+class VersionsAgree(unittest.TestCase):
+    def test_every_version_field_is_the_release_version(self):
+        import json, re
+        pkg = json.loads((ROOT / "npm-wrapper" / "package.json").read_text())["version"]
+        server = json.loads((ROOT / "npm-wrapper" / "server.json").read_text())
+        server_versions = {server.get("version")} | {p.get("version") for p in server.get("packages", []) if isinstance(p, dict)}
+        src = (ROOT / "npm-wrapper" / "src" / "index.ts").read_text()
+        src_versions = set(re.findall(r'CURRENT_VERSION = "([^"]+)"', src)) | set(re.findall(r'name: "arkheia-trust", version: "([^"]+)"', src))
+        self.assertEqual(server_versions - {None}, {pkg})
+        self.assertEqual(src_versions, {pkg})
+        self.assertNotEqual(pkg, "0.1.10", "0.1.10 is already published on npm")
