@@ -46,10 +46,6 @@ class PostinstallTouchesNothing(unittest.TestCase):
                 self.assertNotIn(fragment, out, f"postinstall printed key material: {fragment!r}")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class FirstRunAndSetupLeakNothing(unittest.TestCase):
     """Codex B288 R1: default first run must not write in home; optional setup must never print the key."""
 
@@ -62,15 +58,24 @@ class FirstRunAndSetupLeakNothing(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_setup_claude_never_prints_the_key_when_registration_fails(self):
         with tempfile.TemporaryDirectory() as d:
+            # Sealed PATH (Codex B288 R2): ONLY inert stubs for every CLI the helper knows, plus node and which.
+            # No installed claude/codex/gemini/grok is reachable, so nothing real is registered or connected.
             home = pathlib.Path(d) / "home"; home.mkdir()
+            work = pathlib.Path(d) / "cwd"; work.mkdir()
             bindir = pathlib.Path(d) / "bin"; bindir.mkdir()
-            for cli in ("claude", "codex"):
-                f = bindir / cli; f.write_text("#!/bin/sh\nexit 1\n"); f.chmod(0o755)
-            env = {"PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(home), "USERPROFILE": str(home),
-                   "ARKHEIA_API_KEY": FAKE_KEY}
-            r = subprocess.run(["node", str(ROOT / "npm-wrapper" / "scripts" / "setup-claude.js")],
-                               env=env, capture_output=True, text=True, timeout=60)
+            trace = pathlib.Path(d) / "trace"
+            clis = ("claude", "codex", "gemini", "grok")
+            for cli in clis:
+                f = bindir / cli; f.write_text(f'#!/bin/sh\necho {cli} >> "{trace}"\nexit 1\n'); f.chmod(0o755)
+            for tool in ("node", "which"):
+                (bindir / tool).symlink_to(shutil.which(tool))
+            env = {"PATH": str(bindir), "HOME": str(home), "USERPROFILE": str(home), "ARKHEIA_API_KEY": FAKE_KEY}
+            r = subprocess.run([str(bindir / "node"), str(ROOT / "npm-wrapper" / "scripts" / "setup-claude.js")],
+                               env=env, cwd=work, capture_output=True, text=True, timeout=60)
             out = r.stdout + r.stderr
+            self.assertEqual(sorted(set(trace.read_text().split())), sorted(clis),
+                             "every registration must hit an inert stub, and only stubs")
+            self.assertEqual(list(work.iterdir()), [], "the helper wrote into its working directory")
             self.assertIn("ARKHEIA_API_KEY", out, "the manual command should reference the variable")
             for fragment in (FAKE_KEY, FAKE_KEY[-12:]):
                 self.assertNotIn(fragment, out, "setup printed the API key")
@@ -87,3 +92,7 @@ class VersionsAgree(unittest.TestCase):
         self.assertEqual(server_versions - {None}, {pkg})
         self.assertEqual(src_versions, {pkg})
         self.assertNotEqual(pkg, "0.1.10", "0.1.10 is already published on npm")
+
+
+if __name__ == "__main__":
+    unittest.main()
