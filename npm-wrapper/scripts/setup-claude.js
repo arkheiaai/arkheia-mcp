@@ -20,7 +20,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { execSync } = require("child_process");
+const { execSync, execFileSync } = require("child_process");
 
 const MARKER = "# Arkheia Integration — Detection Protocol";
 
@@ -85,13 +85,15 @@ function installProtocol(filePath, cliName) {
   }
 }
 
-function registerMcp(cli, args) {
+// argv carries the real key for the CLI's own config; `display` is the same command with the key shown only as
+// "$ARKHEIA_API_KEY", which is all that is ever printed (Codex B288 R1: a failure used to echo the full key).
+function registerMcp(cli, argv, display) {
   try {
-    execSync(args, { stdio: "inherit", timeout: 15000 });
+    execFileSync(argv[0], argv.slice(1), { stdio: "inherit", timeout: 15000 });
     console.log(`  [${cli}] MCP server registered`);
   } catch {
     console.log(`  [${cli}] Auto-registration failed — run manually:`);
-    console.log(`    ${args}`);
+    console.log(`    ${display}`);
   }
 }
 
@@ -108,7 +110,8 @@ function main() {
     console.log("[claude] Detected");
     installProtocol(path.join(home, ".claude", "CLAUDE.md"), "claude");
     if (apiKey) {
-      registerMcp("claude", `claude mcp add arkheia -s user -e ARKHEIA_API_KEY="${apiKey}" -- mcp-server`);
+      registerMcp("claude", ["claude", "mcp", "add", "arkheia", "-s", "user", "-e", `ARKHEIA_API_KEY=${apiKey}`, "--", "mcp-server"],
+        'claude mcp add arkheia -s user -e ARKHEIA_API_KEY="$ARKHEIA_API_KEY" -- mcp-server');
     } else {
       console.log('  [claude] Set ARKHEIA_API_KEY then run: claude mcp add arkheia -s user -e ARKHEIA_API_KEY="$ARKHEIA_API_KEY" -- mcp-server');
     }
@@ -120,7 +123,8 @@ function main() {
     console.log("[codex] Detected");
     installProtocol(path.join(home, ".codex", "CODEX.md"), "codex");
     if (apiKey) {
-      registerMcp("codex", `codex mcp add arkheia --env ARKHEIA_API_KEY="${apiKey}" -- mcp-server`);
+      registerMcp("codex", ["codex", "mcp", "add", "arkheia", "--env", `ARKHEIA_API_KEY=${apiKey}`, "--", "mcp-server"],
+        'codex mcp add arkheia --env ARKHEIA_API_KEY="$ARKHEIA_API_KEY" -- mcp-server');
     } else {
       console.log('  [codex] Set ARKHEIA_API_KEY then run: codex mcp add arkheia --env ARKHEIA_API_KEY="$ARKHEIA_API_KEY" -- mcp-server');
     }
@@ -133,7 +137,8 @@ function main() {
     detected.push("gemini");
     console.log("[gemini] Detected (no instruction file needed — reads protocol from tool descriptions)");
     if (apiKey) {
-      registerMcp("gemini", `gemini mcp add -s user -e ARKHEIA_API_KEY="${apiKey}" arkheia mcp-server`);
+      registerMcp("gemini", ["gemini", "mcp", "add", "-s", "user", "-e", `ARKHEIA_API_KEY=${apiKey}`, "arkheia", "mcp-server"],
+        'gemini mcp add -s user -e ARKHEIA_API_KEY="$ARKHEIA_API_KEY" arkheia mcp-server');
     } else {
       console.log('  [gemini] Set ARKHEIA_API_KEY then run: gemini mcp add -s user -e ARKHEIA_API_KEY="$ARKHEIA_API_KEY" arkheia mcp-server');
     }
@@ -145,7 +150,8 @@ function main() {
     detected.push("grok");
     console.log("[grok] Detected (no instruction file mechanism)");
     if (apiKey) {
-      registerMcp("grok", `grok mcp add arkheia -t stdio -c mcp-server -e ARKHEIA_API_KEY="${apiKey}"`);
+      registerMcp("grok", ["grok", "mcp", "add", "arkheia", "-t", "stdio", "-c", "mcp-server", "-e", `ARKHEIA_API_KEY=${apiKey}`],
+        'grok mcp add arkheia -t stdio -c mcp-server -e ARKHEIA_API_KEY="$ARKHEIA_API_KEY"');
     } else {
       console.log('  [grok] Set ARKHEIA_API_KEY then run: grok mcp add arkheia -t stdio -c mcp-server -e ARKHEIA_API_KEY="$ARKHEIA_API_KEY"');
     }

@@ -63,7 +63,7 @@ function handleError(toolName: string, e: any) {
 // Main
 // ---------------------------------------------------------------------------
 
-const CURRENT_VERSION = "0.1.7";
+const CURRENT_VERSION = "1.2.2";
 
 async function checkForUpdate(): Promise<void> {
     // Check once per day — skip if checked recently
@@ -108,7 +108,9 @@ async function main() {
 
     loadConfig();
     checkCRLF();
-    checkForUpdate(); // fire-and-forget, don't await — never blocks startup
+    // Opt-in only: the check writes ~/.arkheia/.update-check, and a default run must change nothing in the user's
+    // home (B-288, Codex R1). Set ARKHEIA_UPDATE_CHECK=1 to enable it.
+    if (process.env.ARKHEIA_UPDATE_CHECK === "1") checkForUpdate(); // fire-and-forget, never blocks startup
 
     const ARKHEIA_PROXY_URL = process.env.ARKHEIA_PROXY_URL || "http://localhost:8098";
     const ARKHEIA_HOSTED_URL = process.env.ARKHEIA_HOSTED_URL || "https://arkheia-proxy-production.up.railway.app";
@@ -123,7 +125,7 @@ async function main() {
     }
 
     const proxy = new ProxyClient(ARKHEIA_PROXY_URL, 10.0, ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
-    const server = new McpServer({ name: "arkheia-trust", version: "0.1.6" });
+    const server = new McpServer({ name: "arkheia-trust", version: "1.2.2" });
 
     // ── Detection & audit ──────────────────────────────────────────
 
