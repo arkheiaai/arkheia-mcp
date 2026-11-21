@@ -42,6 +42,18 @@ class CodePointString extends z.ZodString {
         if (typeof input.data !== "string") return super._parse(input);
         const n = cp(input.data);
         for (const check of this._def.checks) {
+            if (check.kind === "regex" || check.kind === "email" || check.kind === "uuid") {
+                const re = check.kind === "email" ? EMAIL_PATTERN : check.kind === "uuid" ? UUID_PATTERN : check.regex;
+                if (!re.test(input.data)) {
+                    const ctx = this._getOrReturnCtx(input);
+                    z.addIssueToContext(ctx, {
+                        code: z.ZodIssueCode.invalid_string, validation: check.kind === "regex" ? "regex" : check.kind,
+                        message: check.kind === "email" ? "must be a valid email address" : check.kind === "uuid" ? "must be a UUID" : "has an invalid format",
+                    } as any);
+                    return z.INVALID;
+                }
+                continue;
+            }
             if ((check.kind === "min" && n < check.value) || (check.kind === "max" && n > check.value)) {
                 const ctx = this._getOrReturnCtx(input);
                 z.addIssueToContext(ctx, {
@@ -57,31 +69,39 @@ class CodePointString extends z.ZodString {
     }
 }
 
-const bounded = (min: number, max: number): z.ZodString => {
+// extra: published and enforced format checks the schema language can express (email, single-line pattern).
+const bounded = (min: number, max: number, extra: any[] = []): z.ZodString => {
     const checks: any[] = [];
     if (min > 0) checks.push({ kind: "min", value: min });
-    checks.push({ kind: "max", value: max });
+    checks.push({ kind: "max", value: max }, ...extra);
     return new CodePointString({ ...z.string()._def, checks });
 };
 
+// Published as format: uuid; enforced with the same loose pattern the service accepts (zod's own uuid check demands a version nibble).
+const uuidString = (): z.ZodString => new CodePointString({ ...z.string()._def, checks: [{ kind: "uuid" } as any] });
+
 export const feedbackShape = {
-    message: bounded(MESSAGE_MIN, MESSAGE_MAX),
+    message: bounded(MESSAGE_MIN, MESSAGE_MAX).describe(
+        `The feedback, ${MESSAGE_MIN} to ${MESSAGE_MAX} characters, and at least ${MESSAGE_MIN} after leading and trailing spaces are removed. No secrets or API keys.`),
     kind: z.enum(FEEDBACK_KINDS).optional(),
-    email: bounded(0, EMAIL_MAX).optional(),
-    submission_id: z.string().regex(UUID_PATTERN).optional(),
+    email: bounded(0, EMAIL_MAX, [{ kind: "email" }]).describe(
+        "Optional. A valid email address, used only to reply. Leave the field out if the user has not given one.").optional(),
+    submission_id: uuidString().optional().describe(
+        "Optional. The submission_id returned by an earlier attempt, to retry the same submission with every original argument unchanged."),
 };
 
 export const reportShape = {
     detection_id: z.string().regex(ID_PATTERN),
     outcome: z.enum(["wrong", "fine"]),
-    evidence: bounded(0, EVIDENCE_MAX).optional(),
+    evidence: bounded(0, EVIDENCE_MAX, [{ kind: "regex", regex: /^[^\r\n]*$/ }]).describe(
+        `Optional. One line (no line breaks), at most ${EVIDENCE_MAX} characters, saying how you know.`).optional(),
     category: z.enum(REPORT_CATEGORIES).optional(),
     reporter_kind: z.enum(["agent", "human"]).default("agent"),
 };
 
 export const reportsShape = {
     action: z.enum(["list", "delete"]),
-    report_id: z.string().optional(),
+    report_id: uuidString().optional().describe("Required for action delete: the report_id from arkheia_report or the list."),
     limit: z.number().int().min(1).max(100).default(20),
 };
 
@@ -166,8 +186,11 @@ function isoDateTime(v: unknown): boolean {
     const m = ISO_DATETIME.exec(v);
     if (!m) return false;
     const [y, mo, d, h, mi, sec] = [m[1], m[2], m[3], m[4], m[5], m[6]].map(Number);
-    const probe = new Date(Date.UTC(y, mo - 1, d, h, mi, sec));
-    if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d) return false;
+    // Calendar check done by hand: a Date constructor would remap years 0 to 99 to 1900 to 1999.
+    if (y < 1 || mo < 1 || mo > 12 || d < 1) return false;
+    const leap = y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+    const dim = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][mo - 1];
+    if (d > dim) return false;
     if (h > 23 || mi > 59 || sec > 59) return false;
     if (m[9] !== undefined && (Number(m[9]) > 23 || Number(m[10]) > 59)) return false;
     return true;
@@ -181,8 +204,9 @@ function validRow(x: any): PublicReport | undefined {
     if (typeof x.event_id !== "string" || !ID_PATTERN.test(x.event_id)) return undefined;
     if (x.outcome !== "wrong" && x.outcome !== "fine") return undefined;
     if (x.reporter_kind !== "agent" && x.reporter_kind !== "human") return undefined;
-    if (x.category !== undefined && x.category !== null && !(REPORT_CATEGORIES as readonly string[]).includes(x.category)) return undefined;
-    if (!optStr(x.evidence, EVIDENCE_MAX)) return undefined;
+    if (!("category" in x) || !("evidence" in x)) return undefined; // the service always sends both, possibly null
+    if (x.category !== null && !(REPORT_CATEGORIES as readonly string[]).includes(x.category)) return undefined;
+    if (!optStr(x.evidence, EVIDENCE_MAX) || x.evidence === undefined) return undefined;
     if (x.created_at !== null && !isoDateTime(x.created_at)) return undefined; // a datetime or explicit null; missing is invalid
     return {
         report_id: x.report_id, detection_id: x.event_id, outcome: x.outcome,
@@ -310,8 +334,11 @@ export class FeedbackClient {
         const what = "Your feedback";
         const { message, kind } = args;
         const email = args.email && args.email.trim() ? args.email.trim() : undefined;
-        if (args.submission_id !== undefined && !UUID_PATTERN.test(args.submission_id)) {
+        if (args.submission_id !== undefined && (!UUID_PATTERN.test(args.submission_id) || looksLikeCredential(args.submission_id, this.api_key))) {
             return refused(what, "submission_id must be a UUID, the one returned by an earlier attempt.", false);
+        }
+        if (kind !== undefined && !(FEEDBACK_KINDS as readonly string[]).includes(kind)) {
+            return refused(what, "kind is not one of the allowed values.", false);
         }
         if (cp(message.trim()) < MESSAGE_MIN) {
             return refused(what, `the message must have at least ${MESSAGE_MIN} characters.`, false);
@@ -368,8 +395,15 @@ export class FeedbackClient {
         reporter_kind?: "agent" | "human";
     }) {
         const what = "Your report";
+        // Every string that goes into a URL is checked before the URL is built, and no error repeats it.
         if (!ID_PATTERN.test(args.detection_id)) {
             return refused(what, "detection_id is not a valid id. Use the detection_id from the arkheia_verify result.", false);
+        }
+        if (looksLikeCredential(args.detection_id, this.api_key)) {
+            return refused(what, "detection_id looks like an API key or token, not a detection id. Use the detection_id from the arkheia_verify result.", false);
+        }
+        if (args.category !== undefined && !(REPORT_CATEGORIES as readonly string[]).includes(args.category)) {
+            return refused(what, "category is not one of the allowed values.", false);
         }
         const evidence = args.evidence && args.evidence.trim() ? args.evidence : undefined;
         if (evidence !== undefined) {
@@ -436,7 +470,7 @@ export class FeedbackClient {
 
     async delete_report(report_id: string | undefined) {
         const what = "The report";
-        if (!report_id || !UUID_PATTERN.test(report_id)) {
+        if (!report_id || !UUID_PATTERN.test(report_id) || looksLikeCredential(report_id, this.api_key)) {
             return { deleted: false as const, error: "The report was NOT deleted: report_id is required and must be the report_id returned by arkheia_report or the list." };
         }
         const early = this.precheck(what);

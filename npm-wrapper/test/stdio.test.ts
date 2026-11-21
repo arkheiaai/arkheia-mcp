@@ -154,3 +154,29 @@ test("run_ollama with the local verifier down sends nothing to the hosted servic
         assert.equal(log().filter((u) => u.startsWith("https://hosted.example.test")).length, 1, "only the ordinary verify reached the hosted origin");
     });
 });
+
+test("published schemas express the enforced rules, and calls enforce them", async () => {
+    await withServer({}, async (client) => {
+        const tools: any[] = (await client.listTools()).tools;
+        const props = (n: string) => tools.find((t) => t.name === n).inputSchema.properties;
+        const fb = props("arkheia_feedback");
+        assert.match(fb.message.description, /at least 5 after leading and trailing spaces are removed/);
+        assert.equal(fb.email.format, "email");
+        assert.match(fb.email.description, /Leave the field out/);
+        assert.equal(fb.submission_id.format, "uuid");
+        const ev = props("arkheia_report").evidence;
+        assert.ok(ev.pattern, "evidence has a single-line pattern");
+        assert.equal(new RegExp(ev.pattern).test("one line"), true);
+        assert.equal(new RegExp(ev.pattern).test("two\nlines"), false);
+        assert.equal(props("arkheia_reports").report_id.format, "uuid");
+
+        const refused = async (name: string, args: any) => {
+            try { const r: any = await client.callTool({ name, arguments: args }); return !!r.isError; } catch { return true; }
+        };
+        assert.ok(await refused("arkheia_feedback", { message: "hello there", email: "not-an-email" }));
+        assert.ok(await refused("arkheia_report", { detection_id: "det_0123456789abcdef", outcome: "fine", evidence: "a\nb" }));
+        assert.ok(await refused("arkheia_reports", { action: "delete", report_id: "x" }));
+        assert.ok(await refused("arkheia_report", { detection_id: "ak_live_" + "A".repeat(24), outcome: "fine" }), "key-shaped detection_id refused through the tool");
+        assert.ok(!(await refused("arkheia_feedback", { message: "hello there", email: "a@b.co" })));
+    });
+});

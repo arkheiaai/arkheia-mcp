@@ -15,8 +15,7 @@ npm install -g @arkheia/mcp-server
 ```
 
 You'll need:
-- Node.js 20+
-- Python 3.10-3.13 (used by the package's setup script)
+- Node.js 20+ (the npm package needs no Python)
 - An API key (free — see below)
 
 ## Get an API Key
@@ -28,6 +27,8 @@ curl -X POST https://arkheia-proxy-production.up.railway.app/v1/provision \
 ```
 
 Save the key. You won't see it again.
+
+New keys need email confirmation: we email a link to the address you gave. The key works once you open the link and press Confirm; a request that is not confirmed within 24 hours is deleted, and you can ask again.
 
 ## Add to Your Agent
 
@@ -192,6 +193,7 @@ If you're using it — whether you love it, hate it, or wish it did something di
 
 - **GitHub Issues:** https://github.com/arkheiaai/arkheia-mcp/issues — bugs, feature requests, questions
 - **Email:** dmurfet@arkheia.ai — anything at all
+- **From your agent:** with the npm package installed, ask it to use `arkheia_feedback` to send short feedback, or `arkheia_report` to say whether a checked response was really wrong or fine. Each returns an id from the service on success and says plainly when it could not confirm that the message was stored. See [Sending feedback](npm-wrapper/README.md#sending-feedback).
 
 Every message is read. Every piece of feedback shapes what we build next.
 

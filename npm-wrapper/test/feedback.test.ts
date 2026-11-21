@@ -805,3 +805,71 @@ test("root README points to the npm package, says Node 20+ and describes the Pyt
     assert.match(readme, /does \*\*not\*\* include `arkheia_feedback`/);
     assert.ok(!/"args": \["-m", "mcp_server\.server"\]/.test(readme), "no Python registration snippet as the main route");
 });
+
+// ---- round 5 -----------------------------------------------------------------
+
+test("a key pasted into any string that reaches a URL (or the body id) is refused locally, with zero transport calls", async () => {
+    mockFetch((u) => json(201, ackFor(u)));
+    const keyShaped = ["ak_live_" + "A".repeat(24), "ak_test_" + "b1".repeat(12), KEY, "sk-" + "a".repeat(30)];
+    for (const k of keyShaped) {
+        const r: any = await client().send_report({ detection_id: k, outcome: "wrong" });
+        assert.equal(r.recorded, false, k);
+        assert.ok(!r.error.includes(k), "the error does not repeat the input");
+        const d: any = await client().delete_report(k);
+        assert.equal(d.deleted, false);
+        assert.ok(!d.error.includes(k));
+        const f: any = await client().send_feedback({ message: "hello there", submission_id: k });
+        assert.equal(f.recorded, false);
+        assert.ok(!JSON.stringify(f).includes(k));
+    }
+    assert.equal(calls.length, 0, "no request was made");
+    // the error for a key-shaped id is its own fixed message
+    const r: any = await client().send_report({ detection_id: KEY, outcome: "wrong" });
+    assert.match(r.error, /looks like an API key or token, not a detection id/);
+    // ordinary ids still work
+    assert.equal(((await client().send_report({ detection_id: DID, outcome: "wrong" })) as any).recorded, true);
+    mockFetch(() => new Response(null, { status: 204 }));
+    assert.equal(((await client().delete_report(FID)) as any).deleted, true);
+    mockFetch((u) => json(201, ackFor(u)));
+    assert.equal(((await client().send_feedback({ message: "hello there", submission_id: FID })) as any).recorded, true);
+});
+
+test("the client rejects values outside the closed lists without sending", async () => {
+    mockFetch((u) => json(201, ackFor(u)));
+    assert.equal(((await client().send_feedback({ message: "hello there", kind: "ak_live_" + "A".repeat(24) })) as any).recorded, false);
+    assert.equal(((await client().send_report({ detection_id: DID, outcome: "wrong", category: "nope" })) as any).recorded, false);
+    assert.equal(calls.length, 0);
+});
+
+test("list rows must carry evidence and category (possibly null); years 0001-0099 are valid dates", async () => {
+    const base: any = { report_id: FID, event_id: DID, outcome: "fine", reporter_kind: "human", created_at: null };
+    const run = async (row: any) => ((await client().list_reports()) as any).reports !== undefined;
+    for (const [row, ok] of [
+        [{ ...base, evidence: null, category: null }, true],
+        [{ ...base, category: null }, false],
+        [{ ...base, evidence: null }, false],
+        [{ ...base }, false],
+    ] as const) {
+        mockFetch(() => json(200, { reports: [row] }));
+        assert.equal(await run(row), ok, JSON.stringify(Object.keys(row)));
+    }
+    const full = { ...base, evidence: null, category: null };
+    for (const [value, ok] of [["0001-01-01T00:00:00Z", true], ["0099-12-31T23:59:59Z", true], ["0004-02-29T00:00:00Z", true],
+        ["0100-02-29T00:00:00Z", false], ["0000-01-01T00:00:00Z", false], ["1900-02-29T00:00:00Z", false], ["2000-02-29T00:00:00Z", true]] as const) {
+        mockFetch(() => json(200, { reports: [{ ...full, created_at: value }] }));
+        assert.equal(await run(full), ok, value);
+    }
+});
+
+test("AGENTS.md points to the npm instructions and names the feedback tools; the root README needs no Python for npm", () => {
+    const root = path.join(__dirname, "..", "..", "..");
+    const agents = fs.readFileSync(path.join(root, "AGENTS.md"), "utf8");
+    assert.ok(!/single source of truth/i.test(agents));
+    assert.match(agents, /npm install -g @arkheia\/mcp-server/);
+    for (const t of ["arkheia_feedback", "arkheia_report", "arkheia_reports"]) assert.ok(agents.includes(t), t);
+    const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+    assert.ok(!/Python 3\.10-3\.13/.test(readme));
+    assert.match(readme, /needs no Python/);
+    assert.match(readme, /press Confirm/);
+    assert.match(readme, /arkheia_feedback/);
+});
