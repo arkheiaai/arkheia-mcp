@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.DEFAULT_VERIFIER_URL = exports.DEFAULT_OLLAMA_URL = exports.HOSTED_API_URL = void 0;
 exports.isLoopbackOrigin = isLoopbackOrigin;
 exports.displayHost = displayHost;
+exports.displayOrigin = displayOrigin;
 exports.isArkheiaHostedOrigin = isArkheiaHostedOrigin;
 exports.computeEgress = computeEgress;
 exports.applyEgress = applyEgress;
@@ -34,6 +35,18 @@ function isLoopbackOrigin(value) {
 function displayHost(value) {
     try {
         return new URL(value || "").host || "an address that is not valid";
+    }
+    catch {
+        return "an address that is not valid";
+    }
+}
+/** Scheme, host and port only, never userinfo, path or query; safe to print in a diagnostic. */
+function displayOrigin(value) {
+    try {
+        const u = new URL(value || "");
+        if (u.protocol !== "http:" && u.protocol !== "https:")
+            return "an address that is not valid";
+        return `${u.protocol}//${u.host}`;
     }
     catch {
         return "an address that is not valid";

@@ -22,6 +22,15 @@ export function displayHost(value: string | undefined | null): string {
     try { return new URL(value || "").host || "an address that is not valid"; } catch { return "an address that is not valid"; }
 }
 
+/** Scheme, host and port only, never userinfo, path or query; safe to print in a diagnostic. */
+export function displayOrigin(value: string | undefined | null): string {
+    try {
+        const u = new URL(value || "");
+        if (u.protocol !== "http:" && u.protocol !== "https:") return "an address that is not valid";
+        return `${u.protocol}//${u.host}`;
+    } catch { return "an address that is not valid"; }
+}
+
 /**
  * True when the address is the Arkheia hosted service: the built-in hosted origin or the configured custom hosted
  * URL (origins compared parsed: host case-insensitive, default ports normalised). An address that cannot be parsed is

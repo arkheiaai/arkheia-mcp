@@ -1,4 +1,6 @@
 import * as crypto from 'crypto';
+import { displayOrigin } from './egress.js';
+import { looksLikeCredential } from './feedback.js';
 
 // Node.js native fetch doesn't have a global logger, use console
 const logger = {
@@ -28,6 +30,25 @@ function _prompt_hash(prompt: string): string {
     return crypto.createHash('sha256').update(prompt).digest('hex');
 }
 
+// A caller-chosen model name goes into diagnostics, results and (Gemini) the request path, so it is
+// checked first: a conservative character set, no path tricks, and never anything shaped like a key.
+const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/;
+const MODEL_PATTERN_NO_SLASH_COLON = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/** Returns a fixed error code when the model name must be refused, else null. Never repeats the name. */
+export function modelNameError(model: string, strict = false): string | null {
+    if (typeof model !== "string") return "invalid_model_name";
+    if (!(strict ? MODEL_PATTERN_NO_SLASH_COLON : MODEL_PATTERN).test(model)) return "invalid_model_name";
+    if (model.includes("..") || model.includes("//")) return "invalid_model_name";
+    if (looksLikeCredential(model, process.env.ARKHEIA_API_KEY)) return "invalid_model_name";
+    return null;
+}
+
+function _refused_model(prompt: string): ProviderResult {
+    // The refused name is not echoed back.
+    return _err_response("", prompt, "invalid_model_name");
+}
+
 function _err_response(model: string, prompt: string, error: string): ProviderResult {
     return {
         response: `[provider_error: ${error}]`,
@@ -46,6 +67,7 @@ export async function call_grok(
     model: string = "grok-4-fast-non-reasoning",
     kwargs: Record<string, any> = {},
 ): Promise<ProviderResult> {
+    if (modelNameError(model, false)) return _refused_model(prompt);
     /**
      * Call xAI Grok chat completions API.
      *
@@ -120,6 +142,7 @@ export async function call_gemini(
     max_output_tokens: number = 1000,
     kwargs: Record<string, any> = {},
 ): Promise<ProviderResult> {
+    if (modelNameError(model, true)) return _refused_model(prompt);
     /**
      * Call Google Gemini generateContent API.
      *
@@ -133,7 +156,7 @@ export async function call_gemini(
         return _err_response(model, prompt, "GOOGLE_API_KEY not set");
     }
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), _DEFAULT_TIMEOUT);
@@ -200,6 +223,7 @@ export async function call_together(
     max_tokens: number = 2048,
     kwargs: Record<string, any> = {},
 ): Promise<ProviderResult> {
+    if (modelNameError(model, false)) return _refused_model(prompt);
     /**
      * Call Together AI chat completions API (OpenAI-compatible).
      *
@@ -278,6 +302,7 @@ export async function call_ollama(
     model: string = "phi4:14b",
     kwargs: Record<string, any> = {},
 ): Promise<ProviderResult> {
+    if (modelNameError(model, false)) return _refused_model(prompt);
     /**
      * Call local Ollama model via /api/generate (non-streaming).
      *
@@ -333,7 +358,7 @@ export async function call_ollama(
             logger.error(`call_ollama: request timed out for model=${model}`);
             return _err_response(model, prompt, "timeout");
         } else if (e.name === 'TypeError' && e.message.includes('fetch failed')) {
-            logger.error(`call_ollama: cannot connect to Ollama at ${base_url}`);
+            logger.error(`call_ollama: cannot connect to Ollama at ${displayOrigin(base_url)}`);
             return _err_response(model, prompt, "ollama_unavailable");
         } else {
             logger.error(`call_ollama: unexpected error: ${e.message}`);

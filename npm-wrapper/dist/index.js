@@ -61,7 +61,7 @@ function loadConfig() {
         }
         if (config.proxy_url && !process.env.ARKHEIA_HOSTED_URL) {
             process.env.ARKHEIA_HOSTED_URL = config.proxy_url;
-            process.stderr.write(`[arkheia] Hosted URL: ${config.proxy_url}\n`);
+            process.stderr.write(`[arkheia] Hosted URL: ${(0, egress_js_1.displayOrigin)(config.proxy_url)}\n`);
         }
     }
     catch (e) {
@@ -247,7 +247,7 @@ async function main() {
             const ollamaUrl = process.env.OLLAMA_BASE_URL || egress_js_1.DEFAULT_OLLAMA_URL;
             if ((0, egress_js_1.isArkheiaHostedOrigin)(ollamaUrl, process.env.ARKHEIA_HOSTED_URL)) {
                 const err = "configuration_error: OLLAMA_BASE_URL is the Arkheia hosted service (or cannot be read as an address); nothing was sent. Set it to your Ollama server.";
-                return wrapResult({ response: "", model, error: err, arkheia: (0, feedback_js_1.withReportability)({ risk_level: "UNKNOWN", error: "not_checked_ollama_address_not_usable" }) });
+                return wrapResult({ response: "", model: (0, providers_js_1.modelNameError)(model) ? "" : model, error: err, arkheia: (0, feedback_js_1.withReportability)({ risk_level: "UNKNOWN", error: "not_checked_ollama_address_not_usable" }) });
             }
             const pr = await (0, providers_js_1.call_ollama)(prompt, model);
             if (pr.error)

@@ -11,13 +11,9 @@ Free tier: 1,500 detections/month. No credit card.
 ```
 Requires:
   - Node 20+
-  - Python 3.10–3.13 with working pyexpat
-
-macOS note: Homebrew's current `brew install python` installs 3.14,
-which has a broken pyexpat link. Use `brew install python@3.12` until
-Homebrew ships a fix. Verify with:
-  python3.12 -c "import pyexpat, ensurepip"
 ```
+
+The npm package is a Node program and needs no Python.
 
 ## Install
 
@@ -180,13 +176,17 @@ Manage your account at [arkheia.ai/mcp/account](https://arkheia.ai/mcp/account).
 
 ## Troubleshooting
 
-**"Python 3.10+ is required but not found"** — Install Python 3.12: `brew install python@3.12` (macOS) or download from [python.org](https://python.org).
-
-**"No module named pip"** — Your Python installation has broken pip (common with Python 3.14 on macOS). Delete `~/.arkheia/venv` and switch to Python 3.12: `brew install python@3.12`.
-
 **Server registered but tools not showing** — Restart your CLI session. MCP registrations are not hot-reloaded.
 
 **API key rejected** — Check for trailing whitespace or `\r` characters. If your env file was created on Windows, run `dos2unix` on it. The server will warn about this on startup.
+
+## The separate Python server
+
+The repository also contains a separate Python MCP server with nine tools (no feedback tools). It is not part of the npm package. If you use it, you need Python 3.10 to 3.13 with a working `pyexpat`. On macOS, Homebrew's current `brew install python` installs 3.14, which has a broken `pyexpat` link; use `brew install python@3.12` and check with `python3.12 -c "import pyexpat, ensurepip"`.
+
+**"Python 3.10+ is required but not found"** — Install Python 3.12: `brew install python@3.12` (macOS) or download from [python.org](https://python.org).
+
+**"No module named pip"** — Your Python installation has broken pip (common with Python 3.14 on macOS). Delete `~/.arkheia/venv` and switch to Python 3.12: `brew install python@3.12`.
 
 ## Full Documentation
 

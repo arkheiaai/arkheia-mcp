@@ -7,7 +7,8 @@
 #   curl -fsSL https://arkheia.ai/install-mcp | bash -s -- --api-key ak_live_...
 #
 # What it does:
-#   1. Checks prerequisites (Node.js 18+, Python 3.10+)
+#   1. Checks prerequisites (Node.js 20+; Python 3.10+ is used only by this script to edit your
+#      MCP config files, the server itself is Node and needs no Python)
 #   2. Provisions a free-tier API key (or uses the one you provide)
 #   3. Installs @arkheia/mcp-server via npx
 #   4. Writes Claude Desktop / Claude Code MCP config
@@ -60,13 +61,13 @@ done
 # ---------------------------------------------------------------------------
 info "Checking prerequisites..."
 
-# Node.js 18+
+# Node.js 20+
 if ! command -v node &>/dev/null; then
     fail "Node.js is required but not found. Install from https://nodejs.org"
 fi
 NODE_VERSION=$(node -v | sed 's/v//' | cut -d. -f1)
-if [ "$NODE_VERSION" -lt 18 ]; then
-    fail "Node.js 18+ required (found v$(node -v)). Update from https://nodejs.org"
+if [ "$NODE_VERSION" -lt 20 ]; then
+    fail "Node.js 20+ required (found v$(node -v)). Update from https://nodejs.org"
 fi
 ok "Node.js $(node -v)"
 
@@ -75,7 +76,7 @@ if ! command -v npx &>/dev/null; then
     fail "npx is required but not found. It should come with Node.js."
 fi
 
-# Python 3.10+
+# Python 3.10+ (used only by this script, to edit config JSON)
 PYTHON_CMD=""
 for cmd in python3 python; do
     if command -v "$cmd" &>/dev/null; then
@@ -169,7 +170,7 @@ case "$VERIFY_CODE" in
 esac
 
 # ---------------------------------------------------------------------------
-# Install the npm package (this also sets up the Python venv)
+# Install the npm package
 # ---------------------------------------------------------------------------
 info "Installing @arkheia/mcp-server..."
 npx @arkheia/mcp-server --version 2>/dev/null || true

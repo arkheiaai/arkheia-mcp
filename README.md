@@ -199,9 +199,8 @@ Every message is read. Every piece of feedback shapes what we build next.
 
 ## Requirements
 
-- Python 3.10+
-- Node.js 20+
-- Git
+- Node.js 20+. The npm package needs no Python.
+- Only for the separate Python server in this repository (nine tools, no feedback tools): Python 3.10+ and Git.
 
 ## Links
 

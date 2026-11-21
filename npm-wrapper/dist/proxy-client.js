@@ -55,7 +55,7 @@ class ProxyClient {
             }
             // Local proxy down -- fall through to hosted
             this._local_available = false;
-            logger.info(`Local proxy unavailable, falling back to hosted API at ${this.hosted_url}`);
+            logger.info(`Local proxy unavailable, falling back to hosted API at ${(0, egress_js_1.displayOrigin)(this.hosted_url)}`);
         }
         // Fallback: hosted API
         if (this.api_key) {
@@ -109,7 +109,7 @@ class ProxyClient {
                 return _unavailable("proxy_timeout");
             }
             else if (e.name === 'TypeError' && e.message.includes('fetch failed')) { // Common for network errors like connection refused
-                logger.warn(`ProxyClient: cannot connect to proxy at ${this.base_url}`);
+                logger.warn(`ProxyClient: cannot connect to proxy at ${(0, egress_js_1.displayOrigin)(this.base_url)}`);
                 return _unavailable("proxy_unavailable");
             }
             else {
@@ -169,7 +169,7 @@ class ProxyClient {
                 return _unavailable("hosted_timeout");
             }
             else if (e.name === 'TypeError' && e.message.includes('fetch failed')) {
-                logger.warn(`ProxyClient: cannot connect to hosted API at ${this.hosted_url}`);
+                logger.warn(`ProxyClient: cannot connect to hosted API at ${(0, egress_js_1.displayOrigin)(this.hosted_url)}`);
                 return _unavailable("hosted_unavailable");
             }
             else {
@@ -211,7 +211,7 @@ class ProxyClient {
                 return _empty_log("proxy_timeout");
             }
             else if (e.name === 'TypeError' && e.message.includes('fetch failed')) {
-                logger.warn(`ProxyClient: cannot connect to proxy at ${this.base_url}`);
+                logger.warn(`ProxyClient: cannot connect to proxy at ${(0, egress_js_1.displayOrigin)(this.base_url)}`);
                 return _empty_log("proxy_unavailable");
             }
             else {
