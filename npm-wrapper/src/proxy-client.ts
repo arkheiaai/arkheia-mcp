@@ -1,4 +1,5 @@
 import { URLSearchParams } from 'url';
+import { sameOrigin } from './egress.js';
 
 // Node.js native fetch doesn't have a global logger
 const logger = {
@@ -65,6 +66,11 @@ export class ProxyClient {
          * Never raises -- returns UNKNOWN on any error.
          */
         if (options.allowHosted === false) {
+            // A verifier address equal to the hosted origin would route this path to the hosted service: refuse.
+            if (sameOrigin(this.base_url, this.hosted_url)) {
+                logger.warn("The verifier address is the hosted service; this response is local-only, so nothing was sent");
+                return _unavailable("not_checked_local_verification_unavailable");
+            }
             const local = await this._verify_local(prompt, response, model_id, session_id);
             if (local.error === "proxy_unavailable" || local.error === "proxy_timeout") {
                 logger.warn("Local verification unavailable; this response is local-only, so nothing was sent to the hosted service");
@@ -130,6 +136,7 @@ export class ProxyClient {
                         "Content-Type": "application/json",
                     },
                     body: JSON.stringify(payload),
+                    redirect: "error", // a redirect is never followed: the request goes only to the configured address
                     signal: controller.signal,
                 }
             );
@@ -249,6 +256,7 @@ export class ProxyClient {
                 `${this.base_url}/audit/log?${params.toString()}`,
                 {
                     method: "GET",
+                    redirect: "error", // a redirect is never followed: the request goes only to the configured address
                     signal: controller.signal,
                 }
             );

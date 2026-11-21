@@ -8,6 +8,7 @@ import * as fs from 'fs';
 
 import { ProxyClient } from './proxy-client.js';
 import { check, PolicyViolation } from './tool-registry.js';
+import { applyEgress } from './egress.js';
 import { call_grok, call_gemini, call_ollama, call_together } from './providers.js';
 import { store_entity, retrieve_entities, store_relation } from './memory.js';
 
@@ -77,6 +78,7 @@ async function checkForUpdate(): Promise<void> {
 
     try {
         const resp = await fetch('https://registry.npmjs.org/@arkheia/mcp-server/latest', {
+            redirect: 'error',
             signal: AbortSignal.timeout(5000),
         });
         if (resp.ok) {
@@ -124,6 +126,7 @@ async function main() {
         );
     }
 
+    const egress = applyEgress(process.env);
     const proxy = new ProxyClient(ARKHEIA_PROXY_URL, 10.0, ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
     const server = new McpServer({ name: "arkheia-trust", version: "1.2.4" });
 
@@ -144,7 +147,7 @@ async function main() {
 
     server.tool(
         "arkheia_audit_log",
-        "Retrieve structured audit evidence for compliance review.",
+        egress.arkheia_audit_log.description,
         { session_id: z.string().optional(), limit: z.number().int().min(1).max(500).default(50) },
         async ({ session_id, limit }) => {
             try {
@@ -189,7 +192,7 @@ async function main() {
 
     server.tool(
         "run_ollama",
-        "Call a local Ollama model and screen the response through the local Arkheia verifier only. Nothing is sent off this machine; if the local verifier is unavailable the response is returned unchecked and marked not checked.",
+        egress.run_ollama.description,
         { prompt: z.string(), model: z.string().default("phi4:14b") },
         async ({ prompt, model }) => {
             try {
