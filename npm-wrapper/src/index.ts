@@ -161,18 +161,18 @@ async function main() {
     // These return only whether the server stored the item, and its id. They never carry a verdict.
 
     function wrapFeedback(result: any) {
-        const failed = result.recorded === false || result.deleted === false || (result.ok === false);
+        const failed = result.recorded === false || result.recorded === "unknown" || result.deleted === false || result.deleted === "unknown" || result.ok === false;
         return { ...wrapResult(result), ...(failed ? { isError: true } : {}) };
     }
 
     function feedbackError(toolName: string, e: any) {
         process.stderr.write(`[arkheia] ${toolName} failed unexpectedly\n`);
-        return wrapFeedback({ recorded: false, retryable: true, error: "Nothing was recorded: the request failed unexpectedly inside the tool. It is safe to try again." });
+        return wrapFeedback({ recorded: "unknown", retryable: true, error: "The tool failed unexpectedly, so it is not known whether anything was recorded. Check before sending again." });
     }
 
     server.tool(
         "arkheia_feedback",
-        "Send short feedback about Arkheia to its makers: a bug, a false alarm, a missed problem, a feature request, or praise. Use it when the user asks to give feedback, or when you hit a problem with Arkheia itself. Only what you pass here is sent. The email is optional, is used only to reply, and should be left out unless the user gives it. Do not include secrets or API keys. Success is reported only with an id from the server.",
+        "Send short feedback about Arkheia to its makers: a bug, a false alarm, a missed problem, a feature request, or praise. Use it when the user asks to give feedback, or when you hit a problem with Arkheia itself. Only what you pass here is sent. The email is optional, is used only to reply, and should be left out unless the user gives it. Do not include secrets or API keys. Success is reported only when the service returns an id; if the answer is lost the result says 'unknown', and you can pass the returned submission_id back in to retry the same submission.",
         feedbackShape,
         async (args) => {
             try {
@@ -184,7 +184,7 @@ async function main() {
 
     server.tool(
         "arkheia_report",
-        "Say whether a response that arkheia_verify checked was really wrong or fine. Pass the detection_id field from that arkheia_verify result. outcome 'wrong' means the model's response was fabricated or incorrect, 'fine' means it was correct; this grades the model's response, not Arkheia's score. Give one line of evidence if you checked, and reporter_kind 'human' only when the user is reporting. One report per detection; success is reported only with a report_id from the server.",
+        "Say whether a response that arkheia_verify checked was really wrong or fine. Pass the detection_id field from that arkheia_verify result. outcome 'wrong' means the model's response was fabricated or incorrect, 'fine' means it was correct; this grades the model's response, not Arkheia's score. Give one line of evidence if you checked, and reporter_kind 'human' only when the user is reporting. One report per detection; success is reported only when the service returns a report_id. If the result is 'unknown' or says a report already exists, check arkheia_reports (action list) instead of sending again.",
         reportShape,
         async (args) => {
             try {

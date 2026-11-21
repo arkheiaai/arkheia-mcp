@@ -1,7 +1,12 @@
 import * as crypto from 'crypto';
 
 // Node.js native fetch doesn't have a global logger, use console
-const logger = console;
+const logger = {
+    // stdout carries the MCP protocol; log lines go to stderr only.
+    info: (m: string) => { process.stderr.write(`${m}\n`); },
+    warn: (m: string) => { process.stderr.write(`${m}\n`); },
+    error: (m: string) => { process.stderr.write(`${m}\n`); },
+};
 
 const _DEFAULT_TIMEOUT = 60 * 1000; // 60 seconds in milliseconds
 const _OLLAMA_TIMEOUT = 120 * 1000; // 120 seconds in milliseconds

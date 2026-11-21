@@ -1,6 +1,9 @@
 import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { z } from 'zod';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as http from 'http';
 import {
     FeedbackClient, feedbackShape, reportShape, reportsShape, looksLikeCredential,
 } from '../src/feedback.js';
@@ -39,7 +42,9 @@ test("feedback: success returns the server id; current and #230-style replies bo
         const r: any = await client().send_feedback({ message: "The check flagged a correct answer.", kind: "false_alarm" });
         assert.equal(r.recorded, true);
         assert.equal(r.feedback_id, FID);
-        assert.deepEqual(Object.keys(r).sort(), ["feedback_id", "note", "recorded"]);
+        assert.deepEqual(Object.keys(r).sort(), ["feedback_id", "note", "recorded", "submission_id"]);
+        assert.ok(!/Recorded by the Arkheia service/.test(r.note));
+        assert.match(r.note, /acknowledged/);
     }
 });
 
@@ -76,80 +81,159 @@ test("report: body has exactly the expected fields and goes to the id's path", a
     assert.deepEqual(JSON.parse(calls[0].init.body), { outcome: "fine", reporter_kind: "agent" });
 });
 
-// ---- failures --------------------------------------------------------------
+// ---- failures: three honest outcomes ---------------------------------------
 
-const failures: [string, () => Response | Promise<Response>][] = [
+const refusals: [string, () => Response | Promise<Response>][] = [
     ["400", () => json(400, { detail: "Feedback message too short" })],
     ["401", () => json(401, { detail: "bad key" })],
     ["429", () => json(429, { detail: "slow down" })],
+    ["409 (changed-service shape)", () => json(409, { detail: { status: "conflict", message: "used" } })],
+];
+const uncertain: [string, () => Response | Promise<Response>][] = [
     ["500", () => json(500, { detail: "boom" })],
-    ["503 (#230 shape)", () => json(503, { detail: { feedback_id: FID, status: "unavailable", code: "feedback_unavailable", message: "Retry." } }, { "Retry-After": "30" })],
-    ["409 (#230 shape)", () => json(409, { detail: { status: "conflict", message: "used" } })],
+    ["503 (changed-service shape)", () => json(503, { detail: { feedback_id: FID, status: "unavailable" } }, { "Retry-After": "30" })],
     ["malformed json", () => new Response("<html>", { status: 201 })],
     ["201 without id", () => json(201, { status: "received" })],
     ["201 with empty id", () => json(201, { feedback_id: "" })],
     ["201 with non-string id", () => json(201, { feedback_id: 5 })],
 ];
-for (const [name, h] of failures) {
-    test(`feedback: ${name} -> NOT recorded, never success`, async () => {
+for (const [name, h] of refusals) {
+    test(`feedback: ${name} -> recorded:false, no retry`, async () => {
         mockFetch(h);
         const r: any = await client().send_feedback({ message: "hello there" });
         assert.equal(r.recorded, false);
         assert.match(r.error, /NOT recorded/);
         assert.equal(r.feedback_id, undefined);
-        assert.ok(!/thank/i.test(r.error));
-        assert.equal(calls.length, 1, "no automatic retry on an HTTP answer");
+        assert.match(r.submission_id, /^[0-9a-f-]{36}$/);
+        assert.equal(calls.length, 1);
     });
-    test(`report: ${name} -> NOT recorded, never success`, async () => {
+}
+for (const [name, h] of uncertain) {
+    test(`feedback: ${name} -> recorded:"unknown" with the submission_id, no retry`, async () => {
+        mockFetch(h);
+        const r: any = await client().send_feedback({ message: "hello there" });
+        assert.equal(r.recorded, "unknown");
+        assert.equal(r.feedback_id, undefined);
+        assert.match(r.error, /may or may not have been recorded/);
+        assert.ok(r.error.includes(r.submission_id), "advice names the same submission_id");
+        assert.match(r.error, /same submission_id/);
+        assert.equal(calls.length, 1, "no automatic retry after a possibly-sent write");
+    });
+}
+for (const [name, h] of [...refusals, ...uncertain]) {
+    test(`report: ${name} -> never success, no retry`, async () => {
         mockFetch(h);
         const r: any = await client().send_report({ detection_id: DID, outcome: "fine" });
-        assert.equal(r.recorded, false);
-        assert.match(r.error, /NOT recorded/);
+        assert.notEqual(r.recorded, true);
         assert.equal(r.report_id, undefined);
+        assert.equal(calls.length, 1);
     });
 }
 
-test("network error: one retry with the same body, then NOT recorded", async () => {
-    mockFetch(() => { throw new TypeError("fetch failed"); });
+test("a caller-supplied submission_id is reused in the body and returned", async () => {
+    const sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    mockFetch(() => json(500, {}));
+    const r: any = await client().send_feedback({ message: "hello there", submission_id: sid });
+    assert.equal(JSON.parse(calls[0].init.body).submission_id, sid);
+    assert.equal(r.submission_id, sid);
+    mockFetch(() => json(201, { feedback_id: FID }));
+    const ok: any = await client().send_feedback({ message: "hello there", submission_id: sid });
+    assert.equal(ok.recorded, true);
+    assert.equal(ok.submission_id, sid);
+    assert.equal(((await client().send_feedback({ message: "hello there", submission_id: "nope" })) as any).recorded, false);
+    assert.ok(z.object(feedbackShape).safeParse({ message: "hello there", submission_id: sid }).success);
+    assert.ok(!z.object(feedbackShape).safeParse({ message: "hello there", submission_id: "x" }).success);
+});
+
+const refusedConn = () => { throw new TypeError("fetch failed", { cause: Object.assign(new Error("x"), { code: "ECONNREFUSED" }) }); };
+
+test("provably unsent (connection refused): one retry with the same body, then recorded:false", async () => {
+    mockFetch(refusedConn);
     const r: any = await client().send_feedback({ message: "hello there" });
     assert.equal(r.recorded, false);
-    assert.equal(r.retryable, true);
-    assert.match(r.error, /NOT recorded/);
+    assert.match(r.error, /nothing was sent/);
     assert.equal(calls.length, 2);
     assert.equal(calls[0].init.body, calls[1].init.body);
 });
 
-test("network error then success on the retry is recorded", async () => {
-    mockFetch((_u, _i, n) => { if (n === 1) throw new TypeError("fetch failed"); return json(201, { feedback_id: FID }); });
+test("provably unsent, then success on the retry", async () => {
+    mockFetch((_u, _i, n) => { if (n === 1) return refusedConn(); return json(201, { feedback_id: FID }); });
     const r: any = await client().send_feedback({ message: "hello there" });
     assert.equal(r.recorded, true);
     assert.equal(calls.length, 2);
-    assert.equal(calls[0].init.body, calls[1].init.body);
 });
 
-test("timeout: aborts, retries once, then NOT recorded", async () => {
+test("connection error that may follow sending: unknown, NO retry (feedback and report)", async () => {
+    mockFetch(() => { throw new TypeError("fetch failed", { cause: Object.assign(new Error("x"), { code: "ECONNRESET" }) }); });
+    let r: any = await client().send_feedback({ message: "hello there" });
+    assert.equal(r.recorded, "unknown");
+    assert.equal(calls.length, 1);
+    r = await client().send_report({ detection_id: DID, outcome: "fine" });
+    assert.equal(r.recorded, "unknown");
+    assert.match(r.error, /arkheia_reports/);
+    assert.equal(calls.length, 2, "one call each, no retries");
+    mockFetch(() => { throw new TypeError("fetch failed"); });
+    assert.equal(((await client().send_feedback({ message: "hello there" })) as any).recorded, "unknown");
+    assert.equal(calls.length, 1);
+});
+
+test("timeout while waiting for headers: unknown, no retry", async () => {
     mockFetch((_u, init) => new Promise((_res, rej) => {
         init.signal.addEventListener("abort", () => { const e: any = new Error("aborted"); e.name = "AbortError"; rej(e); });
     }));
     const r: any = await client().send_feedback({ message: "hello there" });
-    assert.equal(r.recorded, false);
+    assert.equal(r.recorded, "unknown");
     assert.match(r.error, /did not answer in time/);
-    assert.equal(calls.length, 2);
-});
-
-test("4xx is never retried", async () => {
-    mockFetch(() => json(422, { detail: [{ msg: "x" }] }));
-    await client().send_report({ detection_id: DID, outcome: "fine" });
     assert.equal(calls.length, 1);
 });
 
-test("report 404 and 409 give specific not-recorded messages", async () => {
+test("deadline covers the body: headers arrive, body never does -> unknown within the deadline", async () => {
+    const hang = { ok: true, status: 201, text: () => new Promise<string>(() => { /* never */ }) };
+    mockFetch(() => hang as any);
+    const t0 = Date.now();
+    const r: any = await new FeedbackClient(BASE, KEY, 100).send_feedback({ message: "hello there" });
+    assert.ok(Date.now() - t0 < 1000, "returned promptly");
+    assert.equal(r.recorded, "unknown");
+    assert.equal(r.feedback_id, undefined);
+    assert.equal(calls.length, 1);
+    const l: any = await new FeedbackClient(BASE, KEY, 100).list_reports();
+    assert.equal(l.recorded, false);
+});
+
+test("a body that stalls on a real stream is also cut off", async () => {
+    mockFetch(() => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode("{")); } }), { status: 201 }));
+    const r: any = await new FeedbackClient(BASE, KEY, 100).send_feedback({ message: "hello there" });
+    assert.equal(r.recorded, "unknown");
+});
+
+test("server error text is never passed through: a 500 reflecting the key and a token yields neither", async () => {
+    const token = "Bearer abcdefghijklmnopqrstuvwx";
+    mockFetch(() => json(500, { detail: `failed for key ${KEY} with ${token}` }));
+    for (const r of [
+        await client().send_feedback({ message: "hello there" }),
+        await client().send_report({ detection_id: DID, outcome: "fine" }),
+        await client().delete_report(FID),
+        await client().list_reports(),
+    ]) {
+        const out = JSON.stringify(r);
+        assert.ok(!out.includes(KEY) && !out.includes("abcdefghijklmnop") && !/failed for key/.test(out), out);
+        assert.match(out, /HTTP 500/);
+    }
+    mockFetch(() => json(422, { detail: `reflects ${KEY}` }));
+    assert.ok(!JSON.stringify(await client().send_feedback({ message: "hello there" })).includes(KEY));
+});
+
+test("report 404 gives a fixed message; 409 says a report already exists and points to list, not delete", async () => {
     mockFetch(() => json(404, { detail: "No detection with that id for this key." }));
     let r: any = await client().send_report({ detection_id: DID, outcome: "fine" });
     assert.match(r.error, /NOT recorded.*no detection with that id/);
     mockFetch(() => json(409, { detail: "Already reported." }));
     r = await client().send_report({ detection_id: DID, outcome: "fine" });
-    assert.match(r.error, /NOT recorded.*already has a report/);
+    assert.equal(r.already_reported, true);
+    assert.match(r.error, /already exists/);
+    assert.match(r.error, /arkheia_reports \(action: list\)/);
+    assert.ok(!/delete/i.test(r.error));
+    assert.equal(calls.length, 1);
 });
 
 test("no key or non-https URL: nothing is sent", async () => {
@@ -241,6 +325,14 @@ test("list returns only whitelisted report fields; delete needs a 204", async ()
     assert.equal(d2.deleted, false);
     assert.match(d2.error, /NOT deleted/);
     assert.equal(((await client().delete_report("nope")) as any).deleted, false);
+    mockFetch(() => json(200, { ok: true }));
+    const d3: any = await client().delete_report(FID);
+    assert.equal(d3.deleted, "unknown", "a 2xx other than 204 is not a confirmed delete");
+    mockFetch(() => json(202, {}));
+    assert.equal(((await client().delete_report(FID)) as any).deleted, "unknown");
+    mockFetch(() => { throw new TypeError("fetch failed"); });
+    assert.equal(((await client().delete_report(FID)) as any).deleted, "unknown");
+    assert.equal(calls.length, 1, "no automatic retry of a delete");
 });
 
 test("results never carry risk or detection detail", async () => {
@@ -267,4 +359,72 @@ test("arkheia_verify output carries detection_id (hosted result)", async () => {
     const out: any = await p.verify("p", "r", "m");
     assert.equal(out.detection_id, DID);
     assert.equal(out.source, "hosted");
+});
+
+// ---- inherited fixes ---------------------------------------------------------
+
+test("no source file writes to stdout (the MCP protocol stream)", () => {
+    const dir = path.join(__dirname, "..", "..", "src");
+    const files = fs.readdirSync(dir).filter((f) => f.endsWith(".ts"));
+    assert.ok(files.length >= 6);
+    for (const f of files) {
+        const text = fs.readFileSync(path.join(dir, f), "utf8");
+        assert.ok(!/console\.(log|info|debug)\b/.test(text), `${f} uses console.log/info/debug`);
+        assert.ok(!/process\.stdout/.test(text), `${f} uses process.stdout`);
+        assert.ok(!/=\s*console\s*;/.test(text), `${f} aliases console`);
+    }
+});
+
+test("ProxyClient logging goes to stderr, not stdout", async () => {
+    const out: string[] = [];
+    const origOut = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (c: any, ...rest: any[]) => { out.push(String(c)); return (origOut as any)(c, ...rest); };
+    try {
+        mockFetch((url) => {
+            if (url.startsWith("http://localhost")) throw new TypeError("fetch failed");
+            return json(200, { risk: "LOW", detection_id: DID });
+        });
+        await new ProxyClient("http://localhost:8098", 1.0, BASE, KEY).verify("p", "r", "m");
+    } finally { (process.stdout as any).write = origOut; }
+    assert.ok(!out.join("").includes("falling back"), "fallback notice must not be on stdout");
+});
+
+test("hosted verification refuses a redirect: key is never sent to the target", async () => {
+    let targetHits = 0;
+    const target = http.createServer((_q, res) => { targetHits++; res.end("{}"); });
+    await new Promise<void>((r) => target.listen(0, "127.0.0.1", r));
+    const tport = (target.address() as any).port;
+    let sourceHits = 0;
+    const source = http.createServer((_q, res) => {
+        sourceHits++;
+        res.writeHead(307, { Location: `http://127.0.0.1:${tport}/v1/detect` }); res.end();
+    });
+    await new Promise<void>((r) => source.listen(0, "127.0.0.1", r));
+    const sport = (source.address() as any).port;
+    try {
+        // real fetch here: no mock
+        const p = new ProxyClient("http://127.0.0.1:1", 2.0, `http://127.0.0.1:${sport}`, KEY);
+        const out: any = await p.verify("p", "r", "m");
+        assert.equal(out.risk_level, "UNKNOWN");
+        assert.ok(out.error);
+        assert.equal(sourceHits, 1);
+        assert.equal(targetHits, 0, "the redirect target received nothing");
+    } finally { source.close(); target.close(); }
+});
+
+test("hosted verify requests set redirect: error", async () => {
+    mockFetch((url) => {
+        if (url.startsWith("http://localhost")) throw new TypeError("fetch failed");
+        return json(200, { risk: "LOW", detection_id: DID });
+    });
+    await new ProxyClient("http://localhost:8098", 1.0, BASE, KEY).verify("p", "r", "m");
+    const hosted = calls.find((c) => c.url.startsWith(BASE))!;
+    assert.equal(hosted.init.redirect, "error");
+});
+
+test("README does not promise automatic retry or a durable guarantee", () => {
+    const readme = fs.readFileSync(path.join(__dirname, "..", "..", "README.md"), "utf8");
+    assert.ok(!/you can try again/i.test(readme));
+    assert.ok(!/Recorded by the Arkheia service/.test(readme));
+    assert.match(readme, /unknown/);
 });

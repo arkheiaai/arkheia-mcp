@@ -2,8 +2,13 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ProxyClient = void 0;
 const url_1 = require("url");
-// Node.js native fetch doesn't have a global logger, use console
-const logger = console;
+// Node.js native fetch doesn't have a global logger
+const logger = {
+    // stdout carries the MCP protocol; log lines go to stderr only.
+    info: (m) => { process.stderr.write(`${m}\n`); },
+    warn: (m) => { process.stderr.write(`${m}\n`); },
+    error: (m) => { process.stderr.write(`${m}\n`); },
+};
 // Hosted API defaults
 const HOSTED_API_URL = "https://arkheia-proxy-production.up.railway.app";
 class ProxyClient {
@@ -114,6 +119,7 @@ class ProxyClient {
                 method: "POST",
                 headers: headers,
                 body: JSON.stringify(payload),
+                redirect: "error", // the key is never re-sent to wherever a redirect points
                 signal: controller.signal,
             });
             clearTimeout(timeoutId);

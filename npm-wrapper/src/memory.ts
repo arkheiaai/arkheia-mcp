@@ -4,7 +4,12 @@ import * as fs from 'fs';
 import * as crypto from 'crypto';
 import * as os from 'os';
 
-const logger = console;
+const logger = {
+    // stdout carries the MCP protocol; log lines go to stderr only.
+    info: (m: string) => { process.stderr.write(`${m}\n`); },
+    warn: (m: string) => { process.stderr.write(`${m}\n`); },
+    error: (m: string) => { process.stderr.write(`${m}\n`); },
+};
 
 // ---------------------------------------------------------------------------
 // DB setup — sql.js (pure JS, no native module)

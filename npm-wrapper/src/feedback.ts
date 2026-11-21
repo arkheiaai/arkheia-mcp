@@ -7,7 +7,8 @@ import { z } from 'zod';
 // These tools tell the hosted Arkheia API that a piece of feedback or a report was
 // typed in by the user (or by their agent). They send only the fields named in the
 // tool schemas, and they return only whether the server stored it, and its id.
-// Success is claimed only when the server returned an id.
+// Success is claimed only when the server acknowledged with an id. When the request may have
+// reached the server but no clear answer came back, the outcome is reported as "unknown".
 // ---------------------------------------------------------------------------
 
 export const FEEDBACK_KINDS = [
@@ -33,6 +34,7 @@ export const feedbackShape = {
     message: z.string().min(MESSAGE_MIN).max(MESSAGE_MAX),
     kind: z.enum(FEEDBACK_KINDS).optional(),
     email: z.string().max(EMAIL_MAX).optional(),
+    submission_id: z.string().regex(UUID_PATTERN).optional(),
 };
 
 export const reportShape = {
@@ -72,28 +74,41 @@ export function looksLikeCredential(text: string, own_key?: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Results
+// Results: three honest outcomes.
+//   recorded: true       the service acknowledged it and returned this id
+//   recorded: false      the service refused it, or the request provably never left
+//   recorded: "unknown"  the request may have reached the service; it may have been stored
+// No text from the service is ever passed into a result: messages are fixed per status class.
 // ---------------------------------------------------------------------------
 
-export type NotRecorded = { recorded: false; error: string; retryable: boolean };
+export type Outcome = { recorded: false | "unknown"; error: string; retryable: boolean; submission_id?: string; already_reported?: boolean };
 
-function notRecorded(what: string, reason: string, retryable: boolean): NotRecorded {
-    const tail = retryable
-        ? "It is safe to try again."
-        : "Retrying the same request will not help.";
-    return { recorded: false, error: `${what} was NOT recorded: ${reason} ${tail}`, retryable };
+function refused(what: string, reason: string, retryable: boolean, extra: Partial<Outcome> = {}): Outcome {
+    const tail = retryable ? "It is safe to try again." : "Retrying the same request will not help.";
+    return { recorded: false, error: `${what} was NOT recorded: ${reason} ${tail}`, retryable, ...extra };
+}
+
+function unknownOutcome(what: string, reason: string, advice: string, extra: Partial<Outcome> = {}): Outcome {
+    return {
+        recorded: "unknown", retryable: true, ...extra,
+        error: `${what} may or may not have been recorded: ${reason} The request may have reached the service, ` +
+            `so do not assume it was lost. ${advice}`,
+    };
 }
 
 type Reply =
     | { ok: true; status: number; json: any }
-    | { ok: false; kind: "network" | "timeout" | "http" | "malformed"; status?: number; detail?: string };
+    | { ok: false; kind: "unsent" | "maybe_sent" | "http"; why?: "timeout" | "error"; status?: number };
 
-function serverDetail(json: any): string | undefined {
-    let d = json?.detail;
-    if (d && typeof d === "object") d = d.message;
-    if (typeof d !== "string") return undefined;
-    return d.replace(/\s+/g, " ").slice(0, 200);
+const UNSENT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]);
+
+/** True only for failures that happen before any bytes can have been sent. */
+function provablyUnsent(e: any): boolean {
+    const code = e?.cause?.code ?? e?.code;
+    return typeof code === "string" && UNSENT_CODES.has(code);
 }
+
+class Deadline extends Error { constructor() { super("deadline"); this.name = "Deadline"; } }
 
 export class FeedbackClient {
     private hosted_url: string;
@@ -104,13 +119,20 @@ export class FeedbackClient {
         this.api_key = api_key;
     }
 
-    /** One request, one retry at most, only when the network or the timeout failed. */
-    private async call(method: string, path: string, body?: unknown): Promise<Reply> {
-        let last: Reply = { ok: false, kind: "network" };
+    /**
+     * One request. The deadline covers the headers AND the body. A second attempt happens only when
+     * the first provably never left this machine (connection refused, name not found), or, for a
+     * read-only request, on any network failure. After a possibly-sent write there is no retry.
+     */
+    private async call(method: string, path: string, body?: unknown, idempotent = false): Promise<Reply> {
+        let last: Reply = { ok: false, kind: "unsent" };
         for (let attempt = 0; attempt < 2; attempt++) {
             const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), this.timeout_ms);
-            try {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const deadline = new Promise<never>((_res, rej) => {
+                timer = setTimeout(() => { controller.abort(); rej(new Deadline()); }, this.timeout_ms);
+            });
+            const work = (async (): Promise<Reply> => {
                 const resp = await fetch(`${this.hosted_url}${path}`, {
                     method,
                     headers: {
@@ -121,60 +143,66 @@ export class FeedbackClient {
                     redirect: "error", // the key is never re-sent to wherever a redirect points
                     signal: controller.signal,
                 });
-                clearTimeout(timer);
+                const text = await resp.text();
+                if (!resp.ok) return { ok: false, kind: "http", status: resp.status };
                 let json: any = undefined;
-                const text = await resp.text().catch(() => "");
-                if (text) {
-                    try { json = JSON.parse(text); } catch { json = undefined; }
-                }
-                if (!resp.ok) {
-                    return { ok: false, kind: "http", status: resp.status, detail: serverDetail(json) };
-                }
+                if (text) { try { json = JSON.parse(text); } catch { json = undefined; } }
                 return { ok: true, status: resp.status, json };
+            })();
+            work.catch(() => { /* a lost race must not become an unhandled rejection */ });
+            try {
+                return await Promise.race([work, deadline]);
             } catch (e: any) {
+                if (e instanceof Deadline) {
+                    last = { ok: false, kind: "maybe_sent", why: "timeout" };
+                    if (!idempotent) return last;
+                } else if (provablyUnsent(e)) {
+                    last = { ok: false, kind: "unsent" };
+                } else {
+                    last = { ok: false, kind: "maybe_sent", why: "error" };
+                    if (!idempotent) return last;
+                }
+            } finally {
                 clearTimeout(timer);
-                last = { ok: false, kind: e?.name === "AbortError" ? "timeout" : "network" };
-                // fall through to the single retry, same body
+                controller.abort(); // release the connection if the body is still open
             }
         }
         return last;
     }
 
-    private precheck(what: string): NotRecorded | undefined {
+    private precheck(what: string): Outcome | undefined {
         if (!this.api_key) {
-            return notRecorded(what, "ARKHEIA_API_KEY is not set.", false);
+            return refused(what, "ARKHEIA_API_KEY is not set.", false);
         }
         let scheme = "";
         let host = "";
         try { const u = new URL(this.hosted_url); scheme = u.protocol; host = u.hostname; } catch { /* below */ }
         const loopback = host === "localhost" || host === "127.0.0.1" || host === "[::1]";
         if (scheme !== "https:" && !(scheme === "http:" && loopback)) {
-            return notRecorded(what, "the configured Arkheia URL is not https, and the key is never sent in clear.", false);
+            return refused(what, "the configured Arkheia URL is not https, and the key is never sent in clear.", false);
         }
         return undefined;
     }
 
-    private failure(what: string, r: Extract<Reply, { ok: false }>): NotRecorded {
-        const via = (s: string) => s + (r.detail ? ` Server said: ${r.detail}` : "");
-        switch (r.kind) {
-            case "network":
-                return notRecorded(what, "could not reach the Arkheia service.", true);
-            case "timeout":
-                return notRecorded(what, "the Arkheia service did not answer in time.", true);
-            case "malformed":
-                return {
-                    recorded: false, retryable: true,
-                    error: `${what} was NOT recorded: the service reply carried no id, so receipt cannot be confirmed. ` +
-                        "Trying again may store it twice.",
-                };
-            default: {
-                const s = r.status ?? 0;
-                if (s === 401 || s === 403) return notRecorded(what, `the Arkheia API key was rejected (HTTP ${s}). Check ARKHEIA_API_KEY.`, false);
-                if (s === 429) return notRecorded(what, "rate limited (HTTP 429). Wait a little first.", true);
-                if (s >= 500) return notRecorded(what, via(`the Arkheia service had an error (HTTP ${s}).`), true);
-                return notRecorded(what, via(`the Arkheia service refused the request (HTTP ${s}).`), false);
-            }
+    /** Fixed wording per outcome class; nothing from the service's reply text is used. */
+    private failure(what: string, r: Extract<Reply, { ok: false }>, advice: string, extra: Partial<Outcome> = {}): Outcome {
+        if (r.kind === "unsent") {
+            return refused(what, "could not reach the Arkheia service; nothing was sent.", true, extra);
         }
+        if (r.kind === "maybe_sent") {
+            return unknownOutcome(what, r.why === "timeout"
+                ? "the Arkheia service did not answer in time."
+                : "the connection failed or was cut after the request may have been sent.", advice, extra);
+        }
+        const s = r.status ?? 0;
+        if (s === 401 || s === 403) return refused(what, `the Arkheia API key was rejected (HTTP ${s}). Check ARKHEIA_API_KEY.`, false, extra);
+        if (s === 429) return refused(what, "the service is rate limiting this key (HTTP 429). Wait a little first.", true, extra);
+        if (s >= 500) return unknownOutcome(what, `the Arkheia service reported an error (HTTP ${s}).`, advice, extra);
+        return refused(what, `the Arkheia service refused the request (HTTP ${s}).`, false, extra);
+    }
+
+    private noId(what: string, advice: string, extra: Partial<Outcome> = {}): Outcome {
+        return unknownOutcome(what, "the service answered without an id, so receipt cannot be confirmed.", advice, extra);
     }
 
     private static idOf(json: any, field: string): string | undefined {
@@ -182,38 +210,46 @@ export class FeedbackClient {
         return typeof v === "string" && v.length > 0 && v.length <= 200 ? v : undefined;
     }
 
+    private static readonly ACK = "The Arkheia service acknowledged it with this id. Quote the id if you follow up.";
+
     // -- arkheia_feedback ---------------------------------------------------
 
-    async send_feedback(args: { message: string; kind?: string; email?: string }) {
+    async send_feedback(args: { message: string; kind?: string; email?: string; submission_id?: string }) {
         const what = "Your feedback";
         const { message, kind } = args;
         const email = args.email && args.email.trim() ? args.email.trim() : undefined;
+        if (args.submission_id !== undefined && !UUID_PATTERN.test(args.submission_id)) {
+            return refused(what, "submission_id must be a UUID, the one returned by an earlier attempt.", false);
+        }
         if (message.trim().length < MESSAGE_MIN) {
-            return notRecorded(what, `the message must have at least ${MESSAGE_MIN} characters.`, false);
+            return refused(what, `the message must have at least ${MESSAGE_MIN} characters.`, false);
         }
         if (message.length > MESSAGE_MAX) {
-            return notRecorded(what, `the message must have at most ${MESSAGE_MAX} characters.`, false);
+            return refused(what, `the message must have at most ${MESSAGE_MAX} characters.`, false);
         }
         if (email && (email.length > EMAIL_MAX || !EMAIL_PATTERN.test(email))) {
-            return notRecorded(what, "the email address does not look valid. Leave it out or correct it.", false);
+            return refused(what, "the email address does not look valid. Leave it out or correct it.", false);
         }
         if (looksLikeCredential(message, this.api_key) || (email !== undefined && looksLikeCredential(email, this.api_key))) {
-            return notRecorded(what, "the text looks like it contains an API key or token. Remove it and send again.", false);
+            return refused(what, "the text looks like it contains an API key or token. Remove it and send again.", false);
         }
         const early = this.precheck(what);
         if (early) return early;
 
-        // submission_id lets a server that supports it treat the one retry as the same submission.
-        // A server that does not know the field ignores it.
-        const body: Record<string, string> = { message, submission_id: randomUUID() };
+        // The same submission_id on a later attempt lets a service that supports it recognise the
+        // repeat; a service that does not know the field ignores it, and a repeat may then be stored twice.
+        const submission_id = args.submission_id ?? randomUUID();
+        const body: Record<string, string> = { message, submission_id };
         if (kind) body.context = kind;
         if (email) body.email = email;
+        const advice = `If you want to try again, call arkheia_feedback again with the same message and this same submission_id (${submission_id}). ` +
+            "Whether a repeat is de-duplicated depends on the service.";
 
         const r = await this.call("POST", "/v1/feedback", body);
-        if (!r.ok) return this.failure(what, r);
+        if (!r.ok) return this.failure(what, r, advice, { submission_id });
         const id = FeedbackClient.idOf(r.json, "feedback_id");
-        if (!id) return this.failure(what, { ok: false, kind: "malformed" });
-        return { recorded: true as const, feedback_id: id, note: "Recorded by the Arkheia service. Quote this id if you follow up." };
+        if (!id) return this.noId(what, advice, { submission_id });
+        return { recorded: true as const, feedback_id: id, submission_id, note: FeedbackClient.ACK };
     }
 
     // -- arkheia_report -----------------------------------------------------
@@ -224,18 +260,18 @@ export class FeedbackClient {
     }) {
         const what = "Your report";
         if (!ID_PATTERN.test(args.detection_id)) {
-            return notRecorded(what, "detection_id is not a valid id. Use the detection_id from the arkheia_verify result.", false);
+            return refused(what, "detection_id is not a valid id. Use the detection_id from the arkheia_verify result.", false);
         }
         const evidence = args.evidence && args.evidence.trim() ? args.evidence : undefined;
         if (evidence !== undefined) {
             if (evidence.length > EVIDENCE_MAX) {
-                return notRecorded(what, `evidence must be one line of at most ${EVIDENCE_MAX} characters.`, false);
+                return refused(what, `evidence must be one line of at most ${EVIDENCE_MAX} characters.`, false);
             }
             if (/[\r\n]/.test(evidence)) {
-                return notRecorded(what, "evidence must be a single line. Shorten it and send again.", false);
+                return refused(what, "evidence must be a single line. Shorten it and send again.", false);
             }
             if (looksLikeCredential(evidence, this.api_key)) {
-                return notRecorded(what, "the evidence looks like it contains an API key or token. Remove it and send again.", false);
+                return refused(what, "the evidence looks like it contains an API key or token. Remove it and send again.", false);
             }
         }
         const early = this.precheck(what);
@@ -247,20 +283,25 @@ export class FeedbackClient {
         };
         if (evidence) body.evidence = evidence;
         if (args.category) body.category = args.category;
+        const advice = "Before sending it again, check with arkheia_reports (action: list).";
 
         const r = await this.call("POST", `/v1/detections/${encodeURIComponent(args.detection_id)}/report`, body);
         if (!r.ok) {
             if (r.kind === "http" && r.status === 409) {
-                return notRecorded(what, "this response already has a report. Delete it with arkheia_reports (action: delete) first to change your answer.", false);
+                return {
+                    recorded: false as const, retryable: false, already_reported: true,
+                    error: "No new report was added because a report already exists for this detection. " +
+                        "It may be the one from an earlier attempt of yours. See it with arkheia_reports (action: list).",
+                };
             }
             if (r.kind === "http" && r.status === 404) {
-                return notRecorded(what, "the service has no detection with that id for your key. Check that detection_id came from an arkheia_verify result made with this key.", false);
+                return refused(what, "the service has no detection with that id for your key. Check that detection_id came from an arkheia_verify result made with this key.", false);
             }
-            return this.failure(what, r);
+            return this.failure(what, r, advice);
         }
         const id = FeedbackClient.idOf(r.json, "report_id");
-        if (!id) return this.failure(what, { ok: false, kind: "malformed" });
-        return { recorded: true as const, report_id: id, note: "Recorded by the Arkheia service. Quote this id if you follow up." };
+        if (!id) return this.noId(what, advice);
+        return { recorded: true as const, report_id: id, note: FeedbackClient.ACK };
     }
 
     // -- arkheia_reports (list / delete your own reports) ---------------------
@@ -268,14 +309,15 @@ export class FeedbackClient {
     async list_reports(limit: number = 20) {
         const what = "The report list";
         const early = this.precheck(what);
-        if (early) return { ...early, error: early.error.replace("was NOT recorded", "could not be fetched") };
+        const wording = (o: Outcome): Outcome => ({ ...o, recorded: false, error: o.error.replace("was NOT recorded", "could not be fetched").replace("may or may not have been recorded", "could not be fetched") });
+        if (early) return wording(early);
         const n = Math.min(Math.max(Math.trunc(limit) || 20, 1), 100);
-        const r = await this.call("GET", `/v1/reports?limit=${n}`);
-        if (!r.ok) return { ...this.failure(what, r), error: this.failure(what, r).error.replace("was NOT recorded", "could not be fetched") };
+        const r = await this.call("GET", `/v1/reports?limit=${n}`, undefined, true);
+        if (!r.ok) return wording(this.failure(what, r, "Try again."));
         if (!Array.isArray(r.json?.reports)) {
-            return { recorded: false as const, retryable: true, error: "The report list could not be fetched: the service reply was not understood. It is safe to try again." };
+            return wording(this.noId(what, "Try again."));
         }
-        // Only the caller's own report fields are passed on, and nothing else the server may add.
+        // Only the caller's own report fields are passed on, and nothing else the service may add.
         const reports = r.json.reports.map((x: any) => ({
             report_id: x?.report_id, detection_id: x?.event_id, outcome: x?.outcome,
             category: x?.category ?? null, evidence: x?.evidence ?? null,
@@ -290,13 +332,21 @@ export class FeedbackClient {
             return { deleted: false as const, error: "The report was NOT deleted: report_id is required and must be the report_id returned by arkheia_report or the list." };
         }
         const early = this.precheck(what);
-        if (early) return { deleted: false as const, error: early.error.replace("was NOT recorded", "was NOT deleted") };
+        const wording = (o: Outcome) => ({
+            deleted: (o.recorded === "unknown" ? "unknown" : false) as false | "unknown",
+            error: o.error.replace("was NOT recorded", "was NOT deleted").replace("may or may not have been recorded", "may or may not have been deleted"),
+        });
+        if (early) return wording(early);
         const r = await this.call("DELETE", `/v1/reports/${encodeURIComponent(report_id)}`);
+        const advice = "Check with arkheia_reports (action: list) before trying again.";
         if (!r.ok) {
-            const f = this.failure(what, r);
+            const w = wording(this.failure(what, r, advice));
             const extra = r.kind === "http" && r.status === 404
                 ? " (No such report for your key, or it was already deleted.)" : "";
-            return { deleted: false as const, error: f.error.replace("was NOT recorded", "was NOT deleted") + extra };
+            return { ...w, error: w.error + extra };
+        }
+        if (r.status !== 204) {
+            return wording(unknownOutcome(what, `the service answered HTTP ${r.status} instead of the expected 204.`, advice));
         }
         return { deleted: true as const, report_id };
     }

@@ -144,7 +144,15 @@ Whether a checked response was really wrong or fine. Pass the `detection_id` fro
 
 `outcome` is `wrong` or `fine` and describes the model's response, not Arkheia's score. `evidence` is optional, one line, at most 500 characters. `category` is optional: `invented_api`, `invented_file_or_path`, `wrong_fact_or_number`, `invented_source`, `wrong_code_behaviour`, `misread_context` or `other`. `reporter_kind` is `agent` (default) or `human`. `arkheia_reports` with `action: "list"` shows your own reports, and `action: "delete"` with a `report_id` removes one so you can report again.
 
-**What is sent:** only the fields you pass to the tool (plus a random submission id for feedback, so a retry is not counted twice), with your API key in a request header. **What is not sent:** no conversation, prompt, response, file, environment details or API key in the text. Text that looks like an API key or token is refused rather than sent. You get a success message only when the service returns an id; on any failure the tool says it was NOT recorded, and you can try again.
+**What is sent:** only the fields you pass to the tool (plus a random submission id for feedback, so a repeated submission can be recognised), with your API key in a request header. **What is not sent:** no conversation, prompt, response, file, environment details or API key in the text. Text that looks like a common API key or token format is refused rather than sent; this is a safety net, not a guarantee that every kind of secret is caught, so do not paste credentials.
+
+**What you get back:** one of three results.
+
+- `recorded: true` with an id: the service acknowledged it with that id.
+- `recorded: false`: the service refused it, or the request never left your machine. The error says why.
+- `recorded: "unknown"`: the request may have reached the service (a timeout, a dropped connection, a server error, or a reply with no id), so it may have been stored. The tool does not retry on its own after that. For `arkheia_feedback` the result includes a `submission_id`; to try again, call the tool with the same message and that `submission_id`. Whether a repeat is then de-duplicated depends on the service, so a repeat may still be stored twice. For `arkheia_report`, check `arkheia_reports` with `action: "list"` before sending again; if a report already exists for that detection, a new one is refused.
+
+The tool retries by itself only when the request provably never left your machine (for example connection refused), and only once. Error text from the service is never shown in the result.
 
 ## 35+ Model Profiles
 
