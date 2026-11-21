@@ -44,7 +44,12 @@ const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
 const crypto = __importStar(require("crypto"));
 const os = __importStar(require("os"));
-const logger = console;
+const logger = {
+    // stdout carries the MCP protocol; log lines go to stderr only.
+    info: (m) => { process.stderr.write(`${m}\n`); },
+    warn: (m) => { process.stderr.write(`${m}\n`); },
+    error: (m) => { process.stderr.write(`${m}\n`); },
+};
 // ---------------------------------------------------------------------------
 // DB setup — sql.js (pure JS, no native module)
 // ---------------------------------------------------------------------------

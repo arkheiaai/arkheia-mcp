@@ -1,7 +1,12 @@
 import * as crypto from 'crypto';
 
 // Node.js native fetch doesn't have a global logger, use console
-const logger = console;
+const logger = {
+    // stdout carries the MCP protocol; log lines go to stderr only.
+    info: (m: string) => { process.stderr.write(`${m}\n`); },
+    warn: (m: string) => { process.stderr.write(`${m}\n`); },
+    error: (m: string) => { process.stderr.write(`${m}\n`); },
+};
 
 const _DEFAULT_TIMEOUT = 60 * 1000; // 60 seconds in milliseconds
 const _OLLAMA_TIMEOUT = 120 * 1000; // 120 seconds in milliseconds
@@ -68,6 +73,7 @@ export async function call_grok(
                     messages: [{ role: "user", content: prompt }],
                     ...kwargs,
                 }),
+                redirect: "error", // provider keys are never re-sent to wherever a redirect points
                 signal: controller.signal,
             }
         );
@@ -147,6 +153,7 @@ export async function call_gemini(
                         ...kwargs,
                     },
                 }),
+                redirect: "error", // provider keys are never re-sent to wherever a redirect points
                 signal: controller.signal,
             }
         );
@@ -225,6 +232,7 @@ export async function call_together(
                     messages: [{ role: "user", content: prompt }],
                     ...kwargs,
                 }),
+                redirect: "error", // provider keys are never re-sent to wherever a redirect points
                 signal: controller.signal,
             }
         );
@@ -297,6 +305,7 @@ export async function call_ollama(
                     stream: false,
                     ...kwargs,
                 }),
+                redirect: "error", // provider keys are never re-sent to wherever a redirect points
                 signal: controller.signal,
             }
         );

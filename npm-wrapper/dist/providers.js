@@ -39,7 +39,12 @@ exports.call_together = call_together;
 exports.call_ollama = call_ollama;
 const crypto = __importStar(require("crypto"));
 // Node.js native fetch doesn't have a global logger, use console
-const logger = console;
+const logger = {
+    // stdout carries the MCP protocol; log lines go to stderr only.
+    info: (m) => { process.stderr.write(`${m}\n`); },
+    warn: (m) => { process.stderr.write(`${m}\n`); },
+    error: (m) => { process.stderr.write(`${m}\n`); },
+};
 const _DEFAULT_TIMEOUT = 60 * 1000; // 60 seconds in milliseconds
 const _OLLAMA_TIMEOUT = 120 * 1000; // 120 seconds in milliseconds
 // ---------------------------------------------------------------------------
@@ -83,6 +88,7 @@ async function call_grok(prompt, model = "grok-4-fast-non-reasoning", kwargs = {
                 messages: [{ role: "user", content: prompt }],
                 ...kwargs,
             }),
+            redirect: "error", // provider keys are never re-sent to wherever a redirect points
             signal: controller.signal,
         });
         clearTimeout(timeoutId);
@@ -151,6 +157,7 @@ async function call_gemini(prompt, model = "gemini-2.5-flash", max_output_tokens
                     ...kwargs,
                 },
             }),
+            redirect: "error", // provider keys are never re-sent to wherever a redirect points
             signal: controller.signal,
         });
         clearTimeout(timeoutId);
@@ -219,6 +226,7 @@ async function call_together(prompt, model = "moonshotai/Kimi-K2.5", max_tokens 
                 messages: [{ role: "user", content: prompt }],
                 ...kwargs,
             }),
+            redirect: "error", // provider keys are never re-sent to wherever a redirect points
             signal: controller.signal,
         });
         clearTimeout(timeoutId);
@@ -282,6 +290,7 @@ async function call_ollama(prompt, model = "phi4:14b", kwargs = {}) {
                 stream: false,
                 ...kwargs,
             }),
+            redirect: "error", // provider keys are never re-sent to wherever a redirect points
             signal: controller.signal,
         });
         clearTimeout(timeoutId);

@@ -63,7 +63,7 @@ function handleError(toolName: string, e: any) {
 // Main
 // ---------------------------------------------------------------------------
 
-const CURRENT_VERSION = "1.2.2";
+const CURRENT_VERSION = "1.2.3";
 
 async function checkForUpdate(): Promise<void> {
     // Check once per day — skip if checked recently
@@ -125,7 +125,7 @@ async function main() {
     }
 
     const proxy = new ProxyClient(ARKHEIA_PROXY_URL, 10.0, ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
-    const server = new McpServer({ name: "arkheia-trust", version: "1.2.2" });
+    const server = new McpServer({ name: "arkheia-trust", version: "1.2.3" });
 
     // ── Detection & audit ──────────────────────────────────────────
 
