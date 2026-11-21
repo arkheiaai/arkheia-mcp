@@ -34,7 +34,7 @@ const DID = "det_0123456789abcdef";
 
 // ---- success ---------------------------------------------------------------
 
-test("feedback: success returns the server id; current and #230-style replies both work", async () => {
+test("feedback: success returns the server id; both documented reply shapes work", async () => {
     for (const reply of [
         { feedback_id: FID, status: "received", message: "Thank you for your feedback. We read every message." },
         { feedback_id: FID, submission_id: "x", status: "received", message: "Your feedback was saved." },
@@ -88,15 +88,17 @@ const refusals: [string, () => Response | Promise<Response>][] = [
     ["400", () => json(400, { detail: "Feedback message too short" })],
     ["401", () => json(401, { detail: "bad key" })],
     ["429", () => json(429, { detail: "slow down" })],
-    ["409 (changed-service shape)", () => json(409, { detail: { status: "conflict", message: "used" } })],
 ];
 const uncertain: [string, () => Response | Promise<Response>][] = [
     ["500", () => json(500, { detail: "boom" })],
-    ["503 (changed-service shape)", () => json(503, { detail: { feedback_id: FID, status: "unavailable" } }, { "Retry-After": "30" })],
+    ["503 with a structured body", () => json(503, { detail: { feedback_id: FID, status: "unavailable" } }, { "Retry-After": "30" })],
     ["malformed json", () => new Response("<html>", { status: 201 })],
     ["201 without id", () => json(201, { status: "received" })],
     ["201 with empty id", () => json(201, { feedback_id: "" })],
     ["201 with non-string id", () => json(201, { feedback_id: 5 })],
+    ["201 with a non-UUID id", () => json(201, { feedback_id: "all done, thanks", report_id: "all done, thanks" })],
+    ["202 pending with a valid id", () => json(202, { feedback_id: FID, report_id: FID })],
+    ["200 with a valid id", () => json(200, { feedback_id: FID, report_id: FID })],
 ];
 for (const [name, h] of refusals) {
     test(`feedback: ${name} -> recorded:false, no retry`, async () => {
@@ -471,5 +473,143 @@ test("a real 307 on a provider call is refused and the second server receives no
     } finally {
         if (prevKey === undefined) delete process.env.XAI_API_KEY; else process.env.XAI_API_KEY = prevKey;
         source.close(); target.close();
+    }
+});
+
+// ---- round 2 -----------------------------------------------------------------
+
+test("retry hint names every original argument (names, not values) and the same submission_id", async () => {
+    mockFetch(() => json(500, {}));
+    const r: any = await client().send_feedback({ message: "private words here", kind: "bug", email: "a@b.co" });
+    assert.deepEqual(r.repeat_arguments, ["message", "kind", "email"]);
+    assert.match(r.error, /EVERY original argument \(message, kind, email\)/);
+    assert.ok(r.error.includes(r.submission_id));
+    assert.ok(!r.error.includes("private words here") && !r.error.includes("a@b.co"), "values are not echoed");
+    const r2: any = await client().send_feedback({ message: "private words here" });
+    assert.deepEqual(r2.repeat_arguments, ["message"]);
+});
+
+test("feedback 409 is a conflict on an existing submission, worded apart from a first-time refusal", async () => {
+    mockFetch(() => json(409, { detail: { status: "conflict" } }));
+    const r: any = await client().send_feedback({ message: "hello there", kind: "bug" });
+    assert.equal(r.recorded, false);
+    assert.equal(r.conflict, true);
+    assert.match(r.error, /already exists with different content/);
+    assert.ok(!/NOT recorded/.test(r.error));
+    assert.ok(r.submission_id);
+    mockFetch(() => json(400, {}));
+    const first: any = await client().send_feedback({ message: "hello there" });
+    assert.equal(first.conflict, undefined);
+    assert.match(first.error, /NOT recorded/);
+});
+
+test("only exactly 201 with a UUID id is recorded:true", async () => {
+    for (const [status, id] of [[201, FID], [201, "not-a-uuid"], [202, FID], [200, FID], [204, FID]] as const) {
+        mockFetch(() => json(status as number, { feedback_id: id, report_id: id }));
+        const f: any = await client().send_feedback({ message: "hello there" });
+        const r: any = await client().send_report({ detection_id: DID, outcome: "fine" });
+        const ok = status === 201 && id === FID;
+        assert.equal(f.recorded, ok ? true : "unknown", `${status} ${id}`);
+        assert.equal(r.recorded, ok ? true : "unknown", `${status} ${id}`);
+    }
+});
+
+test("phase: 401 whose body cannot be read is still reported as the 401 refusal", async () => {
+    const resp = { ok: false, status: 401, text: async () => { throw new TypeError("terminated"); }, body: null };
+    mockFetch(() => resp as any);
+    const r: any = await client().send_feedback({ message: "hello there" });
+    assert.equal(r.recorded, false);
+    assert.match(r.error, /HTTP 401/);
+    assert.equal(calls.length, 1);
+});
+
+test("phase: 201 headers then a body error with a connection-refused code is unknown, one request, no replay", async () => {
+    const bodyErr = Object.assign(new TypeError("terminated"), { cause: { code: "ECONNREFUSED" } });
+    const resp = { ok: true, status: 201, text: async () => { throw bodyErr; } };
+    mockFetch(() => resp as any);
+    for (const run of [
+        () => client().send_feedback({ message: "hello there" }),
+        () => client().send_report({ detection_id: DID, outcome: "fine" }),
+    ]) {
+        calls = [];
+        const r: any = await run();
+        assert.equal(r.recorded, "unknown");
+        assert.equal(calls.length, 1, "exactly one request");
+    }
+});
+
+test("phase: a connection-refused failure before any headers is the only retryable case", async () => {
+    mockFetch(refusedConn);
+    const r: any = await client().send_report({ detection_id: DID, outcome: "fine" });
+    assert.equal(r.recorded, false);
+    assert.equal(calls.length, 2);
+});
+
+test("reports list: every row is validated against the public shape", async () => {
+    const good = { report_id: FID, event_id: DID, outcome: "fine", category: null, evidence: null, reporter_kind: "human", created_at: "2026-01-01T00:00:00Z" };
+    mockFetch(() => json(200, { reports: [good] }));
+    assert.equal(((await client().list_reports()) as any).reports.length, 1);
+    const bad: any[] = [
+        null, "x", { ...good, report_id: { nested: 1 } }, { ...good, report_id: "nope" }, { ...good, event_id: "../x" },
+        { ...good, outcome: "maybe" }, { ...good, reporter_kind: "bot" }, { ...good, category: "bogus" },
+        { ...good, evidence: 5 }, { ...good, evidence: "e".repeat(501) },
+    ];
+    for (const row of bad) {
+        mockFetch(() => json(200, { reports: [good, row] }));
+        const l: any = await client().list_reports();
+        assert.equal(l.reports, undefined, JSON.stringify(row));
+        assert.equal(l.recorded, false);
+        assert.match(l.error, /could not be fetched|not in the expected shape/);
+    }
+    mockFetch(() => json(201, { reports: [good] }));
+    assert.equal(((await client().list_reports()) as any).reports, undefined, "list needs exactly 200");
+});
+
+test("every request with a JSON body sets Content-Type: application/json", async () => {
+    const saved = { x: process.env.XAI_API_KEY, g: process.env.GOOGLE_API_KEY, t: process.env.TOGETHER_API_KEY };
+    process.env.XAI_API_KEY = "dummy-x"; process.env.GOOGLE_API_KEY = "dummy-g"; process.env.TOGETHER_API_KEY = "dummy-t";
+    const ctype = (init: any) => Object.entries(init.headers ?? {}).find(([k]) => k.toLowerCase() === "content-type")?.[1];
+    try {
+        mockFetch((url) => url.includes("localhost:8098") ? (() => { throw new TypeError("fetch failed"); })() : json(201, { feedback_id: FID, report_id: FID, risk: "LOW" }));
+        const table: [string, () => Promise<any>][] = [
+            ["feedback", () => client().send_feedback({ message: "hello there" })],
+            ["report", () => client().send_report({ detection_id: DID, outcome: "fine" })],
+            ["verify hosted (and local)", () => new ProxyClient("http://localhost:8098", 1.0, BASE, KEY).verify("p", "r", "m")],
+            ["grok", () => call_grok("p")], ["gemini", () => call_gemini("p")],
+            ["together", () => call_together("p")], ["ollama", () => call_ollama("p")],
+        ];
+        for (const [name, fn] of table) {
+            calls = [];
+            await fn();
+            const withBody = calls.filter((c) => c.init.body !== undefined);
+            assert.ok(withBody.length >= 1, name);
+            for (const c of withBody) assert.equal(ctype(c.init), "application/json", `${name}: ${c.url}`);
+        }
+        // local proxy verify path alone
+        calls = [];
+        mockFetch(() => json(200, { risk_level: "LOW", confidence: 0, features_triggered: [] }));
+        await new ProxyClient("http://localhost:8098", 1.0, BASE, KEY).verify("p", "r", "m");
+        assert.equal(ctype(calls[0].init), "application/json");
+        // requests without a body (list, delete, audit log) carry none
+        calls = [];
+        mockFetch(() => json(200, { events: [], summary: {} }));
+        await new ProxyClient("http://localhost:8098", 1.0, BASE, KEY).get_audit_log();
+        assert.equal(calls[0].init.body, undefined);
+    } finally {
+        for (const [k, v] of [["XAI_API_KEY", saved.x], ["GOOGLE_API_KEY", saved.g], ["TOGETHER_API_KEY", saved.t]] as const) {
+            if (v === undefined) delete process.env[k]; else process.env[k] = v;
+        }
+    }
+});
+
+test("no source or test file carries an internal reference", () => {
+    const root = path.join(__dirname, "..", "..");
+    const banned = /#\d{3}|\bB-\d+|\bB\d{3}\b|\bCodex\b|\bDavid\b|proxy #/;
+    for (const dir of ["src", "test"]) {
+        for (const f of fs.readdirSync(path.join(root, dir))) {
+            const full = path.join(root, dir, f);
+            if (!fs.statSync(full).isFile() || f === "feedback.test.ts") continue; // that file names the pattern itself
+            assert.ok(!banned.test(fs.readFileSync(full, "utf8")), `${full} has an internal reference`);
+        }
     }
 });

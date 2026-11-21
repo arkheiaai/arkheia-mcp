@@ -1,6 +1,6 @@
-"""B-288: installing the published package must change nothing in the user's home and expose no key.
+"""Installing the published package must change nothing in the user's home and expose no key.
 
-David approved removing both home-directory edits on 29 Oct 2026 and again on 17 Nov (readiness plan D4). The
+The maintainers removed both home-directory edits. The
 public installer still wrote a managed block into ~/.claude/CLAUDE.md, appended to a Codex instructions file,
 saved an exported ARKHEIA_API_KEY to ~/.arkheia/config.json and printed part of the key into install logs.
 """
@@ -13,7 +13,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SETUP = ROOT / "npm-wrapper" / "scripts" / "setup.js"
-FAKE_KEY = "ak_test_" + "f" * 40 + "B288"
+FAKE_KEY = "ak_test_" + "f" * 40 + "TEST"
 
 
 def _tree(root: pathlib.Path):
@@ -47,7 +47,7 @@ class PostinstallTouchesNothing(unittest.TestCase):
 
 
 class FirstRunAndSetupLeakNothing(unittest.TestCase):
-    """Codex B288 R1: default first run must not write in home; optional setup must never print the key."""
+    """Default first run must not write in home; optional setup must never print the key."""
 
     def test_update_check_is_opt_in(self):
         src = (ROOT / "npm-wrapper" / "src" / "index.ts").read_text()
@@ -58,7 +58,7 @@ class FirstRunAndSetupLeakNothing(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "node is required")
     def test_setup_claude_never_prints_the_key_when_registration_fails(self):
         with tempfile.TemporaryDirectory() as d:
-            # Sealed PATH (Codex B288 R2): ONLY inert stubs for every CLI the helper knows, plus node and which.
+            # Sealed PATH: ONLY inert stubs for every CLI the helper knows, plus node and which.
             # No installed claude/codex/gemini/grok is reachable, so nothing real is registered or connected.
             home = pathlib.Path(d) / "home"; home.mkdir()
             work = pathlib.Path(d) / "cwd"; work.mkdir()

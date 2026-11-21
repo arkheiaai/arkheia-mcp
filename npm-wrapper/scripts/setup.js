@@ -3,8 +3,7 @@
  * Post-install script for @arkheia/mcp-server.
  *
  * It changes NOTHING on the user's machine: no file in the home directory, no agent instruction file, no saved key.
- * It reads no API key and prints no part of one. It only prints how to finish setup (B-288; David approved removing
- * the automatic edits on 29 Oct and 17 Nov 2026).
+ * It reads no API key and prints no part of one. It only prints how to finish setup.
  *
  * The detection protocol for Claude Code or Codex is opt-in: copy CLAUDE_MD_TEMPLATE.md (shipped in this package)
  * into your own agent instructions file.

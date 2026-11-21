@@ -148,9 +148,9 @@ Whether a checked response was really wrong or fine. Pass the `detection_id` fro
 
 **What you get back:** one of three results.
 
-- `recorded: true` with an id: the service acknowledged it with that id.
+- `recorded: true` with an id: the service answered with its documented success status (201) and a valid id.
 - `recorded: false`: the service refused it, or the request never left your machine. The error says why.
-- `recorded: "unknown"`: the request may have reached the service (a timeout, a dropped connection, a server error, or a reply with no id), so it may have been stored. The tool does not retry on its own after that. For `arkheia_feedback` the result includes a `submission_id`; to try again, call the tool with the same message and that `submission_id`. Whether a repeat is then de-duplicated depends on the service, so a repeat may still be stored twice. For `arkheia_report`, check `arkheia_reports` with `action: "list"` before sending again; if a report already exists for that detection, a new one is refused.
+- `recorded: "unknown"`: the request may have reached the service (a timeout, a dropped connection, a server error, or a reply that is not the documented acknowledgement), so it may have been stored. The tool does not retry on its own after that. For `arkheia_feedback` the result includes a `submission_id` and the names of the arguments you supplied; to try again, call the tool with EVERY original argument (`message`, and `kind` and `email` if you gave them) unchanged and that same `submission_id`. A changed field under an existing `submission_id` is refused as a conflict. Whether a repeat is de-duplicated depends on the service, so a repeat may still be stored twice. For `arkheia_report`, check `arkheia_reports` with `action: "list"` before sending again; if a report already exists for that detection, a new one is refused.
 
 The tool retries by itself only when the request provably never left your machine (for example connection refused), and only once. Error text from the service is never shown in the result.
 

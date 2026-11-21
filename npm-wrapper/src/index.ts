@@ -110,7 +110,7 @@ async function main() {
     loadConfig();
     checkCRLF();
     // Opt-in only: the check writes ~/.arkheia/.update-check, and a default run must change nothing in the user's
-    // home (B-288, Codex R1). Set ARKHEIA_UPDATE_CHECK=1 to enable it.
+    // home. Set ARKHEIA_UPDATE_CHECK=1 to enable it.
     if (process.env.ARKHEIA_UPDATE_CHECK === "1") checkForUpdate(); // fire-and-forget, never blocks startup
 
     const ARKHEIA_PROXY_URL = process.env.ARKHEIA_PROXY_URL || "http://localhost:8098";

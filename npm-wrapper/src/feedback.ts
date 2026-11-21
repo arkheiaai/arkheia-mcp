@@ -81,7 +81,10 @@ export function looksLikeCredential(text: string, own_key?: string): boolean {
 // No text from the service is ever passed into a result: messages are fixed per status class.
 // ---------------------------------------------------------------------------
 
-export type Outcome = { recorded: false | "unknown"; error: string; retryable: boolean; submission_id?: string; already_reported?: boolean };
+export type Outcome = {
+    recorded: false | "unknown"; error: string; retryable: boolean;
+    submission_id?: string; repeat_arguments?: string[]; already_reported?: boolean; conflict?: boolean;
+};
 
 function refused(what: string, reason: string, retryable: boolean, extra: Partial<Outcome> = {}): Outcome {
     const tail = retryable ? "It is safe to try again." : "Retrying the same request will not help.";
@@ -96,9 +99,16 @@ function unknownOutcome(what: string, reason: string, advice: string, extra: Par
     };
 }
 
+// Phase of one request, tracked explicitly:
+//   "connecting": fetch() has not produced response headers. Only here can a failure mean "never sent",
+//                 and only for a cause that provably happens before sending.
+//   "headers":    response headers arrived, so the request WAS sent. A non-success status is a refusal
+//                 whatever the body does; a body failure after a success status is unknown.
 type Reply =
     | { ok: true; status: number; json: any }
-    | { ok: false; kind: "unsent" | "maybe_sent" | "http"; why?: "timeout" | "error"; status?: number };
+    | { ok: false; kind: "unsent" }
+    | { ok: false; kind: "maybe_sent"; why: "timeout" | "error" }
+    | { ok: false; kind: "http"; status: number };
 
 const UNSENT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN"]);
 
@@ -109,6 +119,28 @@ function provablyUnsent(e: any): boolean {
 }
 
 class Deadline extends Error { constructor() { super("deadline"); this.name = "Deadline"; } }
+
+type PublicReport = {
+    report_id: string; detection_id: string; outcome: string; category: string | null;
+    evidence: string | null; reporter_kind: string; created_at: string | null;
+};
+
+/** One row of GET /v1/reports against the public shape; undefined if it does not fit. */
+function validRow(x: any): PublicReport | undefined {
+    if (!x || typeof x !== "object" || Array.isArray(x)) return undefined;
+    const optStr = (v: any, max = 1000) => v === undefined || v === null || (typeof v === "string" && v.length <= max);
+    if (typeof x.report_id !== "string" || !UUID_PATTERN.test(x.report_id)) return undefined;
+    if (typeof x.event_id !== "string" || !ID_PATTERN.test(x.event_id)) return undefined;
+    if (x.outcome !== "wrong" && x.outcome !== "fine") return undefined;
+    if (x.reporter_kind !== "agent" && x.reporter_kind !== "human") return undefined;
+    if (x.category !== undefined && x.category !== null && !(REPORT_CATEGORIES as readonly string[]).includes(x.category)) return undefined;
+    if (!optStr(x.evidence, EVIDENCE_MAX) || !optStr(x.created_at, 64)) return undefined;
+    return {
+        report_id: x.report_id, detection_id: x.event_id, outcome: x.outcome,
+        category: x.category ?? null, evidence: x.evidence ?? null,
+        reporter_kind: x.reporter_kind, created_at: x.created_at ?? null,
+    };
+}
 
 export class FeedbackClient {
     private hosted_url: string;
@@ -121,14 +153,16 @@ export class FeedbackClient {
 
     /**
      * One request. The deadline covers the headers AND the body. A second attempt happens only when
-     * the first provably never left this machine (connection refused, name not found), or, for a
-     * read-only request, on any network failure. After a possibly-sent write there is no retry.
+     * a failure before any response headers has a provably-unsent cause, or, for a read-only request,
+     * on any failure. Once headers have arrived the request was sent: a non-success status is returned
+     * as that refusal without reading its body, and a failure reading a success body is "maybe_sent".
      */
     private async call(method: string, path: string, body?: unknown, idempotent = false): Promise<Reply> {
         let last: Reply = { ok: false, kind: "unsent" };
         for (let attempt = 0; attempt < 2; attempt++) {
             const controller = new AbortController();
             let timer: ReturnType<typeof setTimeout> | undefined;
+            let phase: "connecting" | "headers" = "connecting";
             const deadline = new Promise<never>((_res, rej) => {
                 timer = setTimeout(() => { controller.abort(); rej(new Deadline()); }, this.timeout_ms);
             });
@@ -143,8 +177,12 @@ export class FeedbackClient {
                     redirect: "error", // the key is never re-sent to wherever a redirect points
                     signal: controller.signal,
                 });
+                phase = "headers";
+                if (!resp.ok) {
+                    try { await resp.body?.cancel(); } catch { /* the status is what matters */ }
+                    return { ok: false, kind: "http", status: resp.status };
+                }
                 const text = await resp.text();
-                if (!resp.ok) return { ok: false, kind: "http", status: resp.status };
                 let json: any = undefined;
                 if (text) { try { json = JSON.parse(text); } catch { json = undefined; } }
                 return { ok: true, status: resp.status, json };
@@ -156,7 +194,7 @@ export class FeedbackClient {
                 if (e instanceof Deadline) {
                     last = { ok: false, kind: "maybe_sent", why: "timeout" };
                     if (!idempotent) return last;
-                } else if (provablyUnsent(e)) {
+                } else if (phase === "connecting" && provablyUnsent(e)) {
                     last = { ok: false, kind: "unsent" };
                 } else {
                     last = { ok: false, kind: "maybe_sent", why: "error" };
@@ -194,20 +232,24 @@ export class FeedbackClient {
                 ? "the Arkheia service did not answer in time."
                 : "the connection failed or was cut after the request may have been sent.", advice, extra);
         }
-        const s = r.status ?? 0;
+        const s = r.status;
         if (s === 401 || s === 403) return refused(what, `the Arkheia API key was rejected (HTTP ${s}). Check ARKHEIA_API_KEY.`, false, extra);
         if (s === 429) return refused(what, "the service is rate limiting this key (HTTP 429). Wait a little first.", true, extra);
         if (s >= 500) return unknownOutcome(what, `the Arkheia service reported an error (HTTP ${s}).`, advice, extra);
         return refused(what, `the Arkheia service refused the request (HTTP ${s}).`, false, extra);
     }
 
-    private noId(what: string, advice: string, extra: Partial<Outcome> = {}): Outcome {
-        return unknownOutcome(what, "the service answered without an id, so receipt cannot be confirmed.", advice, extra);
+    /** A success-class reply that is not the documented acknowledgement is not a confirmed write. */
+    private badAck(what: string, status: number, expected: number, advice: string, extra: Partial<Outcome> = {}): Outcome {
+        return unknownOutcome(what, status === expected
+            ? "the service answered without a valid id, so receipt cannot be confirmed."
+            : `the service answered HTTP ${status} instead of the expected ${expected}, so receipt cannot be confirmed.`,
+            advice, extra);
     }
 
-    private static idOf(json: any, field: string): string | undefined {
+    private static uuidOf(json: any, field: string): string | undefined {
         const v = json?.[field];
-        return typeof v === "string" && v.length > 0 && v.length <= 200 ? v : undefined;
+        return typeof v === "string" && UUID_PATTERN.test(v) ? v : undefined;
     }
 
     private static readonly ACK = "The Arkheia service acknowledged it with this id. Quote the id if you follow up.";
@@ -242,13 +284,26 @@ export class FeedbackClient {
         const body: Record<string, string> = { message, submission_id };
         if (kind) body.context = kind;
         if (email) body.email = email;
-        const advice = `If you want to try again, call arkheia_feedback again with the same message and this same submission_id (${submission_id}). ` +
+        const repeat_arguments = ["message", ...(kind ? ["kind"] : []), ...(email ? ["email"] : [])];
+        const advice = `To try again, call arkheia_feedback again with EVERY original argument (${repeat_arguments.join(", ")}) ` +
+            `unchanged and this same submission_id (${submission_id}). A changed field under the same submission_id is refused. ` +
             "Whether a repeat is de-duplicated depends on the service.";
+        const extra = { submission_id, repeat_arguments };
 
         const r = await this.call("POST", "/v1/feedback", body);
-        if (!r.ok) return this.failure(what, r, advice, { submission_id });
-        const id = FeedbackClient.idOf(r.json, "feedback_id");
-        if (!id) return this.noId(what, advice, { submission_id });
+        if (!r.ok) {
+            if (r.kind === "http" && r.status === 409) {
+                return {
+                    recorded: false as const, retryable: false, conflict: true, ...extra,
+                    error: "A submission with this submission_id already exists with different content (message, kind or email). " +
+                        "Nothing new was stored. To confirm the earlier one, repeat its original arguments exactly; " +
+                        "to send a different message, call again without a submission_id.",
+                };
+            }
+            return this.failure(what, r, advice, extra);
+        }
+        const id = r.status === 201 ? FeedbackClient.uuidOf(r.json, "feedback_id") : undefined;
+        if (!id) return this.badAck(what, r.status, 201, advice, extra);
         return { recorded: true as const, feedback_id: id, submission_id, note: FeedbackClient.ACK };
     }
 
@@ -299,8 +354,8 @@ export class FeedbackClient {
             }
             return this.failure(what, r, advice);
         }
-        const id = FeedbackClient.idOf(r.json, "report_id");
-        if (!id) return this.noId(what, advice);
+        const id = r.status === 201 ? FeedbackClient.uuidOf(r.json, "report_id") : undefined;
+        if (!id) return this.badAck(what, r.status, 201, advice);
         return { recorded: true as const, report_id: id, note: FeedbackClient.ACK };
     }
 
@@ -308,22 +363,20 @@ export class FeedbackClient {
 
     async list_reports(limit: number = 20) {
         const what = "The report list";
-        const early = this.precheck(what);
         const wording = (o: Outcome): Outcome => ({ ...o, recorded: false, error: o.error.replace("was NOT recorded", "could not be fetched").replace("may or may not have been recorded", "could not be fetched") });
+        const early = this.precheck(what);
         if (early) return wording(early);
         const n = Math.min(Math.max(Math.trunc(limit) || 20, 1), 100);
         const r = await this.call("GET", `/v1/reports?limit=${n}`, undefined, true);
         if (!r.ok) return wording(this.failure(what, r, "Try again."));
-        if (!Array.isArray(r.json?.reports)) {
-            return wording(this.noId(what, "Try again."));
+        const rows = Array.isArray(r.json?.reports) ? r.json.reports.map(validRow) : undefined;
+        if (r.status !== 200 || !rows || rows.some((x: any) => x === undefined)) {
+            return wording({
+                recorded: false, retryable: true,
+                error: "The report list was NOT recorded: the service reply was not in the expected shape. It is safe to try again.",
+            });
         }
-        // Only the caller's own report fields are passed on, and nothing else the service may add.
-        const reports = r.json.reports.map((x: any) => ({
-            report_id: x?.report_id, detection_id: x?.event_id, outcome: x?.outcome,
-            category: x?.category ?? null, evidence: x?.evidence ?? null,
-            reporter_kind: x?.reporter_kind, created_at: x?.created_at ?? null,
-        }));
-        return { ok: true as const, reports };
+        return { ok: true as const, reports: rows as PublicReport[] };
     }
 
     async delete_report(report_id: string | undefined) {

@@ -156,7 +156,7 @@ export class ProxyClient {
             response: response,
             prompt: prompt,
         };
-        const headers = { "X-Arkheia-Key": this.api_key || "" };
+        const headers = { "X-Arkheia-Key": this.api_key || "", "Content-Type": "application/json" };
 
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), this.timeout);
