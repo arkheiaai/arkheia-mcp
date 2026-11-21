@@ -99,7 +99,7 @@ claude mcp list
 # Codex — shows 'enabled' (not a live check)
 codex mcp list
 
-# Grok — best: spawns the server and lists all 9 tools
+# Grok — best: spawns the server and lists all 12 tools
 grok mcp test arkheia
 
 # Gemini — no built-in test; start a session and try the tool
@@ -113,6 +113,9 @@ grok mcp test arkheia
 |------|-------------|
 | `arkheia_verify` | Score any model response for fabrication risk (LOW/MEDIUM/HIGH) |
 | `arkheia_audit_log` | Review your detection history |
+| `arkheia_feedback` | Send short feedback to Arkheia |
+| `arkheia_report` | Say whether a checked response was really wrong or fine |
+| `arkheia_reports` | List or delete your own reports |
 | `run_grok` | Call Grok + screen for fabrication |
 | `run_gemini` | Call Gemini + screen for fabrication |
 | `run_ollama` | Call local Ollama model + screen |
@@ -120,6 +123,28 @@ grok mcp test arkheia
 | `memory_store` | Persistent knowledge graph — upsert entity |
 | `memory_retrieve` | Knowledge graph lookup |
 | `memory_relate` | Create relationship between entities |
+
+## Sending feedback
+
+Two tools let you (or your agent) tell us how Arkheia is doing. Both use your `ARKHEIA_API_KEY`.
+
+Free-text feedback, for example "tell Arkheia the verdict on that answer was a false alarm":
+
+```json
+{"tool": "arkheia_feedback", "arguments": {"message": "The check flagged a correct answer.", "kind": "false_alarm"}}
+```
+
+`kind` is optional: `bug`, `false_alarm`, `missed_problem`, `feature_request`, `praise` or `other`. `email` is optional, used only to reply to you, and sent only if you supply it. `message` is 5 to 2,000 characters.
+
+Whether a checked response was really wrong or fine. Pass the `detection_id` from the `arkheia_verify` result:
+
+```json
+{"tool": "arkheia_report", "arguments": {"detection_id": "<detection_id from arkheia_verify>", "outcome": "wrong", "evidence": "checked src/x.py: no such function", "category": "invented_api"}}
+```
+
+`outcome` is `wrong` or `fine` and describes the model's response, not Arkheia's score. `evidence` is optional, one line, at most 500 characters. `category` is optional: `invented_api`, `invented_file_or_path`, `wrong_fact_or_number`, `invented_source`, `wrong_code_behaviour`, `misread_context` or `other`. `reporter_kind` is `agent` (default) or `human`. `arkheia_reports` with `action: "list"` shows your own reports, and `action: "delete"` with a `report_id` removes one so you can report again.
+
+**What is sent:** only the fields you pass to the tool (plus a random submission id for feedback, so a retry is not counted twice), with your API key in a request header. **What is not sent:** no conversation, prompt, response, file, environment details or API key in the text. Text that looks like an API key or token is refused rather than sent. You get a success message only when the service returns an id; on any failure the tool says it was NOT recorded, and you can try again.
 
 ## 35+ Model Profiles
 

@@ -1,6 +1,6 @@
 {
   "name": "@arkheia/mcp-server",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "description": "Arkheia MCP Server — Fabrication detection for AI agents. Know when your AI is making things up.",
   "main": "dist/index.js",
   "bin": {
@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "test": "tsc -p tsconfig.test.json && node --test .test-build/test/",
     "start": "node dist/index.js",
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/setup.js"

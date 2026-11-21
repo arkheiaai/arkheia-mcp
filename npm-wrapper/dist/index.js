@@ -43,6 +43,7 @@ const fs = __importStar(require("fs"));
 const proxy_client_js_1 = require("./proxy-client.js");
 const tool_registry_js_1 = require("./tool-registry.js");
 const providers_js_1 = require("./providers.js");
+const feedback_js_1 = require("./feedback.js");
 const memory_js_1 = require("./memory.js");
 // ---------------------------------------------------------------------------
 // Config Loading
@@ -91,7 +92,7 @@ function handleError(toolName, e) {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
-const CURRENT_VERSION = "1.2.2";
+const CURRENT_VERSION = "1.3.0";
 async function checkForUpdate() {
     // Check once per day — skip if checked recently
     const markerPath = path.join(os.homedir(), '.arkheia', '.update-check');
@@ -147,9 +148,10 @@ async function main() {
             "Then set: export ARKHEIA_API_KEY=ak_live_...\n\n");
     }
     const proxy = new proxy_client_js_1.ProxyClient(ARKHEIA_PROXY_URL, 10.0, ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
-    const server = new mcp_js_1.McpServer({ name: "arkheia-trust", version: "1.2.2" });
+    const feedback = new feedback_js_1.FeedbackClient(ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
+    const server = new mcp_js_1.McpServer({ name: "arkheia-trust", version: "1.3.0" });
     // ── Detection & audit ──────────────────────────────────────────
-    server.tool("arkheia_verify", "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief confidence note. LOW = show normally. Never hide or suppress a response — always surface it to the user with the appropriate risk context.", { prompt: zod_1.z.string(), response: zod_1.z.string(), model: zod_1.z.string() }, async ({ prompt, response, model }) => {
+    server.tool("arkheia_verify", "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief confidence note. LOW = show normally. Never hide or suppress a response — always surface it to the user with the appropriate risk context. The result's detection_id can be passed to arkheia_report to say whether the checked response was really right or wrong.", { prompt: zod_1.z.string(), response: zod_1.z.string(), model: zod_1.z.string() }, async ({ prompt, response, model }) => {
         try {
             (0, tool_registry_js_1.check)("arkheia_verify");
             const result = await proxy.verify(prompt, response, model);
@@ -167,6 +169,45 @@ async function main() {
         }
         catch (e) {
             return handleError("arkheia_audit_log", e);
+        }
+    });
+    // ── Feedback & reports ─────────────────────────────────────────
+    // These return only whether the server stored the item, and its id. They never carry a verdict.
+    function wrapFeedback(result) {
+        const failed = result.recorded === false || result.deleted === false || (result.ok === false);
+        return { ...wrapResult(result), ...(failed ? { isError: true } : {}) };
+    }
+    function feedbackError(toolName, e) {
+        process.stderr.write(`[arkheia] ${toolName} failed unexpectedly\n`);
+        return wrapFeedback({ recorded: false, retryable: true, error: "Nothing was recorded: the request failed unexpectedly inside the tool. It is safe to try again." });
+    }
+    server.tool("arkheia_feedback", "Send short feedback about Arkheia to its makers: a bug, a false alarm, a missed problem, a feature request, or praise. Use it when the user asks to give feedback, or when you hit a problem with Arkheia itself. Only what you pass here is sent. The email is optional, is used only to reply, and should be left out unless the user gives it. Do not include secrets or API keys. Success is reported only with an id from the server.", feedback_js_1.feedbackShape, async (args) => {
+        try {
+            (0, tool_registry_js_1.check)("arkheia_feedback");
+            return wrapFeedback(await feedback.send_feedback(args));
+        }
+        catch (e) {
+            return feedbackError("arkheia_feedback", e);
+        }
+    });
+    server.tool("arkheia_report", "Say whether a response that arkheia_verify checked was really wrong or fine. Pass the detection_id field from that arkheia_verify result. outcome 'wrong' means the model's response was fabricated or incorrect, 'fine' means it was correct; this grades the model's response, not Arkheia's score. Give one line of evidence if you checked, and reporter_kind 'human' only when the user is reporting. One report per detection; success is reported only with a report_id from the server.", feedback_js_1.reportShape, async (args) => {
+        try {
+            (0, tool_registry_js_1.check)("arkheia_report");
+            return wrapFeedback(await feedback.send_report(args));
+        }
+        catch (e) {
+            return feedbackError("arkheia_report", e);
+        }
+    });
+    server.tool("arkheia_reports", "List your own reports made with arkheia_report (action 'list'), or delete one by its report_id (action 'delete') so you can report that response again.", feedback_js_1.reportsShape, async ({ action, report_id, limit }) => {
+        try {
+            (0, tool_registry_js_1.check)("arkheia_reports");
+            return wrapFeedback(action === "list"
+                ? await feedback.list_reports(limit)
+                : await feedback.delete_report(report_id));
+        }
+        catch (e) {
+            return feedbackError("arkheia_reports", e);
         }
     });
     // ── Provider wrappers ──────────────────────────────────────────
