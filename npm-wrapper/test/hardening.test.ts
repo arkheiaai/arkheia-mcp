@@ -170,3 +170,100 @@ test("READMEs and the installer agree: Node 20+, Python only for the separate Py
     assert.ok(!/Node\.js 18/.test(sh) && /-lt 20/.test(sh));
     assert.match(sh.slice(0, 900), /needs no Python/);
 });
+
+// ---- round 1 review: real failure shapes, secrets in the model field ---------------------------
+
+const LEAKS = ["s3cretpass", "user:", "pw@", "token=abc123", "y=1", "/base/path", "/secret/path", "x?token"];
+const noLeak = (text: string, label: string) => { for (const l of LEAKS) assert.ok(!text.includes(l), `${label} leaks ${l}: ${text.slice(0, 200)}`); };
+
+function captureStderr() {
+    const lines: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (c: any) => { lines.push(String(c)); return true; };
+    return { text: () => lines.join(""), restore: () => { (process.stderr as any).write = orig; } };
+}
+
+test("the real Node failure shapes (embedded credentials, unparseable address) leak nothing in logs or results", async () => {
+    // The shapes Node's own fetch throws; checked here so the test fails if a future Node changes them silently.
+    const probe: string[] = [];
+    for (const u of ["https://user:s3cretpass@host.example.test/secret/path?token=abc123", "not a url/ x?token=abc123"]) {
+        try { await fetch(u); } catch (e: any) { probe.push(e.message); }
+    }
+    assert.equal(probe.length, 2);
+    assert.ok(probe.some((m) => m.includes("s3cretpass")) || probe.some((m) => m.includes("token=abc123")), "the raw exception text really does contain the input");
+
+    const cap = captureStderr();
+    let results: any[] = [];
+    try {
+        const bad = ["https://user:s3cretpass@host.example.test:8443/base/path?token=abc123", "not a url/ x?token=abc123"];
+        for (const url of bad) {
+            const p = new ProxyClient(url, 1.0, url, "ak_test_dummy");
+            results.push(await p.verify("p", "r", "m"));
+            results.push(await p.get_audit_log());
+            results.push(await new ProxyClient("http://localhost:1", 1.0, url, "ak_test_dummy").verify("p", "r", "m"));
+            process.env.OLLAMA_BASE_URL = url;
+            results.push(await call_ollama("p", "phi4:14b"));
+        }
+    } finally { cap.restore(); delete process.env.OLLAMA_BASE_URL; }
+    noLeak(cap.text(), "log");
+    noLeak(JSON.stringify(results), "result");
+    assert.ok(cap.text().length > 0, "something was logged");
+    assert.match(cap.text() + JSON.stringify(results), /address|connection|request failed/i);
+});
+
+test("a thrown exception with the address in its text is described by class, never by its text", async () => {
+    const { describeTransportError } = await import("../src/egress.js");
+    for (const [e, code] of [
+        [Object.assign(new TypeError("Request cannot be constructed from a URL that includes credentials: https://u:p@h/x?y=1")), "address_has_credentials"],
+        [Object.assign(new TypeError("Failed to parse URL from https://u:p@h/x?y=1"), { cause: { code: "ERR_INVALID_URL" } }), "invalid_address"],
+        [Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNREFUSED" } }), "network_error"],
+        [Object.assign(new Error("anything with https://u:p@h/x?y=1 in it")), "request_failed"],
+        [Object.assign(new Error("x"), { name: "AbortError" }), "timeout"],
+    ] as const) {
+        const d = describeTransportError(e);
+        assert.equal(d.code, code);
+        assert.ok(!/u:p|h\/x|y=1/.test(d.text + d.code));
+    }
+});
+
+test("direct verify timeout diagnostics do not include the caller's model", async () => {
+    const cap = captureStderr();
+    try {
+        (globalThis as any).fetch = (_u: any, init: any) => new Promise((_res, rej) => init.signal.addEventListener("abort", () => rej(Object.assign(new Error("a"), { name: "AbortError" }))));
+        const p = new ProxyClient("http://localhost:1", 0.05, "https://hosted.example.test", "ak_test_dummy");
+        await p.verify("p", "r", "my-private-model-name");
+    } finally { cap.restore(); }
+    assert.match(cap.text(), /timed out/);
+    assert.ok(!cap.text().includes("my-private-model-name"));
+});
+
+test("every configured secret pasted as (or into) a model name is refused: zero transport calls, never echoed", async () => {
+    const secrets: Record<string, string> = {
+        XAI_API_KEY: "xai-PLACEHOLDER-secret-1234", GOOGLE_API_KEY: "gkey_PLACEHOLDER_9876543210", TOGETHER_API_KEY: "tog.PLACEHOLDER.value.5555",
+        ARKHEIA_API_KEY: "arkheia-PLACEHOLDER-token-77",
+    };
+    const saved: Record<string, string | undefined> = {};
+    for (const [k, v] of Object.entries(secrets)) { saved[k] = process.env[k]; process.env[k] = v; }
+    try {
+        mockFetch();
+        const fns: [string, (m: string) => Promise<any>][] = [
+            ["grok", (m) => call_grok("p", m)], ["gemini", (m) => call_gemini("p", m)],
+            ["together", (m) => call_together("p", m)], ["ollama", (m) => call_ollama("p", m)],
+        ];
+        for (const [name, fn] of fns) {
+            for (const [envName, secret] of Object.entries(secrets)) {
+                for (const model of [secret, `prefix-${secret}`, `${secret}-suffix`]) {
+                    const r: any = await fn(model);
+                    assert.equal(r.error, "invalid_model_name", `${name} / ${envName}`);
+                    assert.equal(r.model, "");
+                    assert.ok(!JSON.stringify(r).includes(secret), "not echoed");
+                }
+            }
+        }
+        assert.deepEqual(calls, [], "nothing was sent");
+        // a short unrelated model name is not caught by a longer secret
+        assert.equal((await call_ollama("p", "phi4:14b") as any).error, null);
+    } finally {
+        for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+    }
+});

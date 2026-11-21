@@ -8,7 +8,7 @@ import * as fs from 'fs';
 
 import { ProxyClient } from './proxy-client.js';
 import { check, PolicyViolation } from './tool-registry.js';
-import { applyEgress, isArkheiaHostedOrigin, displayOrigin, DEFAULT_OLLAMA_URL } from './egress.js';
+import { applyEgress, isArkheiaHostedOrigin, displayOrigin, describeTransportError, DEFAULT_OLLAMA_URL } from './egress.js';
 import { call_grok, call_gemini, call_ollama, call_together, modelNameError } from './providers.js';
 import { FeedbackClient, withReportability, feedbackShape, reportShape, reportsShape } from './feedback.js';
 import { store_entity, retrieve_entities, store_relation } from './memory.js';
@@ -57,8 +57,8 @@ function handleError(toolName: string, e: any) {
     if (e instanceof PolicyViolation) {
         return wrapResult({ error: e.reason, risk_level: "UNKNOWN" });
     }
-    process.stderr.write(`[arkheia] ${toolName} error: ${e.message}\n`);
-    return wrapResult({ error: e.message, risk_level: "UNKNOWN" });
+    process.stderr.write(`[arkheia] ${toolName} error: ${describeTransportError(e).text}\n`);
+    return wrapResult({ error: describeTransportError(e).text, risk_level: "UNKNOWN" });
 }
 
 // ---------------------------------------------------------------------------

@@ -87,8 +87,8 @@ function handleError(toolName, e) {
     if (e instanceof tool_registry_js_1.PolicyViolation) {
         return wrapResult({ error: e.reason, risk_level: "UNKNOWN" });
     }
-    process.stderr.write(`[arkheia] ${toolName} error: ${e.message}\n`);
-    return wrapResult({ error: e.message, risk_level: "UNKNOWN" });
+    process.stderr.write(`[arkheia] ${toolName} error: ${(0, egress_js_1.describeTransportError)(e).text}\n`);
+    return wrapResult({ error: (0, egress_js_1.describeTransportError)(e).text, risk_level: "UNKNOWN" });
 }
 // ---------------------------------------------------------------------------
 // Main

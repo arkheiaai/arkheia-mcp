@@ -105,7 +105,7 @@ class ProxyClient {
         catch (e) {
             clearTimeout(timeoutId);
             if (e.name === 'AbortError') {
-                logger.warn(`ProxyClient: /detect/verify timed out for model=${model_id}`);
+                logger.warn(`ProxyClient: /detect/verify timed out`);
                 return _unavailable("proxy_timeout");
             }
             else if (e.name === 'TypeError' && e.message.includes('fetch failed')) { // Common for network errors like connection refused
@@ -113,7 +113,7 @@ class ProxyClient {
                 return _unavailable("proxy_unavailable");
             }
             else {
-                logger.error(`ProxyClient: /detect/verify unexpected error: ${e.message}`);
+                logger.error(`ProxyClient: /detect/verify failed: ${(0, egress_js_1.describeTransportError)(e).text}`);
                 return _unavailable("proxy_error");
             }
         }
@@ -165,7 +165,7 @@ class ProxyClient {
         catch (e) {
             clearTimeout(timeoutId);
             if (e.name === 'AbortError') {
-                logger.warn(`ProxyClient: hosted /v1/detect timed out for model=${model_id}`);
+                logger.warn(`ProxyClient: hosted /v1/detect timed out`);
                 return _unavailable("hosted_timeout");
             }
             else if (e.name === 'TypeError' && e.message.includes('fetch failed')) {
@@ -173,7 +173,7 @@ class ProxyClient {
                 return _unavailable("hosted_unavailable");
             }
             else {
-                logger.error(`ProxyClient: hosted /v1/detect unexpected error: ${e.message}`);
+                logger.error(`ProxyClient: hosted /v1/detect failed: ${(0, egress_js_1.describeTransportError)(e).text}`);
                 return _unavailable("hosted_error");
             }
         }
@@ -215,7 +215,7 @@ class ProxyClient {
                 return _empty_log("proxy_unavailable");
             }
             else {
-                logger.error(`ProxyClient: /audit/log unexpected error: ${e.message}`);
+                logger.error(`ProxyClient: /audit/log failed: ${(0, egress_js_1.describeTransportError)(e).text}`);
                 return _empty_log("proxy_error");
             }
         }

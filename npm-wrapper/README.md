@@ -29,7 +29,9 @@ curl -X POST https://arkheia-proxy-production.up.railway.app/v1/provision \
   -d '{"email": "you@example.com"}'
 ```
 
-Set your key:
+New keys need email confirmation: we email a link to the address you gave. The key works once you open the link and press Confirm; a request that is not confirmed within 24 hours is deleted, and you can ask again. Until you confirm, the key is refused.
+
+Then set your key:
 
 ```bash
 export ARKHEIA_API_KEY="ak_live_..."
@@ -182,11 +184,11 @@ Manage your account at [arkheia.ai/mcp/account](https://arkheia.ai/mcp/account).
 
 ## The separate Python server
 
-The repository also contains a separate Python MCP server with nine tools (no feedback tools). It is not part of the npm package. If you use it, you need Python 3.10 to 3.13 with a working `pyexpat`. On macOS, Homebrew's current `brew install python` installs 3.14, which has a broken `pyexpat` link; use `brew install python@3.12` and check with `python3.12 -c "import pyexpat, ensurepip"`.
+The repository also contains a separate Python MCP server with nine tools (no feedback tools). It is not part of the npm package. If you use it, you need Python 3.10 to 3.13. If it fails to start with an error about `pyexpat` or `ensurepip`, your Python build is incomplete: install a different Python 3.10 to 3.13 build (for example a Python 3.12 from your package manager or python.org) and check it with `python3 -c "import pyexpat, ensurepip"` before trying again.
 
-**"Python 3.10+ is required but not found"** — Install Python 3.12: `brew install python@3.12` (macOS) or download from [python.org](https://python.org).
+**"Python 3.10+ is required but not found"** — Install Python 3.10 to 3.13 from your package manager or [python.org](https://python.org).
 
-**"No module named pip"** — Your Python installation has broken pip (common with Python 3.14 on macOS). Delete `~/.arkheia/venv` and switch to Python 3.12: `brew install python@3.12`.
+**"No module named pip"** — Your Python installation has no working pip. Delete `~/.arkheia/venv` and recreate it with a complete Python 3.10 to 3.13 build.
 
 ## Full Documentation
 

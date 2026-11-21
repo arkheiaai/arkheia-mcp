@@ -33,6 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.SECRET_ENV_NAMES = void 0;
 exports.modelNameError = modelNameError;
 exports.call_grok = call_grok;
 exports.call_gemini = call_gemini;
@@ -58,6 +59,8 @@ function _prompt_hash(prompt) {
 }
 // A caller-chosen model name goes into diagnostics, results and (Gemini) the request path, so it is
 // checked first: a conservative character set, no path tricks, and never anything shaped like a key.
+// Every credential the package reads (the Arkheia key may come from the config file, which is loaded into the environment).
+exports.SECRET_ENV_NAMES = ["ARKHEIA_API_KEY", "XAI_API_KEY", "GOOGLE_API_KEY", "TOGETHER_API_KEY"];
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/;
 const MODEL_PATTERN_NO_SLASH_COLON = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 /** Returns a fixed error code when the model name must be refused, else null. Never repeats the name. */
@@ -70,6 +73,12 @@ function modelNameError(model, strict = false) {
         return "invalid_model_name";
     if ((0, feedback_js_1.looksLikeCredential)(model, process.env.ARKHEIA_API_KEY))
         return "invalid_model_name";
+    // Any secret this package reads from the environment or config, as the whole name or inside it.
+    for (const name of exports.SECRET_ENV_NAMES) {
+        const secret = process.env[name];
+        if (secret && (model === secret || (secret.length >= 8 && model.includes(secret))))
+            return "invalid_model_name";
+    }
     return null;
 }
 function _refused_model(prompt) {
@@ -141,12 +150,12 @@ async function call_grok(prompt, model = "grok-4-fast-non-reasoning", kwargs = {
             return _err_response(model, prompt, "timeout");
         }
         else if (e.name === 'TypeError' && e.message.includes('fetch failed')) {
-            logger.error(`call_grok: network error for model=${model}: ${e.message}`);
+            logger.error(`call_grok: network error for model=${model}: ${(0, egress_js_1.describeTransportError)(e).text}`);
             return _err_response(model, prompt, "network_error");
         }
         else {
-            logger.error(`call_grok: unexpected error: ${e.message}`);
-            return _err_response(model, prompt, e.message);
+            logger.error(`call_grok: request failed: ${(0, egress_js_1.describeTransportError)(e).text}`);
+            return _err_response(model, prompt, (0, egress_js_1.describeTransportError)(e).code);
         }
     }
 }
@@ -212,12 +221,12 @@ async function call_gemini(prompt, model = "gemini-2.5-flash", max_output_tokens
             return _err_response(model, prompt, "timeout");
         }
         else if (e.name === 'TypeError' && e.message.includes('fetch failed')) {
-            logger.error(`call_gemini: network error for model=${model}: ${e.message}`);
+            logger.error(`call_gemini: network error for model=${model}: ${(0, egress_js_1.describeTransportError)(e).text}`);
             return _err_response(model, prompt, "network_error");
         }
         else {
-            logger.error(`call_gemini: unexpected error: ${e.message}`);
-            return _err_response(model, prompt, e.message);
+            logger.error(`call_gemini: request failed: ${(0, egress_js_1.describeTransportError)(e).text}`);
+            return _err_response(model, prompt, (0, egress_js_1.describeTransportError)(e).code);
         }
     }
 }
@@ -283,12 +292,12 @@ async function call_together(prompt, model = "moonshotai/Kimi-K2.5", max_tokens 
             return _err_response(model, prompt, "timeout");
         }
         else if (e.name === 'TypeError' && e.message.includes('fetch failed')) {
-            logger.error(`call_together: network error for model=${model}: ${e.message}`);
+            logger.error(`call_together: network error for model=${model}: ${(0, egress_js_1.describeTransportError)(e).text}`);
             return _err_response(model, prompt, "network_error");
         }
         else {
-            logger.error(`call_together: unexpected error: ${e.message}`);
-            return _err_response(model, prompt, e.message);
+            logger.error(`call_together: request failed: ${(0, egress_js_1.describeTransportError)(e).text}`);
+            return _err_response(model, prompt, (0, egress_js_1.describeTransportError)(e).code);
         }
     }
 }
@@ -353,8 +362,8 @@ async function call_ollama(prompt, model = "phi4:14b", kwargs = {}) {
             return _err_response(model, prompt, "ollama_unavailable");
         }
         else {
-            logger.error(`call_ollama: unexpected error: ${e.message}`);
-            return _err_response(model, prompt, e.message);
+            logger.error(`call_ollama: request failed: ${(0, egress_js_1.describeTransportError)(e).text}`);
+            return _err_response(model, prompt, (0, egress_js_1.describeTransportError)(e).code);
         }
     }
 }
