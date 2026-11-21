@@ -10,8 +10,6 @@ const logger = {
     warn: (m) => { process.stderr.write(`${m}\n`); },
     error: (m) => { process.stderr.write(`${m}\n`); },
 };
-// Hosted API defaults
-const HOSTED_API_URL = "https://arkheia-proxy-production.up.railway.app";
 class ProxyClient {
     base_url;
     timeout; // in milliseconds
@@ -22,9 +20,9 @@ class ProxyClient {
     hosted_url, api_key) {
         this.base_url = base_url.endsWith("/") ? base_url.slice(0, -1) : base_url;
         this.timeout = timeout * 1000; // Convert to milliseconds for fetch AbortController
-        this.hosted_url = (hosted_url || HOSTED_API_URL).endsWith("/")
-            ? (hosted_url || HOSTED_API_URL).slice(0, -1)
-            : (hosted_url || HOSTED_API_URL);
+        this.hosted_url = (hosted_url || egress_js_1.HOSTED_API_URL).endsWith("/")
+            ? (hosted_url || egress_js_1.HOSTED_API_URL).slice(0, -1)
+            : (hosted_url || egress_js_1.HOSTED_API_URL);
         this.api_key = api_key || process.env.ARKHEIA_API_KEY;
         this._local_available = true; // optimistic; flips on ConnectError
     }
@@ -37,8 +35,8 @@ class ProxyClient {
          * Never raises -- returns UNKNOWN on any error.
          */
         if (options.allowHosted === false) {
-            // A verifier address equal to the hosted origin would route this path to the hosted service: refuse.
-            if ((0, egress_js_1.sameOrigin)(this.base_url, this.hosted_url)) {
+            // A verifier address that is (or cannot be told apart from) the hosted origin would route this path to the hosted service: refuse.
+            if ((0, egress_js_1.isArkheiaHostedOrigin)(this.base_url, this.hosted_url)) {
                 logger.warn("The verifier address is the hosted service; this response is local-only, so nothing was sent");
                 return _unavailable("not_checked_local_verification_unavailable");
             }

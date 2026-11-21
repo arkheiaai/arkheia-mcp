@@ -202,6 +202,12 @@ async function main() {
     server.tool("run_ollama", egress.run_ollama.description, { prompt: zod_1.z.string(), model: zod_1.z.string().default("phi4:14b") }, async ({ prompt, model }) => {
         try {
             (0, tool_registry_js_1.check)("run_ollama");
+            // Never contact the Arkheia hosted service from this tool: refuse before the model request sends anything.
+            const ollamaUrl = process.env.OLLAMA_BASE_URL || egress_js_1.DEFAULT_OLLAMA_URL;
+            if ((0, egress_js_1.isArkheiaHostedOrigin)(ollamaUrl, process.env.ARKHEIA_HOSTED_URL)) {
+                const err = "configuration_error: OLLAMA_BASE_URL is the Arkheia hosted service (or cannot be read as an address); nothing was sent. Set it to your Ollama server.";
+                return wrapResult({ response: "", model, error: err, arkheia: { risk_level: "UNKNOWN", error: "not_checked_ollama_address_not_usable" } });
+            }
             const pr = await (0, providers_js_1.call_ollama)(prompt, model);
             if (pr.error)
                 return wrapResult({ ...pr, arkheia: { risk_level: "UNKNOWN", error: pr.error } });

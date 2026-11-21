@@ -8,7 +8,7 @@ import * as fs from 'fs';
 
 import { ProxyClient } from './proxy-client.js';
 import { check, PolicyViolation } from './tool-registry.js';
-import { applyEgress } from './egress.js';
+import { applyEgress, isArkheiaHostedOrigin, DEFAULT_OLLAMA_URL } from './egress.js';
 import { call_grok, call_gemini, call_ollama, call_together } from './providers.js';
 import { store_entity, retrieve_entities, store_relation } from './memory.js';
 
@@ -197,6 +197,12 @@ async function main() {
         async ({ prompt, model }) => {
             try {
                 check("run_ollama");
+                // Never contact the Arkheia hosted service from this tool: refuse before the model request sends anything.
+                const ollamaUrl = process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_URL;
+                if (isArkheiaHostedOrigin(ollamaUrl, process.env.ARKHEIA_HOSTED_URL)) {
+                    const err = "configuration_error: OLLAMA_BASE_URL is the Arkheia hosted service (or cannot be read as an address); nothing was sent. Set it to your Ollama server.";
+                    return wrapResult({ response: "", model, error: err, arkheia: { risk_level: "UNKNOWN", error: "not_checked_ollama_address_not_usable" } });
+                }
                 const pr = await call_ollama(prompt, model);
                 if (pr.error) return wrapResult({ ...pr, arkheia: { risk_level: "UNKNOWN", error: pr.error } });
                 const risk = await proxy.verify(prompt, pr.response, model, undefined, { allowHosted: false });

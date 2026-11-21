@@ -1,5 +1,5 @@
 import { URLSearchParams } from 'url';
-import { sameOrigin } from './egress.js';
+import { isArkheiaHostedOrigin, HOSTED_API_URL } from './egress.js';
 
 // Node.js native fetch doesn't have a global logger
 const logger = {
@@ -10,7 +10,6 @@ const logger = {
 };
 
 // Hosted API defaults
-const HOSTED_API_URL = "https://arkheia-proxy-production.up.railway.app";
 
 type VerifyResult = {
     risk_level: string;
@@ -66,8 +65,8 @@ export class ProxyClient {
          * Never raises -- returns UNKNOWN on any error.
          */
         if (options.allowHosted === false) {
-            // A verifier address equal to the hosted origin would route this path to the hosted service: refuse.
-            if (sameOrigin(this.base_url, this.hosted_url)) {
+            // A verifier address that is (or cannot be told apart from) the hosted origin would route this path to the hosted service: refuse.
+            if (isArkheiaHostedOrigin(this.base_url, this.hosted_url)) {
                 logger.warn("The verifier address is the hosted service; this response is local-only, so nothing was sent");
                 return _unavailable("not_checked_local_verification_unavailable");
             }
