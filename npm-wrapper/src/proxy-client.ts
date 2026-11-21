@@ -1,4 +1,5 @@
 import { URLSearchParams } from 'url';
+import { isArkheiaHostedOrigin, HOSTED_API_URL } from './egress.js';
 
 // Node.js native fetch doesn't have a global logger
 const logger = {
@@ -9,7 +10,6 @@ const logger = {
 };
 
 // Hosted API defaults
-const HOSTED_API_URL = "https://arkheia-proxy-production.up.railway.app";
 
 type VerifyResult = {
     risk_level: string;
@@ -55,13 +55,28 @@ export class ProxyClient {
         response: string,
         model_id: string,
         session_id?: string,
+        options: { allowHosted?: boolean } = {},
     ): Promise<VerifyResult> {
         /**
          * Detect fabrication in a model response.
          *
-         * Tries local proxy first. If unavailable, falls back to hosted API.
+         * Tries local proxy first. If unavailable, falls back to hosted API,
+         * unless allowHosted is false: then nothing is sent anywhere else.
          * Never raises -- returns UNKNOWN on any error.
          */
+        if (options.allowHosted === false) {
+            // A verifier address that is (or cannot be told apart from) the hosted origin would route this path to the hosted service: refuse.
+            if (isArkheiaHostedOrigin(this.base_url, this.hosted_url)) {
+                logger.warn("The verifier address is the hosted service; this response is local-only, so nothing was sent");
+                return _unavailable("not_checked_local_verification_unavailable");
+            }
+            const local = await this._verify_local(prompt, response, model_id, session_id);
+            if (local.error === "proxy_unavailable" || local.error === "proxy_timeout") {
+                logger.warn("Local verification unavailable; this response is local-only, so nothing was sent to the hosted service");
+                return _unavailable("not_checked_local_verification_unavailable");
+            }
+            return local;
+        }
         // Try local proxy first (if last attempt didn't fail with ConnectError)
         if (this._local_available) {
             const result = await this._verify_local(prompt, response, model_id, session_id);
@@ -120,6 +135,7 @@ export class ProxyClient {
                         "Content-Type": "application/json",
                     },
                     body: JSON.stringify(payload),
+                    redirect: "error", // a redirect is never followed: the request goes only to the configured address
                     signal: controller.signal,
                 }
             );
@@ -239,6 +255,7 @@ export class ProxyClient {
                 `${this.base_url}/audit/log?${params.toString()}`,
                 {
                     method: "GET",
+                    redirect: "error", // a redirect is never followed: the request goes only to the configured address
                     signal: controller.signal,
                 }
             );

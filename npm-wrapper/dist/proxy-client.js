@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.ProxyClient = void 0;
 const url_1 = require("url");
+const egress_js_1 = require("./egress.js");
 // Node.js native fetch doesn't have a global logger
 const logger = {
     // stdout carries the MCP protocol; log lines go to stderr only.
@@ -9,8 +10,6 @@ const logger = {
     warn: (m) => { process.stderr.write(`${m}\n`); },
     error: (m) => { process.stderr.write(`${m}\n`); },
 };
-// Hosted API defaults
-const HOSTED_API_URL = "https://arkheia-proxy-production.up.railway.app";
 class ProxyClient {
     base_url;
     timeout; // in milliseconds
@@ -21,19 +20,33 @@ class ProxyClient {
     hosted_url, api_key) {
         this.base_url = base_url.endsWith("/") ? base_url.slice(0, -1) : base_url;
         this.timeout = timeout * 1000; // Convert to milliseconds for fetch AbortController
-        this.hosted_url = (hosted_url || HOSTED_API_URL).endsWith("/")
-            ? (hosted_url || HOSTED_API_URL).slice(0, -1)
-            : (hosted_url || HOSTED_API_URL);
+        this.hosted_url = (hosted_url || egress_js_1.HOSTED_API_URL).endsWith("/")
+            ? (hosted_url || egress_js_1.HOSTED_API_URL).slice(0, -1)
+            : (hosted_url || egress_js_1.HOSTED_API_URL);
         this.api_key = api_key || process.env.ARKHEIA_API_KEY;
         this._local_available = true; // optimistic; flips on ConnectError
     }
-    async verify(prompt, response, model_id, session_id) {
+    async verify(prompt, response, model_id, session_id, options = {}) {
         /**
          * Detect fabrication in a model response.
          *
-         * Tries local proxy first. If unavailable, falls back to hosted API.
+         * Tries local proxy first. If unavailable, falls back to hosted API,
+         * unless allowHosted is false: then nothing is sent anywhere else.
          * Never raises -- returns UNKNOWN on any error.
          */
+        if (options.allowHosted === false) {
+            // A verifier address that is (or cannot be told apart from) the hosted origin would route this path to the hosted service: refuse.
+            if ((0, egress_js_1.isArkheiaHostedOrigin)(this.base_url, this.hosted_url)) {
+                logger.warn("The verifier address is the hosted service; this response is local-only, so nothing was sent");
+                return _unavailable("not_checked_local_verification_unavailable");
+            }
+            const local = await this._verify_local(prompt, response, model_id, session_id);
+            if (local.error === "proxy_unavailable" || local.error === "proxy_timeout") {
+                logger.warn("Local verification unavailable; this response is local-only, so nothing was sent to the hosted service");
+                return _unavailable("not_checked_local_verification_unavailable");
+            }
+            return local;
+        }
         // Try local proxy first (if last attempt didn't fail with ConnectError)
         if (this._local_available) {
             const result = await this._verify_local(prompt, response, model_id, session_id);
@@ -79,6 +92,7 @@ class ProxyClient {
                     "Content-Type": "application/json",
                 },
                 body: JSON.stringify(payload),
+                redirect: "error", // a redirect is never followed: the request goes only to the configured address
                 signal: controller.signal,
             });
             clearTimeout(timeoutId);
@@ -183,6 +197,7 @@ class ProxyClient {
         try {
             const resp = await fetch(`${this.base_url}/audit/log?${params.toString()}`, {
                 method: "GET",
+                redirect: "error", // a redirect is never followed: the request goes only to the configured address
                 signal: controller.signal,
             });
             clearTimeout(timeoutId);
