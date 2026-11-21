@@ -33,11 +33,15 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.SECRET_ENV_NAMES = void 0;
+exports.modelNameError = modelNameError;
 exports.call_grok = call_grok;
 exports.call_gemini = call_gemini;
 exports.call_together = call_together;
 exports.call_ollama = call_ollama;
 const crypto = __importStar(require("crypto"));
+const egress_js_1 = require("./egress.js");
+const feedback_js_1 = require("./feedback.js");
 // Node.js native fetch doesn't have a global logger, use console
 const logger = {
     // stdout carries the MCP protocol; log lines go to stderr only.
@@ -53,6 +57,34 @@ const _OLLAMA_TIMEOUT = 120 * 1000; // 120 seconds in milliseconds
 function _prompt_hash(prompt) {
     return crypto.createHash('sha256').update(prompt).digest('hex');
 }
+// A caller-chosen model name goes into diagnostics, results and (Gemini) the request path, so it is
+// checked first: a conservative character set, no path tricks, and never anything shaped like a key.
+// Every credential the package reads (the Arkheia key may come from the config file, which is loaded into the environment).
+exports.SECRET_ENV_NAMES = ["ARKHEIA_API_KEY", "XAI_API_KEY", "GOOGLE_API_KEY", "TOGETHER_API_KEY"];
+const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/;
+const MODEL_PATTERN_NO_SLASH_COLON = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+/** Returns a fixed error code when the model name must be refused, else null. Never repeats the name. */
+function modelNameError(model, strict = false) {
+    if (typeof model !== "string")
+        return "invalid_model_name";
+    if (!(strict ? MODEL_PATTERN_NO_SLASH_COLON : MODEL_PATTERN).test(model))
+        return "invalid_model_name";
+    if (model.includes("..") || model.includes("//"))
+        return "invalid_model_name";
+    if ((0, feedback_js_1.looksLikeCredential)(model, process.env.ARKHEIA_API_KEY))
+        return "invalid_model_name";
+    // Any secret this package reads from the environment or config, as the whole name or inside it.
+    for (const name of exports.SECRET_ENV_NAMES) {
+        const secret = process.env[name];
+        if (secret && (model === secret || (secret.length >= 8 && model.includes(secret))))
+            return "invalid_model_name";
+    }
+    return null;
+}
+function _refused_model(prompt) {
+    // The refused name is not echoed back.
+    return _err_response("", prompt, "invalid_model_name");
+}
 function _err_response(model, prompt, error) {
     return {
         response: `[provider_error: ${error}]`,
@@ -65,6 +97,8 @@ function _err_response(model, prompt, error) {
 // Grok (xAI) — OpenAI-compatible /v1/chat/completions
 // ---------------------------------------------------------------------------
 async function call_grok(prompt, model = "grok-4-fast-non-reasoning", kwargs = {}) {
+    if (modelNameError(model, false))
+        return _refused_model(prompt);
     /**
      * Call xAI Grok chat completions API.
      *
@@ -116,12 +150,12 @@ async function call_grok(prompt, model = "grok-4-fast-non-reasoning", kwargs = {
             return _err_response(model, prompt, "timeout");
         }
         else if (e.name === 'TypeError' && e.message.includes('fetch failed')) {
-            logger.error(`call_grok: network error for model=${model}: ${e.message}`);
+            logger.error(`call_grok: network error for model=${model}: ${(0, egress_js_1.describeTransportError)(e).text}`);
             return _err_response(model, prompt, "network_error");
         }
         else {
-            logger.error(`call_grok: unexpected error: ${e.message}`);
-            return _err_response(model, prompt, e.message);
+            logger.error(`call_grok: request failed: ${(0, egress_js_1.describeTransportError)(e).text}`);
+            return _err_response(model, prompt, (0, egress_js_1.describeTransportError)(e).code);
         }
     }
 }
@@ -129,6 +163,8 @@ async function call_grok(prompt, model = "grok-4-fast-non-reasoning", kwargs = {
 // Gemini (Google) — generateContent REST API
 // ---------------------------------------------------------------------------
 async function call_gemini(prompt, model = "gemini-2.5-flash", max_output_tokens = 1000, kwargs = {}) {
+    if (modelNameError(model, true))
+        return _refused_model(prompt);
     /**
      * Call Google Gemini generateContent API.
      *
@@ -141,7 +177,7 @@ async function call_gemini(prompt, model = "gemini-2.5-flash", max_output_tokens
     if (!api_key) {
         return _err_response(model, prompt, "GOOGLE_API_KEY not set");
     }
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), _DEFAULT_TIMEOUT);
     try {
@@ -185,12 +221,12 @@ async function call_gemini(prompt, model = "gemini-2.5-flash", max_output_tokens
             return _err_response(model, prompt, "timeout");
         }
         else if (e.name === 'TypeError' && e.message.includes('fetch failed')) {
-            logger.error(`call_gemini: network error for model=${model}: ${e.message}`);
+            logger.error(`call_gemini: network error for model=${model}: ${(0, egress_js_1.describeTransportError)(e).text}`);
             return _err_response(model, prompt, "network_error");
         }
         else {
-            logger.error(`call_gemini: unexpected error: ${e.message}`);
-            return _err_response(model, prompt, e.message);
+            logger.error(`call_gemini: request failed: ${(0, egress_js_1.describeTransportError)(e).text}`);
+            return _err_response(model, prompt, (0, egress_js_1.describeTransportError)(e).code);
         }
     }
 }
@@ -198,6 +234,8 @@ async function call_gemini(prompt, model = "gemini-2.5-flash", max_output_tokens
 // Together AI — OpenAI-compatible, cloud inference
 // ---------------------------------------------------------------------------
 async function call_together(prompt, model = "moonshotai/Kimi-K2.5", max_tokens = 2048, kwargs = {}) {
+    if (modelNameError(model, false))
+        return _refused_model(prompt);
     /**
      * Call Together AI chat completions API (OpenAI-compatible).
      *
@@ -254,12 +292,12 @@ async function call_together(prompt, model = "moonshotai/Kimi-K2.5", max_tokens 
             return _err_response(model, prompt, "timeout");
         }
         else if (e.name === 'TypeError' && e.message.includes('fetch failed')) {
-            logger.error(`call_together: network error for model=${model}: ${e.message}`);
+            logger.error(`call_together: network error for model=${model}: ${(0, egress_js_1.describeTransportError)(e).text}`);
             return _err_response(model, prompt, "network_error");
         }
         else {
-            logger.error(`call_together: unexpected error: ${e.message}`);
-            return _err_response(model, prompt, e.message);
+            logger.error(`call_together: request failed: ${(0, egress_js_1.describeTransportError)(e).text}`);
+            return _err_response(model, prompt, (0, egress_js_1.describeTransportError)(e).code);
         }
     }
 }
@@ -267,6 +305,8 @@ async function call_together(prompt, model = "moonshotai/Kimi-K2.5", max_tokens 
 // Ollama — local inference, no network egress
 // ---------------------------------------------------------------------------
 async function call_ollama(prompt, model = "phi4:14b", kwargs = {}) {
+    if (modelNameError(model, false))
+        return _refused_model(prompt);
     /**
      * Call local Ollama model via /api/generate (non-streaming).
      *
@@ -318,12 +358,12 @@ async function call_ollama(prompt, model = "phi4:14b", kwargs = {}) {
             return _err_response(model, prompt, "timeout");
         }
         else if (e.name === 'TypeError' && e.message.includes('fetch failed')) {
-            logger.error(`call_ollama: cannot connect to Ollama at ${base_url}`);
+            logger.error(`call_ollama: cannot connect to Ollama at ${(0, egress_js_1.displayOrigin)(base_url)}`);
             return _err_response(model, prompt, "ollama_unavailable");
         }
         else {
-            logger.error(`call_ollama: unexpected error: ${e.message}`);
-            return _err_response(model, prompt, e.message);
+            logger.error(`call_ollama: request failed: ${(0, egress_js_1.describeTransportError)(e).text}`);
+            return _err_response(model, prompt, (0, egress_js_1.describeTransportError)(e).code);
         }
     }
 }

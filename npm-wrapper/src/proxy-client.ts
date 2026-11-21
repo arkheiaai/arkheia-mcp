@@ -1,5 +1,5 @@
 import { URLSearchParams } from 'url';
-import { isArkheiaHostedOrigin, HOSTED_API_URL } from './egress.js';
+import { isArkheiaHostedOrigin, displayOrigin, describeTransportError, HOSTED_API_URL } from './egress.js';
 
 // Node.js native fetch doesn't have a global logger
 const logger = {
@@ -85,7 +85,7 @@ export class ProxyClient {
             }
             // Local proxy down -- fall through to hosted
             this._local_available = false;
-            logger.info(`Local proxy unavailable, falling back to hosted API at ${this.hosted_url}`);
+            logger.info(`Local proxy unavailable, falling back to hosted API at ${displayOrigin(this.hosted_url)}`);
         }
 
         // Fallback: hosted API
@@ -149,13 +149,13 @@ export class ProxyClient {
         } catch (e: any) {
             clearTimeout(timeoutId);
             if (e.name === 'AbortError') {
-                logger.warn(`ProxyClient: /detect/verify timed out for model=${model_id}`);
+                logger.warn(`ProxyClient: /detect/verify timed out`);
                 return _unavailable("proxy_timeout");
             } else if (e.name === 'TypeError' && e.message.includes('fetch failed')) { // Common for network errors like connection refused
-                logger.warn(`ProxyClient: cannot connect to proxy at ${this.base_url}`);
+                logger.warn(`ProxyClient: cannot connect to proxy at ${displayOrigin(this.base_url)}`);
                 return _unavailable("proxy_unavailable");
             } else {
-                logger.error(`ProxyClient: /detect/verify unexpected error: ${e.message}`);
+                logger.error(`ProxyClient: /detect/verify failed: ${describeTransportError(e).text}`);
                 return _unavailable("proxy_error");
             }
         }
@@ -217,13 +217,13 @@ export class ProxyClient {
         } catch (e: any) {
             clearTimeout(timeoutId);
             if (e.name === 'AbortError') {
-                logger.warn(`ProxyClient: hosted /v1/detect timed out for model=${model_id}`);
+                logger.warn(`ProxyClient: hosted /v1/detect timed out`);
                 return _unavailable("hosted_timeout");
             } else if (e.name === 'TypeError' && e.message.includes('fetch failed')) {
-                logger.warn(`ProxyClient: cannot connect to hosted API at ${this.hosted_url}`);
+                logger.warn(`ProxyClient: cannot connect to hosted API at ${displayOrigin(this.hosted_url)}`);
                 return _unavailable("hosted_unavailable");
             } else {
-                logger.error(`ProxyClient: hosted /v1/detect unexpected error: ${e.message}`);
+                logger.error(`ProxyClient: hosted /v1/detect failed: ${describeTransportError(e).text}`);
                 return _unavailable("hosted_error");
             }
         }
@@ -269,10 +269,10 @@ export class ProxyClient {
                 logger.warn("ProxyClient: /audit/log timed out");
                 return _empty_log("proxy_timeout");
             } else if (e.name === 'TypeError' && e.message.includes('fetch failed')) {
-                logger.warn(`ProxyClient: cannot connect to proxy at ${this.base_url}`);
+                logger.warn(`ProxyClient: cannot connect to proxy at ${displayOrigin(this.base_url)}`);
                 return _empty_log("proxy_unavailable");
             } else {
-                logger.error(`ProxyClient: /audit/log unexpected error: ${e.message}`);
+                logger.error(`ProxyClient: /audit/log failed: ${describeTransportError(e).text}`);
                 return _empty_log("proxy_error");
             }
         }

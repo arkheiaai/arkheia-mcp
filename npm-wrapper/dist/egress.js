@@ -3,9 +3,11 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.DEFAULT_VERIFIER_URL = exports.DEFAULT_OLLAMA_URL = exports.HOSTED_API_URL = void 0;
 exports.isLoopbackOrigin = isLoopbackOrigin;
 exports.displayHost = displayHost;
+exports.displayOrigin = displayOrigin;
 exports.isArkheiaHostedOrigin = isArkheiaHostedOrigin;
 exports.computeEgress = computeEgress;
 exports.applyEgress = applyEgress;
+exports.describeTransportError = describeTransportError;
 const tool_registry_js_1 = require("./tool-registry.js");
 // The built-in hosted API address (the same one ProxyClient defaults to).
 exports.HOSTED_API_URL = "https://arkheia-proxy-production.up.railway.app";
@@ -34,6 +36,18 @@ function isLoopbackOrigin(value) {
 function displayHost(value) {
     try {
         return new URL(value || "").host || "an address that is not valid";
+    }
+    catch {
+        return "an address that is not valid";
+    }
+}
+/** Scheme, host and port only, never userinfo, path or query; safe to print in a diagnostic. */
+function displayOrigin(value) {
+    try {
+        const u = new URL(value || "");
+        if (u.protocol !== "http:" && u.protocol !== "https:")
+            return "an address that is not valid";
+        return `${u.protocol}//${u.host}`;
     }
     catch {
         return "an address that is not valid";
@@ -88,4 +102,32 @@ function applyEgress(env) {
         tool_registry_js_1.REGISTRY[k].description = e[k].description;
     }
     return e;
+}
+/**
+ * A transport or request-construction failure described by class, never by the exception's own text:
+ * Node's fetch puts the whole input address (userinfo, path and query included) into URL-parse and
+ * embedded-credential errors. `code` is stable and safe to return; `text` is safe to log.
+ */
+function describeTransportError(e) {
+    const cause = e?.cause?.code ?? e?.code;
+    const msg = typeof e?.message === "string" ? e.message : "";
+    if (e?.name === "AbortError")
+        return { code: "timeout", text: "the request timed out" };
+    if (cause === "ERR_INVALID_URL")
+        return { code: "invalid_address", text: "the configured address is not a valid URL" };
+    if (/includes credentials/i.test(msg)) {
+        return { code: "address_has_credentials", text: "the configured address contains a username or password, which is not allowed in an address" };
+    }
+    const byCode = {
+        ECONNREFUSED: "the connection was refused", ENOTFOUND: "the host name was not found", EAI_AGAIN: "the host name could not be resolved",
+        ECONNRESET: "the connection was reset", ETIMEDOUT: "the connection timed out", UND_ERR_CONNECT_TIMEOUT: "the connection timed out",
+    };
+    if (typeof cause === "string" && byCode[cause])
+        return { code: "network_error", text: byCode[cause] };
+    if (typeof cause === "string" && /^(CERT_|ERR_TLS|UNABLE_TO_|DEPTH_ZERO|SELF_SIGNED)/.test(cause)) {
+        return { code: "tls_error", text: "the secure connection could not be verified" };
+    }
+    if (e?.name === "TypeError" && /fetch failed/i.test(msg))
+        return { code: "network_error", text: "the connection failed" };
+    return { code: "request_failed", text: "the request failed" };
 }

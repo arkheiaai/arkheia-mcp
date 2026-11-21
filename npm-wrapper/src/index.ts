@@ -8,8 +8,8 @@ import * as fs from 'fs';
 
 import { ProxyClient } from './proxy-client.js';
 import { check, PolicyViolation } from './tool-registry.js';
-import { applyEgress, isArkheiaHostedOrigin, DEFAULT_OLLAMA_URL } from './egress.js';
-import { call_grok, call_gemini, call_ollama, call_together } from './providers.js';
+import { applyEgress, isArkheiaHostedOrigin, displayOrigin, describeTransportError, DEFAULT_OLLAMA_URL } from './egress.js';
+import { call_grok, call_gemini, call_ollama, call_together, modelNameError } from './providers.js';
 import { FeedbackClient, withReportability, feedbackShape, reportShape, reportsShape } from './feedback.js';
 import { store_entity, retrieve_entities, store_relation } from './memory.js';
 
@@ -28,7 +28,7 @@ function loadConfig(): void {
         }
         if (config.proxy_url && !process.env.ARKHEIA_HOSTED_URL) {
             process.env.ARKHEIA_HOSTED_URL = config.proxy_url;
-            process.stderr.write(`[arkheia] Hosted URL: ${config.proxy_url}\n`);
+            process.stderr.write(`[arkheia] Hosted URL: ${displayOrigin(config.proxy_url)}\n`);
         }
     } catch (e) {
         process.stderr.write(`[arkheia] Warning: Could not read ${configPath}\n`);
@@ -57,8 +57,8 @@ function handleError(toolName: string, e: any) {
     if (e instanceof PolicyViolation) {
         return wrapResult({ error: e.reason, risk_level: "UNKNOWN" });
     }
-    process.stderr.write(`[arkheia] ${toolName} error: ${e.message}\n`);
-    return wrapResult({ error: e.message, risk_level: "UNKNOWN" });
+    process.stderr.write(`[arkheia] ${toolName} error: ${describeTransportError(e).text}\n`);
+    return wrapResult({ error: describeTransportError(e).text, risk_level: "UNKNOWN" });
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +254,7 @@ async function main() {
                 const ollamaUrl = process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_URL;
                 if (isArkheiaHostedOrigin(ollamaUrl, process.env.ARKHEIA_HOSTED_URL)) {
                     const err = "configuration_error: OLLAMA_BASE_URL is the Arkheia hosted service (or cannot be read as an address); nothing was sent. Set it to your Ollama server.";
-                    return wrapResult({ response: "", model, error: err, arkheia: withReportability({ risk_level: "UNKNOWN", error: "not_checked_ollama_address_not_usable" }) });
+                    return wrapResult({ response: "", model: modelNameError(model) ? "" : model, error: err, arkheia: withReportability({ risk_level: "UNKNOWN", error: "not_checked_ollama_address_not_usable" }) });
                 }
                 const pr = await call_ollama(prompt, model);
                 if (pr.error) return wrapResult({ ...pr, arkheia: withReportability({ risk_level: "UNKNOWN", error: pr.error }) });
