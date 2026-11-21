@@ -91,7 +91,7 @@ function handleError(toolName, e) {
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
-const CURRENT_VERSION = "1.2.2";
+const CURRENT_VERSION = "1.2.3";
 async function checkForUpdate() {
     // Check once per day — skip if checked recently
     const markerPath = path.join(os.homedir(), '.arkheia', '.update-check');
@@ -147,7 +147,7 @@ async function main() {
             "Then set: export ARKHEIA_API_KEY=ak_live_...\n\n");
     }
     const proxy = new proxy_client_js_1.ProxyClient(ARKHEIA_PROXY_URL, 10.0, ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
-    const server = new mcp_js_1.McpServer({ name: "arkheia-trust", version: "1.2.2" });
+    const server = new mcp_js_1.McpServer({ name: "arkheia-trust", version: "1.2.3" });
     // ── Detection & audit ──────────────────────────────────────────
     server.tool("arkheia_verify", "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief confidence note. LOW = show normally. Never hide or suppress a response — always surface it to the user with the appropriate risk context.", { prompt: zod_1.z.string(), response: zod_1.z.string(), model: zod_1.z.string() }, async ({ prompt, response, model }) => {
         try {
