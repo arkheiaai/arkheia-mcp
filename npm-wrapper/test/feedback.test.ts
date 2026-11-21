@@ -7,6 +7,7 @@ import * as http from 'http';
 import {
     FeedbackClient, feedbackShape, reportShape, reportsShape, looksLikeCredential,
 } from '../src/feedback.js';
+import { call_grok, call_gemini, call_together, call_ollama } from '../src/providers.js';
 import { ProxyClient } from '../src/proxy-client.js';
 import { check, REGISTRY } from '../src/tool-registry.js';
 
@@ -427,4 +428,48 @@ test("README does not promise automatic retry or a durable guarantee", () => {
     assert.ok(!/you can try again/i.test(readme));
     assert.ok(!/Recorded by the Arkheia service/.test(readme));
     assert.match(readme, /unknown/);
+});
+
+test("every provider call that carries a key is built with redirect: error", async () => {
+    const saved = { x: process.env.XAI_API_KEY, g: process.env.GOOGLE_API_KEY, t: process.env.TOGETHER_API_KEY };
+    process.env.XAI_API_KEY = "dummy-x"; process.env.GOOGLE_API_KEY = "dummy-g"; process.env.TOGETHER_API_KEY = "dummy-t";
+    try {
+        mockFetch(() => json(200, {}));
+        const table: [string, () => Promise<any>][] = [
+            ["grok", () => call_grok("p")], ["gemini", () => call_gemini("p")],
+            ["together", () => call_together("p")], ["ollama", () => call_ollama("p")],
+        ];
+        for (const [name, fn] of table) {
+            calls = [];
+            await fn();
+            assert.equal(calls.length, 1, name);
+            assert.equal(calls[0].init.redirect, "error", `${name} must refuse redirects`);
+        }
+    } finally {
+        for (const [k, v] of [["XAI_API_KEY", saved.x], ["GOOGLE_API_KEY", saved.g], ["TOGETHER_API_KEY", saved.t]] as const) {
+            if (v === undefined) delete process.env[k]; else process.env[k] = v;
+        }
+    }
+});
+
+test("a real 307 on a provider call is refused and the second server receives nothing", async () => {
+    let targetHits = 0;
+    const target = http.createServer((_q, res) => { targetHits++; res.end("{}"); });
+    await new Promise<void>((r) => target.listen(0, "127.0.0.1", r));
+    const tport = (target.address() as any).port;
+    const source = http.createServer((_q, res) => { res.writeHead(307, { Location: `http://127.0.0.1:${tport}/x` }); res.end(); });
+    await new Promise<void>((r) => source.listen(0, "127.0.0.1", r));
+    const sport = (source.address() as any).port;
+    const prevKey = process.env.XAI_API_KEY;
+    process.env.XAI_API_KEY = "dummy-x";
+    // Send the real provider call to the loopback source, keeping every option the code set (including redirect).
+    (globalThis as any).fetch = (_u: any, init: any) => realFetch(`http://127.0.0.1:${sport}/v1/chat/completions`, init);
+    try {
+        const r: any = await call_grok("p");
+        assert.ok(r.error, "the redirected call failed");
+        assert.equal(targetHits, 0, "the redirect target received nothing, so no Authorization header");
+    } finally {
+        if (prevKey === undefined) delete process.env.XAI_API_KEY; else process.env.XAI_API_KEY = prevKey;
+        source.close(); target.close();
+    }
 });

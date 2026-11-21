@@ -88,6 +88,7 @@ async function call_grok(prompt, model = "grok-4-fast-non-reasoning", kwargs = {
                 messages: [{ role: "user", content: prompt }],
                 ...kwargs,
             }),
+            redirect: "error", // provider keys are never re-sent to wherever a redirect points
             signal: controller.signal,
         });
         clearTimeout(timeoutId);
@@ -156,6 +157,7 @@ async function call_gemini(prompt, model = "gemini-2.5-flash", max_output_tokens
                     ...kwargs,
                 },
             }),
+            redirect: "error", // provider keys are never re-sent to wherever a redirect points
             signal: controller.signal,
         });
         clearTimeout(timeoutId);
@@ -224,6 +226,7 @@ async function call_together(prompt, model = "moonshotai/Kimi-K2.5", max_tokens 
                 messages: [{ role: "user", content: prompt }],
                 ...kwargs,
             }),
+            redirect: "error", // provider keys are never re-sent to wherever a redirect points
             signal: controller.signal,
         });
         clearTimeout(timeoutId);
@@ -287,6 +290,7 @@ async function call_ollama(prompt, model = "phi4:14b", kwargs = {}) {
                 stream: false,
                 ...kwargs,
             }),
+            redirect: "error", // provider keys are never re-sent to wherever a redirect points
             signal: controller.signal,
         });
         clearTimeout(timeoutId);

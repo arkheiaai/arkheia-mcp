@@ -73,6 +73,7 @@ export async function call_grok(
                     messages: [{ role: "user", content: prompt }],
                     ...kwargs,
                 }),
+                redirect: "error", // provider keys are never re-sent to wherever a redirect points
                 signal: controller.signal,
             }
         );
@@ -152,6 +153,7 @@ export async function call_gemini(
                         ...kwargs,
                     },
                 }),
+                redirect: "error", // provider keys are never re-sent to wherever a redirect points
                 signal: controller.signal,
             }
         );
@@ -230,6 +232,7 @@ export async function call_together(
                     messages: [{ role: "user", content: prompt }],
                     ...kwargs,
                 }),
+                redirect: "error", // provider keys are never re-sent to wherever a redirect points
                 signal: controller.signal,
             }
         );
@@ -302,6 +305,7 @@ export async function call_ollama(
                     stream: false,
                     ...kwargs,
                 }),
+                redirect: "error", // provider keys are never re-sent to wherever a redirect points
                 signal: controller.signal,
             }
         );

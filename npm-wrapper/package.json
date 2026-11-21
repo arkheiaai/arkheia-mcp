@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "tsc -p tsconfig.test.json && node --test .test-build/test/",
+    "test": "tsc && tsc -p tsconfig.test.json && node --test .test-build/test/",
     "start": "node dist/index.js",
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/setup.js"
