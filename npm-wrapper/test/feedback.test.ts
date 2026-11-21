@@ -751,7 +751,7 @@ test("engines.node is >=20 and the README says Node 20+", () => {
 test("local-only verify never contacts the hosted service", async () => {
     mockFetch((url) => { if (url.startsWith("http://localhost")) throw new TypeError("fetch failed"); return json(200, { risk: "LOW", detection_id: DID }); });
     const p = new ProxyClient("http://localhost:8098", 1.0, BASE, KEY);
-    const r: any = await p.verify("p", "r", "m", undefined, false);
+    const r: any = await p.verify("p", "r", "m", undefined, { allowHosted: false });
     assert.equal(r.risk_level, "UNKNOWN");
     assert.ok(r.error);
     assert.ok(calls.every((c) => c.url.startsWith("http://localhost")), "only the local verifier was contacted");

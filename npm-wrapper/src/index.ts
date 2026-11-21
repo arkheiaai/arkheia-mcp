@@ -8,6 +8,7 @@ import * as fs from 'fs';
 
 import { ProxyClient } from './proxy-client.js';
 import { check, PolicyViolation } from './tool-registry.js';
+import { applyEgress, isArkheiaHostedOrigin, DEFAULT_OLLAMA_URL } from './egress.js';
 import { call_grok, call_gemini, call_ollama, call_together } from './providers.js';
 import { FeedbackClient, withReportability, feedbackShape, reportShape, reportsShape } from './feedback.js';
 import { store_entity, retrieve_entities, store_relation } from './memory.js';
@@ -78,6 +79,7 @@ async function checkForUpdate(): Promise<void> {
 
     try {
         const resp = await fetch('https://registry.npmjs.org/@arkheia/mcp-server/latest', {
+            redirect: 'error',
             signal: AbortSignal.timeout(5000),
         });
         if (resp.ok) {
@@ -125,6 +127,7 @@ async function main() {
         );
     }
 
+    const egress = applyEgress(process.env);
     const proxy = new ProxyClient(ARKHEIA_PROXY_URL, 10.0, ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
     const feedback = new FeedbackClient(ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
     const server = new McpServer({ name: "arkheia-trust", version: "1.3.0" });
@@ -146,7 +149,7 @@ async function main() {
 
     server.tool(
         "arkheia_audit_log",
-        "Retrieve structured audit evidence for compliance review.",
+        egress.arkheia_audit_log.description,
         { session_id: z.string().optional(), limit: z.number().int().min(1).max(500).default(50) },
         async ({ session_id, limit }) => {
             try {
@@ -242,14 +245,20 @@ async function main() {
 
     server.tool(
         "run_ollama",
-        "Call a local Ollama model and screen the response through the local Arkheia proxy only. Nothing is sent to the hosted Arkheia service; if the local proxy is not running, the result says it was not checked.",
+        egress.run_ollama.description,
         { prompt: z.string(), model: z.string().default("phi4:14b") },
         async ({ prompt, model }) => {
             try {
                 check("run_ollama");
+                // Never contact the Arkheia hosted service from this tool: refuse before the model request sends anything.
+                const ollamaUrl = process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_URL;
+                if (isArkheiaHostedOrigin(ollamaUrl, process.env.ARKHEIA_HOSTED_URL)) {
+                    const err = "configuration_error: OLLAMA_BASE_URL is the Arkheia hosted service (or cannot be read as an address); nothing was sent. Set it to your Ollama server.";
+                    return wrapResult({ response: "", model, error: err, arkheia: withReportability({ risk_level: "UNKNOWN", error: "not_checked_ollama_address_not_usable" }) });
+                }
                 const pr = await call_ollama(prompt, model);
                 if (pr.error) return wrapResult({ ...pr, arkheia: withReportability({ risk_level: "UNKNOWN", error: pr.error }) });
-                const risk = await proxy.verify(prompt, pr.response, model, undefined, false);
+                const risk = await proxy.verify(prompt, pr.response, model, undefined, { allowHosted: false });
                 return wrapResult({ ...pr, arkheia: withReportability(risk) });
             } catch (e: any) { return handleError("run_ollama", e); }
         }

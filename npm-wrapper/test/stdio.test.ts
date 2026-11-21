@@ -134,3 +134,23 @@ test("tools/list advertises the true bounds and tools/call enforces them in code
         assert.equal(JSON.parse(ok.text).recorded, true, "2,000 code points of message are accepted");
     });
 });
+
+// Exact-address version: with the default local Ollama address and the local verifier down, nothing may reach the hosted origin.
+test("run_ollama with the local verifier down sends nothing to the hosted service and says the response was not checked", async () => {
+    await withServer({ OLLAMA_BASE_URL: "http://127.0.0.1:11434" }, async (client, log) => {
+        const o: any = await client.callTool({ name: "run_ollama", arguments: { prompt: "p", model: "m" } });
+        const out = JSON.parse(o.content[0].text);
+        assert.equal(out.response, "local answer");
+        assert.equal(out.arkheia.risk_level, "UNKNOWN");
+        assert.match(out.arkheia.error, /not_checked_local_verification_unavailable/);
+        assert.equal(out.arkheia.detection_id, undefined);
+        assert.equal(out.arkheia.reportable, false);
+        assert.deepEqual(log(), ["http://127.0.0.1:11434/api/generate", "http://localhost:8098/detect/verify"],
+            "only the local Ollama and local verifier addresses were attempted");
+
+        // the ordinary verify tool still falls back to hosted
+        const v: any = await client.callTool({ name: "arkheia_verify", arguments: { prompt: "p", response: "r", model: "m" } });
+        assert.equal(JSON.parse(v.content[0].text).source, "hosted");
+        assert.equal(log().filter((u) => u.startsWith("https://hosted.example.test")).length, 1, "only the ordinary verify reached the hosted origin");
+    });
+});

@@ -65,7 +65,7 @@ exports.REGISTRY = {
         name: "run_ollama",
         permissions: [Permission.READ, Permission.EXECUTE],
         network_egress: false,
-        description: "Call local Ollama model and screen response through Arkheia",
+        description: "Call local Ollama model and screen response through the local Arkheia verifier only",
     },
     memory_store: {
         name: "memory_store",

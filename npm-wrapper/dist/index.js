@@ -42,6 +42,7 @@ const os = __importStar(require("os"));
 const fs = __importStar(require("fs"));
 const proxy_client_js_1 = require("./proxy-client.js");
 const tool_registry_js_1 = require("./tool-registry.js");
+const egress_js_1 = require("./egress.js");
 const providers_js_1 = require("./providers.js");
 const feedback_js_1 = require("./feedback.js");
 const memory_js_1 = require("./memory.js");
@@ -106,6 +107,7 @@ async function checkForUpdate() {
     catch { }
     try {
         const resp = await fetch('https://registry.npmjs.org/@arkheia/mcp-server/latest', {
+            redirect: 'error',
             signal: AbortSignal.timeout(5000),
         });
         if (resp.ok) {
@@ -147,6 +149,7 @@ async function main() {
             "Get a free API key at https://arkheia.ai/mcp\n" +
             "Then set: export ARKHEIA_API_KEY=ak_live_...\n\n");
     }
+    const egress = (0, egress_js_1.applyEgress)(process.env);
     const proxy = new proxy_client_js_1.ProxyClient(ARKHEIA_PROXY_URL, 10.0, ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
     const feedback = new feedback_js_1.FeedbackClient(ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
     const server = new mcp_js_1.McpServer({ name: "arkheia-trust", version: "1.3.0" });
@@ -161,7 +164,7 @@ async function main() {
             return handleError("arkheia_verify", e);
         }
     });
-    server.tool("arkheia_audit_log", "Retrieve structured audit evidence for compliance review.", { session_id: zod_1.z.string().optional(), limit: zod_1.z.number().int().min(1).max(500).default(50) }, async ({ session_id, limit }) => {
+    server.tool("arkheia_audit_log", egress.arkheia_audit_log.description, { session_id: zod_1.z.string().optional(), limit: zod_1.z.number().int().min(1).max(500).default(50) }, async ({ session_id, limit }) => {
         try {
             (0, tool_registry_js_1.check)("arkheia_audit_log");
             const result = await proxy.get_audit_log(session_id, Math.min(limit, 500));
@@ -237,13 +240,19 @@ async function main() {
             return handleError("run_gemini", e);
         }
     });
-    server.tool("run_ollama", "Call a local Ollama model and screen the response through the local Arkheia proxy only. Nothing is sent to the hosted Arkheia service; if the local proxy is not running, the result says it was not checked.", { prompt: zod_1.z.string(), model: zod_1.z.string().default("phi4:14b") }, async ({ prompt, model }) => {
+    server.tool("run_ollama", egress.run_ollama.description, { prompt: zod_1.z.string(), model: zod_1.z.string().default("phi4:14b") }, async ({ prompt, model }) => {
         try {
             (0, tool_registry_js_1.check)("run_ollama");
+            // Never contact the Arkheia hosted service from this tool: refuse before the model request sends anything.
+            const ollamaUrl = process.env.OLLAMA_BASE_URL || egress_js_1.DEFAULT_OLLAMA_URL;
+            if ((0, egress_js_1.isArkheiaHostedOrigin)(ollamaUrl, process.env.ARKHEIA_HOSTED_URL)) {
+                const err = "configuration_error: OLLAMA_BASE_URL is the Arkheia hosted service (or cannot be read as an address); nothing was sent. Set it to your Ollama server.";
+                return wrapResult({ response: "", model, error: err, arkheia: (0, feedback_js_1.withReportability)({ risk_level: "UNKNOWN", error: "not_checked_ollama_address_not_usable" }) });
+            }
             const pr = await (0, providers_js_1.call_ollama)(prompt, model);
             if (pr.error)
                 return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)({ risk_level: "UNKNOWN", error: pr.error }) });
-            const risk = await proxy.verify(prompt, pr.response, model, undefined, false);
+            const risk = await proxy.verify(prompt, pr.response, model, undefined, { allowHosted: false });
             return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)(risk) });
         }
         catch (e) {

@@ -134,7 +134,7 @@ function unknownOutcome(what: string, reason: string, advice: string, extra: Par
 }
 
 // Phase of one request, tracked explicitly:
-//   "connecting": fetch() has not produced response headers. Only here can a failure mean "never sent",
+//   "connecting": the fetch call has not produced response headers. Only here can a failure mean "never sent",
 //                 and only for a cause that provably happens before sending.
 //   "headers":    response headers arrived, so the request WAS sent. A non-success status is a refusal
 //                 whatever the body does; a body failure after a success status is unknown.
