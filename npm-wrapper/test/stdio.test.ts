@@ -57,3 +57,80 @@ test("built server over stdio: fallback verify, tools/list and feedback, with no
         fs.rmSync(home, { recursive: true, force: true });
     }
 });
+
+async function withServer(extraEnv: Record<string, string>, fn: (c: Client, log: () => string[]) => Promise<void>) {
+    const root = path.join(__dirname, "..", "..");
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "arkheia-stdio-"));
+    const logFile = path.join(home, "requests.log");
+    const transport = new StdioClientTransport({
+        command: process.execPath,
+        args: ["--require", path.join(root, "test", "stdio-preload.cjs"), path.join(root, "dist", "index.js")],
+        env: {
+            PATH: process.env.PATH || "", HOME: home,
+            ARKHEIA_API_KEY: "ak_live_DUMMYDUMMYDUMMY00",
+            ARKHEIA_HOSTED_URL: "https://hosted.example.test",
+            ARKHEIA_PROXY_URL: "http://localhost:8098",
+            ARKHEIA_TEST_REQUEST_LOG: logFile,
+            ...extraEnv,
+        },
+        stderr: "pipe",
+    });
+    const client = new Client({ name: "stdio-test", version: "0" });
+    try {
+        await client.connect(transport);
+        await fn(client, () => (fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8").split("\n").filter(Boolean) : []));
+    } finally {
+        await client.close();
+        fs.rmSync(home, { recursive: true, force: true });
+    }
+}
+
+// The Ollama tool promises no network egress: with the local verifier down and a hosted key set,
+// nothing may be sent to the hosted origin, and the result says it was not checked.
+test("run_ollama is local-only: local verifier down + hosted key set -> no hosted request, marked not checked", async () => {
+    await withServer({ OLLAMA_BASE_URL: "http://ollama.example.test" }, async (client, log) => {
+        const r: any = await client.callTool({ name: "run_ollama", arguments: { prompt: "p" } });
+        const body = JSON.parse(r.content[0].text);
+        assert.equal(body.response, "an answer");
+        assert.equal(body.arkheia.risk_level, "UNKNOWN");
+        assert.ok(body.arkheia.error, "says it was not checked");
+        assert.equal(body.arkheia.reportable, false);
+        assert.match(body.arkheia.report_note, /No check was completed/);
+        const hosted = log().filter((u) => u.startsWith("https://hosted.example.test"));
+        assert.deepEqual(hosted, [], "no request reached the hosted origin");
+        assert.ok(log().some((u) => u.startsWith("http://localhost:8098")), "the local verifier was tried");
+        // contrast: the ordinary verify tool still falls back to hosted
+        await client.callTool({ name: "arkheia_verify", arguments: { prompt: "p", response: "r", model: "m" } });
+        assert.ok(log().some((u) => u.startsWith("https://hosted.example.test/v1/detect")));
+    });
+});
+
+test("tools/list advertises the true bounds and tools/call enforces them in code points", async () => {
+    await withServer({}, async (client) => {
+        const tools: any[] = (await client.listTools()).tools;
+        const props = (n: string) => tools.find((t) => t.name === n).inputSchema.properties;
+        const fb = props("arkheia_feedback");
+        assert.equal(fb.message.minLength, 5);
+        assert.equal(fb.message.maxLength, 2000);
+        assert.equal(fb.email.maxLength, 200);
+        assert.equal(props("arkheia_report").evidence.maxLength, 500);
+
+        const call = async (name: string, args: any) => {
+            try {
+                const r: any = await client.callTool({ name, arguments: args });
+                return { error: !!r.isError, text: r.content?.[0]?.text as string };
+            } catch (e: any) { return { error: true, text: String(e.message) }; }
+        };
+        const bad = await call("arkheia_feedback", { message: "a".repeat(2001) });
+        assert.ok(bad.error, "2,001 ASCII letters are refused");
+        const short = await call("arkheia_feedback", { message: "abcd" });
+        assert.ok(short.error, "4 characters are refused");
+        const astral = await call("arkheia_report", { detection_id: "det_0123456789abcdef", outcome: "wrong", evidence: "\u{1F600}".repeat(500) });
+        assert.ok(!astral.error, `500 supplementary-plane characters are accepted: ${astral.text}`);
+        assert.equal(JSON.parse(astral.text).recorded, true);
+        const tooMany = await call("arkheia_report", { detection_id: "det_0123456789abcdef", outcome: "wrong", evidence: "\u{1F600}".repeat(501) });
+        assert.ok(tooMany.error, "501 code points are refused");
+        const ok = await call("arkheia_feedback", { message: "\u{1F600}".repeat(2000) });
+        assert.equal(JSON.parse(ok.text).recorded, true, "2,000 code points of message are accepted");
+    });
+});

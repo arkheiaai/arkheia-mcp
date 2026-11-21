@@ -8,15 +8,15 @@ Free tier: 1,500 detections/month. No credit card.
 
 ## Install
 
+Install the npm package. It is the full server: detection, the provider wrappers, memory, and the feedback tools (`arkheia_feedback`, `arkheia_report`, `arkheia_reports`).
+
 ```bash
-npx @arkheia/mcp-server
+npm install -g @arkheia/mcp-server
 ```
 
-The installer sets up a Python environment, clones the server, and configures everything. Takes about 60 seconds.
-
 You'll need:
-- Node.js 18+
-- Python 3.10+
+- Node.js 20+
+- Python 3.10-3.13 (used by the package's setup script)
 - An API key (free — see below)
 
 ## Get an API Key
@@ -31,53 +31,19 @@ Save the key. You won't see it again.
 
 ## Add to Your Agent
 
-### Claude Code
+Register the npm package with your agent. For Claude Code:
 
-Add to `~/.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "arkheia": {
-      "command": "python",
-      "args": ["-m", "mcp_server.server"],
-      "cwd": "~/.arkheia/mcp",
-      "env": {
-        "PYTHONPATH": "~/.arkheia/mcp",
-        "ARKHEIA_API_KEY": "ak_live_your_key_here"
-      }
-    }
-  }
-}
+```bash
+claude mcp add arkheia -s user \
+  -e ARKHEIA_API_KEY="ak_live_your_key_here" \
+  -- mcp-server
 ```
 
-On Windows, replace `~/.arkheia/mcp` with `C:/Users/YourName/.arkheia/mcp`.
+Commands for Codex, Gemini, Grok and where each stores its configuration are in [`npm-wrapper/README.md`](npm-wrapper/README.md#register-with-your-cli). Any MCP-compatible agent (Cursor, Windsurf, Cline, your own orchestrator) can run the same `mcp-server` command with `ARKHEIA_API_KEY` in its environment. Restart your agent after adding the configuration.
 
-### Claude Desktop
+### The Python server in this repository
 
-Add to your `claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/`, Windows: `%APPDATA%\Claude\`):
-
-```json
-{
-  "mcpServers": {
-    "arkheia": {
-      "command": "python",
-      "args": ["-m", "mcp_server.server"],
-      "cwd": "~/.arkheia/mcp",
-      "env": {
-        "PYTHONPATH": "~/.arkheia/mcp",
-        "ARKHEIA_API_KEY": "ak_live_your_key_here"
-      }
-    }
-  }
-}
-```
-
-### Other MCP-Compatible Agents
-
-Arkheia works with any agent that supports MCP tools — Cursor, Windsurf, Cline, or your own orchestrator. The configuration pattern is the same: point the MCP server at `~/.arkheia/mcp` with your API key.
-
-Restart your agent after adding the configuration.
+This repository also contains a Python MCP server (`python -m mcp_server.server`, run from a clone with `PYTHONPATH` set to the clone). It has nine tools and does **not** include `arkheia_feedback`, `arkheia_report` or `arkheia_reports`. To send feedback or reports, use the npm package above.
 
 ## Your First Detection
 
@@ -232,7 +198,7 @@ Every message is read. Every piece of feedback shapes what we build next.
 ## Requirements
 
 - Python 3.10+
-- Node.js 18+ (for npx install)
+- Node.js 20+
 - Git
 
 ## Links

@@ -216,7 +216,7 @@ async function main() {
             (0, tool_registry_js_1.check)("run_grok");
             const pr = await (0, providers_js_1.call_grok)(prompt, model);
             if (pr.error)
-                return wrapResult({ ...pr, arkheia: { risk_level: "UNKNOWN", error: pr.error } });
+                return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)({ risk_level: "UNKNOWN", error: pr.error }) });
             const risk = await proxy.verify(prompt, pr.response, model);
             return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)(risk) });
         }
@@ -229,7 +229,7 @@ async function main() {
             (0, tool_registry_js_1.check)("run_gemini");
             const pr = await (0, providers_js_1.call_gemini)(prompt, model);
             if (pr.error)
-                return wrapResult({ ...pr, arkheia: { risk_level: "UNKNOWN", error: pr.error } });
+                return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)({ risk_level: "UNKNOWN", error: pr.error }) });
             const risk = await proxy.verify(prompt, pr.response, model);
             return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)(risk) });
         }
@@ -237,13 +237,13 @@ async function main() {
             return handleError("run_gemini", e);
         }
     });
-    server.tool("run_ollama", "Call a local Ollama model and screen the response through Arkheia. No network egress.", { prompt: zod_1.z.string(), model: zod_1.z.string().default("phi4:14b") }, async ({ prompt, model }) => {
+    server.tool("run_ollama", "Call a local Ollama model and screen the response through the local Arkheia proxy only. Nothing is sent to the hosted Arkheia service; if the local proxy is not running, the result says it was not checked.", { prompt: zod_1.z.string(), model: zod_1.z.string().default("phi4:14b") }, async ({ prompt, model }) => {
         try {
             (0, tool_registry_js_1.check)("run_ollama");
             const pr = await (0, providers_js_1.call_ollama)(prompt, model);
             if (pr.error)
-                return wrapResult({ ...pr, arkheia: { risk_level: "UNKNOWN", error: pr.error } });
-            const risk = await proxy.verify(prompt, pr.response, model);
+                return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)({ risk_level: "UNKNOWN", error: pr.error }) });
+            const risk = await proxy.verify(prompt, pr.response, model, undefined, false);
             return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)(risk) });
         }
         catch (e) {
@@ -255,7 +255,7 @@ async function main() {
             (0, tool_registry_js_1.check)("run_together");
             const pr = await (0, providers_js_1.call_together)(prompt, model);
             if (pr.error)
-                return wrapResult({ ...pr, arkheia: { risk_level: "UNKNOWN", error: pr.error } });
+                return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)({ risk_level: "UNKNOWN", error: pr.error }) });
             const risk = await proxy.verify(prompt, pr.response, model);
             return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)(risk) });
         }

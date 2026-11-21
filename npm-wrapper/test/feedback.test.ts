@@ -745,3 +745,63 @@ test("engines.node is >=20 and the README says Node 20+", () => {
     assert.equal(pkg.engines.node, ">=20.0.0");
     assert.match(fs.readFileSync(path.join(root, "README.md"), "utf8"), /Node 20\+/);
 });
+
+// ---- round 4 -----------------------------------------------------------------
+
+test("local-only verify never contacts the hosted service", async () => {
+    mockFetch((url) => { if (url.startsWith("http://localhost")) throw new TypeError("fetch failed"); return json(200, { risk: "LOW", detection_id: DID }); });
+    const p = new ProxyClient("http://localhost:8098", 1.0, BASE, KEY);
+    const r: any = await p.verify("p", "r", "m", undefined, false);
+    assert.equal(r.risk_level, "UNKNOWN");
+    assert.ok(r.error);
+    assert.ok(calls.every((c) => c.url.startsWith("http://localhost")), "only the local verifier was contacted");
+    // it does not flip the shared flag: the ordinary path still tries local first, then hosted
+    calls = [];
+    const h: any = await p.verify("p", "r", "m");
+    assert.equal(h.source, "hosted");
+});
+
+test("provider errors and unidentifiable hosted results carry the right reportability", () => {
+    const err: any = withReportability({ risk_level: "UNKNOWN", error: "XAI_API_KEY not set" });
+    assert.equal(err.reportable, false);
+    assert.match(err.report_note, /nothing to report/);
+    const noId: any = withReportability({ risk_level: "LOW", source: "hosted" });
+    assert.equal(noId.reportable, false);
+    assert.match(noId.report_note, /no usable detection id/);
+    assert.ok(!/checked locally/.test(noId.report_note));
+    const badId: any = withReportability({ risk_level: "LOW", source: "hosted", detection_id: "../x" });
+    assert.match(badId.report_note, /no usable detection id/);
+});
+
+test("report-conflict advice does not promise the earlier report is in the list", async () => {
+    mockFetch(() => json(409, {}));
+    const r: any = await client().send_report({ detection_id: DID, outcome: "fine" });
+    assert.match(r.error, /most recent reports/);
+    assert.match(r.error, /may not appear/);
+    assert.ok(!/See it with/.test(r.error));
+});
+
+test("created_at must be a real calendar datetime or explicit null; missing is invalid", async () => {
+    const row: any = { report_id: FID, event_id: DID, outcome: "fine", category: null, evidence: null, reporter_kind: "human" };
+    const cases: [any, boolean][] = [
+        ["2024-02-29T10:00:00Z", true], ["2025-02-29T10:00:00Z", false], ["2026-02-30T10:00:00Z", false],
+        ["2026-04-31T00:00:00Z", false], ["2026-06-15T24:00:00Z", false], ["2026-06-15T23:59:59Z", true],
+        ["2026-06-15T10:00:00+25:00", false], [null, true],
+    ];
+    for (const [v, ok] of cases) {
+        mockFetch(() => json(200, { reports: [{ ...row, created_at: v }] }));
+        assert.equal(((await client().list_reports()) as any).reports !== undefined, ok, String(v));
+    }
+    mockFetch(() => json(200, { reports: [row] }));
+    assert.equal(((await client().list_reports()) as any).reports, undefined, "a missing created_at is invalid");
+});
+
+test("root README points to the npm package, says Node 20+ and describes the Python server accurately", () => {
+    const readme = fs.readFileSync(path.join(__dirname, "..", "..", "..", "README.md"), "utf8");
+    assert.match(readme, /npm install -g @arkheia\/mcp-server/);
+    assert.match(readme, /Node\.js 20\+/);
+    assert.ok(!/Node\.js 18/.test(readme));
+    assert.match(readme, /npm-wrapper\/README\.md/);
+    assert.match(readme, /does \*\*not\*\* include `arkheia_feedback`/);
+    assert.ok(!/"args": \["-m", "mcp_server\.server"\]/.test(readme), "no Python registration snippet as the main route");
+});

@@ -33,10 +33,36 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 /** Length in Unicode code points, which is how the service counts. */
 export const cp = (s: string): number => [...s].length;
 
-// Limits are in code points. The coarse .max() is twice the limit (a code point is at most two UTF-16 units);
-// the exact check is the refine.
-const bounded = (min: number, max: number) =>
-    z.string().max(max * 2).refine((s) => cp(s) >= min && cp(s) <= max, { message: `must be ${min} to ${max} characters` });
+// Limits are in Unicode code points, which is how the service counts. zod's own min/max count UTF-16
+// units, so a string of N supplementary-plane characters would be refused at N/2. This string type
+// keeps the min/max checks in its definition (so tools/list advertises the true bounds) but enforces
+// them in code points.
+class CodePointString extends z.ZodString {
+    _parse(input: z.ParseInput): z.ParseReturnType<string> {
+        if (typeof input.data !== "string") return super._parse(input);
+        const n = cp(input.data);
+        for (const check of this._def.checks) {
+            if ((check.kind === "min" && n < check.value) || (check.kind === "max" && n > check.value)) {
+                const ctx = this._getOrReturnCtx(input);
+                z.addIssueToContext(ctx, {
+                    code: check.kind === "min" ? z.ZodIssueCode.too_small : z.ZodIssueCode.too_big,
+                    [check.kind === "min" ? "minimum" : "maximum"]: check.value,
+                    type: "string", inclusive: true, exact: false,
+                    message: `must be ${check.kind === "min" ? "at least" : "at most"} ${check.value} characters`,
+                } as any);
+                return z.INVALID;
+            }
+        }
+        return { status: "valid", value: input.data };
+    }
+}
+
+const bounded = (min: number, max: number): z.ZodString => {
+    const checks: any[] = [];
+    if (min > 0) checks.push({ kind: "min", value: min });
+    checks.push({ kind: "max", value: max });
+    return new CodePointString({ ...z.string()._def, checks });
+};
 
 export const feedbackShape = {
     message: bounded(MESSAGE_MIN, MESSAGE_MAX),
@@ -133,9 +159,18 @@ type PublicReport = {
     evidence: string | null; reporter_kind: string; created_at: string | null;
 };
 
-const ISO_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})?$/;
+const ISO_DATETIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?(Z|[+-](\d{2}):(\d{2}))?$/;
+/** A real calendar datetime: month, day (leap years included), hour, minute, second and offset all in range. */
 function isoDateTime(v: unknown): boolean {
-    return typeof v === "string" && ISO_DATETIME.test(v) && !Number.isNaN(Date.parse(v));
+    if (typeof v !== "string") return false;
+    const m = ISO_DATETIME.exec(v);
+    if (!m) return false;
+    const [y, mo, d, h, mi, sec] = [m[1], m[2], m[3], m[4], m[5], m[6]].map(Number);
+    const probe = new Date(Date.UTC(y, mo - 1, d, h, mi, sec));
+    if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== mo - 1 || probe.getUTCDate() !== d) return false;
+    if (h > 23 || mi > 59 || sec > 59) return false;
+    if (m[9] !== undefined && (Number(m[9]) > 23 || Number(m[10]) > 59)) return false;
+    return true;
 }
 
 /** One row of GET /v1/reports against the public shape; undefined if it does not fit. */
@@ -148,11 +183,11 @@ function validRow(x: any): PublicReport | undefined {
     if (x.reporter_kind !== "agent" && x.reporter_kind !== "human") return undefined;
     if (x.category !== undefined && x.category !== null && !(REPORT_CATEGORIES as readonly string[]).includes(x.category)) return undefined;
     if (!optStr(x.evidence, EVIDENCE_MAX)) return undefined;
-    if (x.created_at !== undefined && x.created_at !== null && !isoDateTime(x.created_at)) return undefined;
+    if (x.created_at !== null && !isoDateTime(x.created_at)) return undefined; // a datetime or explicit null; missing is invalid
     return {
         report_id: x.report_id, detection_id: x.event_id, outcome: x.outcome,
         category: x.category ?? null, evidence: x.evidence ?? null,
-        reporter_kind: x.reporter_kind, created_at: x.created_at ?? null,
+        reporter_kind: x.reporter_kind, created_at: x.created_at,
     };
 }
 
@@ -365,7 +400,7 @@ export class FeedbackClient {
                 return {
                     recorded: false as const, retryable: false, already_reported: true,
                     error: "No new report was added because a report already exists for this detection. " +
-                        "It may be the one from an earlier attempt of yours. See it with arkheia_reports (action: list).",
+                        "It may be the one from an earlier attempt of yours. arkheia_reports (action: list) shows only your most recent reports, so the earlier one may not appear there.",
                 };
             }
             if (r.kind === "http" && r.status === 404) {
@@ -434,9 +469,16 @@ export const NOT_REPORTABLE_LOCAL =
     "This result was checked locally and cannot be linked to a hosted record; use arkheia_feedback " +
     "(kind false_alarm or missed_problem) to tell us about it, describing it in your own words.";
 
+export const NOT_REPORTABLE_NO_ID =
+    "The hosted service checked this response but returned no usable detection id, so it cannot be reported; " +
+    "use arkheia_feedback (kind false_alarm or missed_problem) to tell us about it, describing it in your own words.";
+
 export function withReportability<T extends Record<string, any>>(result: T): T & { reportable: boolean; report_with?: string; report_note?: string } {
     const hosted = result?.source === "hosted" && typeof result.detection_id === "string" && ID_PATTERN.test(result.detection_id);
     if (hosted) return { ...result, reportable: true, report_with: "arkheia_report" };
+    if (result?.source === "hosted" && !result?.error) {
+        return { ...result, reportable: false, report_note: NOT_REPORTABLE_NO_ID };
+    }
     if (result?.error) return { ...result, reportable: false, report_note: "No check was completed, so there is nothing to report." };
     return { ...result, reportable: false, report_note: NOT_REPORTABLE_LOCAL };
 }
