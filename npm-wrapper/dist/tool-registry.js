@@ -25,6 +25,24 @@ exports.REGISTRY = {
         network_egress: false,
         description: "Retrieve structured audit evidence",
     },
+    arkheia_feedback: {
+        name: "arkheia_feedback",
+        permissions: [Permission.WRITE],
+        network_egress: true,
+        description: "Send short typed feedback to Arkheia",
+    },
+    arkheia_report: {
+        name: "arkheia_report",
+        permissions: [Permission.WRITE],
+        network_egress: true,
+        description: "Say whether a checked response was wrong or fine",
+    },
+    arkheia_reports: {
+        name: "arkheia_reports",
+        permissions: [Permission.READ, Permission.WRITE],
+        network_egress: true,
+        description: "List or delete your own reports",
+    },
     run_grok: {
         name: "run_grok",
         permissions: [Permission.READ, Permission.EXECUTE],

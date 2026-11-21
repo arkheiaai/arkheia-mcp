@@ -1,7 +1,6 @@
 """The public repository is a thin client: it carries the signal, never the method or the maths.
 
-David, 12 Nov 2026: "our ip is our ip we only emit signal" and "messenger only - thats all a customer
-needs, pure signal". Detection runs on Arkheia's servers. This package sends a model response to the
+This package is a messenger only: it carries the signal, never the method. Detection runs on Arkheia's servers. This package sends a model response to the
 hosted API and returns the verdict. So nothing here may say HOW detection works:
 
   * no detection profiles (the per-model thresholds and weights),

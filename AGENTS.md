@@ -1,7 +1,8 @@
 # Arkheia MCP Server — Setup Guide
 
-This file is the single source of truth for installing and configuring the Arkheia MCP Server.
-If you are an AI agent helping a user install Arkheia, follow these steps exactly.
+This guide covers the **Python** MCP server in this repository, which has nine tools and does **not** include the feedback tools (`arkheia_feedback`, `arkheia_report`, `arkheia_reports`).
+
+**To install the full server, including the feedback tools, follow the npm instructions instead:** see the root [README.md](README.md#install) (`npm install -g @arkheia/mcp-server`, Node 20+) and [npm-wrapper/README.md](npm-wrapper/README.md#register-with-your-cli) for registering it with each agent. Only follow the steps below if the user specifically wants the Python server.
 
 ## Prerequisites
 
@@ -16,7 +17,7 @@ curl -X POST https://arkheia-proxy-production.up.railway.app/v1/provision \
   -H "Content-Type: application/json" \
   -d '{"email": "you@example.com"}'
 ```
-This returns `{"api_key": "ak_live_..."}`. Save this key.
+This returns a key. Save it. A new key works once the email address is confirmed: open the link we email you and press Confirm (an unconfirmed request is deleted after 24 hours).
 
 Option B — Manual:
 Visit https://arkheia.ai and sign up. Your key will be emailed.

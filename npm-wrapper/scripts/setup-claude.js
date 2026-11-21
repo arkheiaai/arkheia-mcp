@@ -86,7 +86,7 @@ function installProtocol(filePath, cliName) {
 }
 
 // argv carries the real key for the CLI's own config; `display` is the same command with the key shown only as
-// "$ARKHEIA_API_KEY", which is all that is ever printed (Codex B288 R1: a failure used to echo the full key).
+// "$ARKHEIA_API_KEY", which is all that is ever printed (a failure used to echo the full key).
 function registerMcp(cli, argv, display) {
   try {
     execFileSync(argv[0], argv.slice(1), { stdio: "inherit", timeout: 15000 });
