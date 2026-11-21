@@ -30,17 +30,25 @@ const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/** Length in Unicode code points, which is how the service counts. */
+export const cp = (s: string): number => [...s].length;
+
+// Limits are in code points. The coarse .max() is twice the limit (a code point is at most two UTF-16 units);
+// the exact check is the refine.
+const bounded = (min: number, max: number) =>
+    z.string().max(max * 2).refine((s) => cp(s) >= min && cp(s) <= max, { message: `must be ${min} to ${max} characters` });
+
 export const feedbackShape = {
-    message: z.string().min(MESSAGE_MIN).max(MESSAGE_MAX),
+    message: bounded(MESSAGE_MIN, MESSAGE_MAX),
     kind: z.enum(FEEDBACK_KINDS).optional(),
-    email: z.string().max(EMAIL_MAX).optional(),
+    email: bounded(0, EMAIL_MAX).optional(),
     submission_id: z.string().regex(UUID_PATTERN).optional(),
 };
 
 export const reportShape = {
     detection_id: z.string().regex(ID_PATTERN),
     outcome: z.enum(["wrong", "fine"]),
-    evidence: z.string().max(EVIDENCE_MAX).optional(),
+    evidence: bounded(0, EVIDENCE_MAX).optional(),
     category: z.enum(REPORT_CATEGORIES).optional(),
     reporter_kind: z.enum(["agent", "human"]).default("agent"),
 };
@@ -125,16 +133,22 @@ type PublicReport = {
     evidence: string | null; reporter_kind: string; created_at: string | null;
 };
 
+const ISO_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})?$/;
+function isoDateTime(v: unknown): boolean {
+    return typeof v === "string" && ISO_DATETIME.test(v) && !Number.isNaN(Date.parse(v));
+}
+
 /** One row of GET /v1/reports against the public shape; undefined if it does not fit. */
 function validRow(x: any): PublicReport | undefined {
     if (!x || typeof x !== "object" || Array.isArray(x)) return undefined;
-    const optStr = (v: any, max = 1000) => v === undefined || v === null || (typeof v === "string" && v.length <= max);
+    const optStr = (v: any, max = 1000) => v === undefined || v === null || (typeof v === "string" && cp(v) <= max);
     if (typeof x.report_id !== "string" || !UUID_PATTERN.test(x.report_id)) return undefined;
     if (typeof x.event_id !== "string" || !ID_PATTERN.test(x.event_id)) return undefined;
     if (x.outcome !== "wrong" && x.outcome !== "fine") return undefined;
     if (x.reporter_kind !== "agent" && x.reporter_kind !== "human") return undefined;
     if (x.category !== undefined && x.category !== null && !(REPORT_CATEGORIES as readonly string[]).includes(x.category)) return undefined;
-    if (!optStr(x.evidence, EVIDENCE_MAX) || !optStr(x.created_at, 64)) return undefined;
+    if (!optStr(x.evidence, EVIDENCE_MAX)) return undefined;
+    if (x.created_at !== undefined && x.created_at !== null && !isoDateTime(x.created_at)) return undefined;
     return {
         report_id: x.report_id, detection_id: x.event_id, outcome: x.outcome,
         category: x.category ?? null, evidence: x.evidence ?? null,
@@ -179,7 +193,8 @@ export class FeedbackClient {
                 });
                 phase = "headers";
                 if (!resp.ok) {
-                    try { await resp.body?.cancel(); } catch { /* the status is what matters */ }
+                    // Return the known refusal now; cancellation is cleanup, detached, and may never finish.
+                    try { Promise.resolve(resp.body?.cancel()).catch(() => { /* ignored */ }); } catch { /* ignored */ }
                     return { ok: false, kind: "http", status: resp.status };
                 }
                 const text = await resp.text();
@@ -242,7 +257,7 @@ export class FeedbackClient {
     /** A success-class reply that is not the documented acknowledgement is not a confirmed write. */
     private badAck(what: string, status: number, expected: number, advice: string, extra: Partial<Outcome> = {}): Outcome {
         return unknownOutcome(what, status === expected
-            ? "the service answered without a valid id, so receipt cannot be confirmed."
+            ? "the service answered without a valid, consistent acknowledgement (id and status), so receipt cannot be confirmed."
             : `the service answered HTTP ${status} instead of the expected ${expected}, so receipt cannot be confirmed.`,
             advice, extra);
     }
@@ -263,13 +278,13 @@ export class FeedbackClient {
         if (args.submission_id !== undefined && !UUID_PATTERN.test(args.submission_id)) {
             return refused(what, "submission_id must be a UUID, the one returned by an earlier attempt.", false);
         }
-        if (message.trim().length < MESSAGE_MIN) {
+        if (cp(message.trim()) < MESSAGE_MIN) {
             return refused(what, `the message must have at least ${MESSAGE_MIN} characters.`, false);
         }
-        if (message.length > MESSAGE_MAX) {
+        if (cp(message) > MESSAGE_MAX) {
             return refused(what, `the message must have at most ${MESSAGE_MAX} characters.`, false);
         }
-        if (email && (email.length > EMAIL_MAX || !EMAIL_PATTERN.test(email))) {
+        if (email && (cp(email) > EMAIL_MAX || !EMAIL_PATTERN.test(email))) {
             return refused(what, "the email address does not look valid. Leave it out or correct it.", false);
         }
         if (looksLikeCredential(message, this.api_key) || (email !== undefined && looksLikeCredential(email, this.api_key))) {
@@ -302,7 +317,11 @@ export class FeedbackClient {
             }
             return this.failure(what, r, advice, extra);
         }
-        const id = r.status === 201 ? FeedbackClient.uuidOf(r.json, "feedback_id") : undefined;
+        let id = r.status === 201 ? FeedbackClient.uuidOf(r.json, "feedback_id") : undefined;
+        // The service always says "received"; an echoed submission_id must be the caller's.
+        if (id && r.json.status !== "received") id = undefined;
+        const echoed = r.json?.submission_id;
+        if (id && echoed !== undefined && (typeof echoed !== "string" || echoed.toLowerCase() !== submission_id.toLowerCase())) id = undefined;
         if (!id) return this.badAck(what, r.status, 201, advice, extra);
         return { recorded: true as const, feedback_id: id, submission_id, note: FeedbackClient.ACK };
     }
@@ -319,7 +338,7 @@ export class FeedbackClient {
         }
         const evidence = args.evidence && args.evidence.trim() ? args.evidence : undefined;
         if (evidence !== undefined) {
-            if (evidence.length > EVIDENCE_MAX) {
+            if (cp(evidence) > EVIDENCE_MAX) {
                 return refused(what, `evidence must be one line of at most ${EVIDENCE_MAX} characters.`, false);
             }
             if (/[\r\n]/.test(evidence)) {
@@ -350,11 +369,12 @@ export class FeedbackClient {
                 };
             }
             if (r.kind === "http" && r.status === 404) {
-                return refused(what, "the service has no detection with that id for your key. Check that detection_id came from an arkheia_verify result made with this key.", false);
+                return refused(what, "the service has no record of that detection id for your key. Only results checked by the hosted service can be reported; a result checked by a local proxy cannot be linked to a hosted record. Use arkheia_feedback (kind false_alarm or missed_problem) and describe it in your own words.", false);
             }
             return this.failure(what, r, advice);
         }
-        const id = r.status === 201 ? FeedbackClient.uuidOf(r.json, "report_id") : undefined;
+        let id = r.status === 201 ? FeedbackClient.uuidOf(r.json, "report_id") : undefined;
+        if (id && r.json.status !== "recorded") id = undefined; // the service always says "recorded"
         if (!id) return this.badAck(what, r.status, 201, advice);
         return { recorded: true as const, report_id: id, note: FeedbackClient.ACK };
     }
@@ -403,4 +423,20 @@ export class FeedbackClient {
         }
         return { deleted: true as const, report_id };
     }
+}
+
+// ---------------------------------------------------------------------------
+// Whether an arkheia_verify result can be reported with arkheia_report.
+// Only a result checked by the hosted service has a record the report endpoint knows.
+// ---------------------------------------------------------------------------
+
+export const NOT_REPORTABLE_LOCAL =
+    "This result was checked locally and cannot be linked to a hosted record; use arkheia_feedback " +
+    "(kind false_alarm or missed_problem) to tell us about it, describing it in your own words.";
+
+export function withReportability<T extends Record<string, any>>(result: T): T & { reportable: boolean; report_with?: string; report_note?: string } {
+    const hosted = result?.source === "hosted" && typeof result.detection_id === "string" && ID_PATTERN.test(result.detection_id);
+    if (hosted) return { ...result, reportable: true, report_with: "arkheia_report" };
+    if (result?.error) return { ...result, reportable: false, report_note: "No check was completed, so there is nothing to report." };
+    return { ...result, reportable: false, report_note: NOT_REPORTABLE_LOCAL };
 }

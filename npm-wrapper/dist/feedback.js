@@ -1,7 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.FeedbackClient = exports.reportsShape = exports.reportShape = exports.feedbackShape = exports.TIMEOUT_MS = exports.EMAIL_MAX = exports.EVIDENCE_MAX = exports.MESSAGE_MAX = exports.MESSAGE_MIN = exports.REPORT_CATEGORIES = exports.FEEDBACK_KINDS = void 0;
+exports.NOT_REPORTABLE_LOCAL = exports.FeedbackClient = exports.reportsShape = exports.reportShape = exports.feedbackShape = exports.cp = exports.TIMEOUT_MS = exports.EMAIL_MAX = exports.EVIDENCE_MAX = exports.MESSAGE_MAX = exports.MESSAGE_MIN = exports.REPORT_CATEGORIES = exports.FEEDBACK_KINDS = void 0;
 exports.looksLikeCredential = looksLikeCredential;
+exports.withReportability = withReportability;
 const crypto_1 = require("crypto");
 const zod_1 = require("zod");
 // ---------------------------------------------------------------------------
@@ -28,16 +29,22 @@ exports.TIMEOUT_MS = 10_000;
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const UUID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/** Length in Unicode code points, which is how the service counts. */
+const cp = (s) => [...s].length;
+exports.cp = cp;
+// Limits are in code points. The coarse .max() is twice the limit (a code point is at most two UTF-16 units);
+// the exact check is the refine.
+const bounded = (min, max) => zod_1.z.string().max(max * 2).refine((s) => (0, exports.cp)(s) >= min && (0, exports.cp)(s) <= max, { message: `must be ${min} to ${max} characters` });
 exports.feedbackShape = {
-    message: zod_1.z.string().min(exports.MESSAGE_MIN).max(exports.MESSAGE_MAX),
+    message: bounded(exports.MESSAGE_MIN, exports.MESSAGE_MAX),
     kind: zod_1.z.enum(exports.FEEDBACK_KINDS).optional(),
-    email: zod_1.z.string().max(exports.EMAIL_MAX).optional(),
+    email: bounded(0, exports.EMAIL_MAX).optional(),
     submission_id: zod_1.z.string().regex(UUID_PATTERN).optional(),
 };
 exports.reportShape = {
     detection_id: zod_1.z.string().regex(ID_PATTERN),
     outcome: zod_1.z.enum(["wrong", "fine"]),
-    evidence: zod_1.z.string().max(exports.EVIDENCE_MAX).optional(),
+    evidence: bounded(0, exports.EVIDENCE_MAX).optional(),
     category: zod_1.z.enum(exports.REPORT_CATEGORIES).optional(),
     reporter_kind: zod_1.z.enum(["agent", "human"]).default("agent"),
 };
@@ -86,11 +93,15 @@ function provablyUnsent(e) {
 class Deadline extends Error {
     constructor() { super("deadline"); this.name = "Deadline"; }
 }
+const ISO_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})?$/;
+function isoDateTime(v) {
+    return typeof v === "string" && ISO_DATETIME.test(v) && !Number.isNaN(Date.parse(v));
+}
 /** One row of GET /v1/reports against the public shape; undefined if it does not fit. */
 function validRow(x) {
     if (!x || typeof x !== "object" || Array.isArray(x))
         return undefined;
-    const optStr = (v, max = 1000) => v === undefined || v === null || (typeof v === "string" && v.length <= max);
+    const optStr = (v, max = 1000) => v === undefined || v === null || (typeof v === "string" && (0, exports.cp)(v) <= max);
     if (typeof x.report_id !== "string" || !UUID_PATTERN.test(x.report_id))
         return undefined;
     if (typeof x.event_id !== "string" || !ID_PATTERN.test(x.event_id))
@@ -101,7 +112,9 @@ function validRow(x) {
         return undefined;
     if (x.category !== undefined && x.category !== null && !exports.REPORT_CATEGORIES.includes(x.category))
         return undefined;
-    if (!optStr(x.evidence, exports.EVIDENCE_MAX) || !optStr(x.created_at, 64))
+    if (!optStr(x.evidence, exports.EVIDENCE_MAX))
+        return undefined;
+    if (x.created_at !== undefined && x.created_at !== null && !isoDateTime(x.created_at))
         return undefined;
     return {
         report_id: x.report_id, detection_id: x.event_id, outcome: x.outcome,
@@ -146,10 +159,11 @@ class FeedbackClient {
                 });
                 phase = "headers";
                 if (!resp.ok) {
+                    // Return the known refusal now; cancellation is cleanup, detached, and may never finish.
                     try {
-                        await resp.body?.cancel();
+                        Promise.resolve(resp.body?.cancel()).catch(() => { });
                     }
-                    catch { /* the status is what matters */ }
+                    catch { /* ignored */ }
                     return { ok: false, kind: "http", status: resp.status };
                 }
                 const text = await resp.text();
@@ -230,7 +244,7 @@ class FeedbackClient {
     /** A success-class reply that is not the documented acknowledgement is not a confirmed write. */
     badAck(what, status, expected, advice, extra = {}) {
         return unknownOutcome(what, status === expected
-            ? "the service answered without a valid id, so receipt cannot be confirmed."
+            ? "the service answered without a valid, consistent acknowledgement (id and status), so receipt cannot be confirmed."
             : `the service answered HTTP ${status} instead of the expected ${expected}, so receipt cannot be confirmed.`, advice, extra);
     }
     static uuidOf(json, field) {
@@ -246,13 +260,13 @@ class FeedbackClient {
         if (args.submission_id !== undefined && !UUID_PATTERN.test(args.submission_id)) {
             return refused(what, "submission_id must be a UUID, the one returned by an earlier attempt.", false);
         }
-        if (message.trim().length < exports.MESSAGE_MIN) {
+        if ((0, exports.cp)(message.trim()) < exports.MESSAGE_MIN) {
             return refused(what, `the message must have at least ${exports.MESSAGE_MIN} characters.`, false);
         }
-        if (message.length > exports.MESSAGE_MAX) {
+        if ((0, exports.cp)(message) > exports.MESSAGE_MAX) {
             return refused(what, `the message must have at most ${exports.MESSAGE_MAX} characters.`, false);
         }
-        if (email && (email.length > exports.EMAIL_MAX || !EMAIL_PATTERN.test(email))) {
+        if (email && ((0, exports.cp)(email) > exports.EMAIL_MAX || !EMAIL_PATTERN.test(email))) {
             return refused(what, "the email address does not look valid. Leave it out or correct it.", false);
         }
         if (looksLikeCredential(message, this.api_key) || (email !== undefined && looksLikeCredential(email, this.api_key))) {
@@ -286,7 +300,13 @@ class FeedbackClient {
             }
             return this.failure(what, r, advice, extra);
         }
-        const id = r.status === 201 ? FeedbackClient.uuidOf(r.json, "feedback_id") : undefined;
+        let id = r.status === 201 ? FeedbackClient.uuidOf(r.json, "feedback_id") : undefined;
+        // The service always says "received"; an echoed submission_id must be the caller's.
+        if (id && r.json.status !== "received")
+            id = undefined;
+        const echoed = r.json?.submission_id;
+        if (id && echoed !== undefined && (typeof echoed !== "string" || echoed.toLowerCase() !== submission_id.toLowerCase()))
+            id = undefined;
         if (!id)
             return this.badAck(what, r.status, 201, advice, extra);
         return { recorded: true, feedback_id: id, submission_id, note: FeedbackClient.ACK };
@@ -299,7 +319,7 @@ class FeedbackClient {
         }
         const evidence = args.evidence && args.evidence.trim() ? args.evidence : undefined;
         if (evidence !== undefined) {
-            if (evidence.length > exports.EVIDENCE_MAX) {
+            if ((0, exports.cp)(evidence) > exports.EVIDENCE_MAX) {
                 return refused(what, `evidence must be one line of at most ${exports.EVIDENCE_MAX} characters.`, false);
             }
             if (/[\r\n]/.test(evidence)) {
@@ -331,11 +351,13 @@ class FeedbackClient {
                 };
             }
             if (r.kind === "http" && r.status === 404) {
-                return refused(what, "the service has no detection with that id for your key. Check that detection_id came from an arkheia_verify result made with this key.", false);
+                return refused(what, "the service has no record of that detection id for your key. Only results checked by the hosted service can be reported; a result checked by a local proxy cannot be linked to a hosted record. Use arkheia_feedback (kind false_alarm or missed_problem) and describe it in your own words.", false);
             }
             return this.failure(what, r, advice);
         }
-        const id = r.status === 201 ? FeedbackClient.uuidOf(r.json, "report_id") : undefined;
+        let id = r.status === 201 ? FeedbackClient.uuidOf(r.json, "report_id") : undefined;
+        if (id && r.json.status !== "recorded")
+            id = undefined; // the service always says "recorded"
         if (!id)
             return this.badAck(what, r.status, 201, advice);
         return { recorded: true, report_id: id, note: FeedbackClient.ACK };
@@ -387,3 +409,17 @@ class FeedbackClient {
     }
 }
 exports.FeedbackClient = FeedbackClient;
+// ---------------------------------------------------------------------------
+// Whether an arkheia_verify result can be reported with arkheia_report.
+// Only a result checked by the hosted service has a record the report endpoint knows.
+// ---------------------------------------------------------------------------
+exports.NOT_REPORTABLE_LOCAL = "This result was checked locally and cannot be linked to a hosted record; use arkheia_feedback " +
+    "(kind false_alarm or missed_problem) to tell us about it, describing it in your own words.";
+function withReportability(result) {
+    const hosted = result?.source === "hosted" && typeof result.detection_id === "string" && ID_PATTERN.test(result.detection_id);
+    if (hosted)
+        return { ...result, reportable: true, report_with: "arkheia_report" };
+    if (result?.error)
+        return { ...result, reportable: false, report_note: "No check was completed, so there is nothing to report." };
+    return { ...result, reportable: false, report_note: exports.NOT_REPORTABLE_LOCAL };
+}

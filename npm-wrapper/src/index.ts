@@ -9,7 +9,7 @@ import * as fs from 'fs';
 import { ProxyClient } from './proxy-client.js';
 import { check, PolicyViolation } from './tool-registry.js';
 import { call_grok, call_gemini, call_ollama, call_together } from './providers.js';
-import { FeedbackClient, feedbackShape, reportShape, reportsShape } from './feedback.js';
+import { FeedbackClient, withReportability, feedbackShape, reportShape, reportsShape } from './feedback.js';
 import { store_entity, retrieve_entities, store_relation } from './memory.js';
 
 // ---------------------------------------------------------------------------
@@ -133,13 +133,13 @@ async function main() {
 
     server.tool(
         "arkheia_verify",
-        "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief confidence note. LOW = show normally. Never hide or suppress a response — always surface it to the user with the appropriate risk context. The result's detection_id can be passed to arkheia_report to say whether the checked response was really right or wrong.",
+        "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief confidence note. LOW = show normally. Never hide or suppress a response — always surface it to the user with the appropriate risk context. When the result says reportable: true, its detection_id can be passed to arkheia_report to say whether the checked response was really right or wrong. When it says reportable: false (a locally checked result), use arkheia_feedback instead.",
         { prompt: z.string(), response: z.string(), model: z.string() },
         async ({ prompt, response, model }) => {
             try {
                 check("arkheia_verify");
                 const result = await proxy.verify(prompt, response, model);
-                return wrapResult(result);
+                return wrapResult(withReportability(result));
             } catch (e: any) { return handleError("arkheia_verify", e); }
         }
     );
@@ -184,7 +184,7 @@ async function main() {
 
     server.tool(
         "arkheia_report",
-        "Say whether a response that arkheia_verify checked was really wrong or fine. Pass the detection_id field from that arkheia_verify result. outcome 'wrong' means the model's response was fabricated or incorrect, 'fine' means it was correct; this grades the model's response, not Arkheia's score. Give one line of evidence if you checked, and reporter_kind 'human' only when the user is reporting. One report per detection; success is reported only when the service returns a report_id. If the result is 'unknown' or says a report already exists, check arkheia_reports (action list) instead of sending again.",
+        "Say whether a response that arkheia_verify checked was really wrong or fine. Pass the detection_id field from that arkheia_verify result, only when the result says reportable: true; a locally checked result cannot be reported, so use arkheia_feedback for it. outcome 'wrong' means the model's response was fabricated or incorrect, 'fine' means it was correct; this grades the model's response, not Arkheia's score. Give one line of evidence if you checked, and reporter_kind 'human' only when the user is reporting. One report per detection; success is reported only when the service returns a report_id. If the result is 'unknown' or says a report already exists, check arkheia_reports (action list) instead of sending again.",
         reportShape,
         async (args) => {
             try {
@@ -220,7 +220,7 @@ async function main() {
                 const pr = await call_grok(prompt, model);
                 if (pr.error) return wrapResult({ ...pr, arkheia: { risk_level: "UNKNOWN", error: pr.error } });
                 const risk = await proxy.verify(prompt, pr.response, model);
-                return wrapResult({ ...pr, arkheia: risk });
+                return wrapResult({ ...pr, arkheia: withReportability(risk) });
             } catch (e: any) { return handleError("run_grok", e); }
         }
     );
@@ -235,7 +235,7 @@ async function main() {
                 const pr = await call_gemini(prompt, model);
                 if (pr.error) return wrapResult({ ...pr, arkheia: { risk_level: "UNKNOWN", error: pr.error } });
                 const risk = await proxy.verify(prompt, pr.response, model);
-                return wrapResult({ ...pr, arkheia: risk });
+                return wrapResult({ ...pr, arkheia: withReportability(risk) });
             } catch (e: any) { return handleError("run_gemini", e); }
         }
     );
@@ -250,7 +250,7 @@ async function main() {
                 const pr = await call_ollama(prompt, model);
                 if (pr.error) return wrapResult({ ...pr, arkheia: { risk_level: "UNKNOWN", error: pr.error } });
                 const risk = await proxy.verify(prompt, pr.response, model);
-                return wrapResult({ ...pr, arkheia: risk });
+                return wrapResult({ ...pr, arkheia: withReportability(risk) });
             } catch (e: any) { return handleError("run_ollama", e); }
         }
     );
@@ -265,7 +265,7 @@ async function main() {
                 const pr = await call_together(prompt, model);
                 if (pr.error) return wrapResult({ ...pr, arkheia: { risk_level: "UNKNOWN", error: pr.error } });
                 const risk = await proxy.verify(prompt, pr.response, model);
-                return wrapResult({ ...pr, arkheia: risk });
+                return wrapResult({ ...pr, arkheia: withReportability(risk) });
             } catch (e: any) { return handleError("run_together", e); }
         }
     );

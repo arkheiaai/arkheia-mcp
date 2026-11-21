@@ -5,7 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as http from 'http';
 import {
-    FeedbackClient, feedbackShape, reportShape, reportsShape, looksLikeCredential,
+    FeedbackClient, withReportability, feedbackShape, reportShape, reportsShape, looksLikeCredential,
 } from '../src/feedback.js';
 import { call_grok, call_gemini, call_together, call_ollama } from '../src/providers.js';
 import { ProxyClient } from '../src/proxy-client.js';
@@ -31,15 +31,18 @@ afterEach(() => { (globalThis as any).fetch = realFetch; });
 
 const FID = "11111111-2222-3333-4444-555555555555";
 const DID = "det_0123456789abcdef";
+const FB = { feedback_id: FID, status: "received" };
+const RP = { report_id: FID, status: "recorded" };
+// one reply that is a valid acknowledgement for whichever endpoint was called
+const ackFor = (url: string) => (url.includes("/report") ? RP : FB);
 
 // ---- success ---------------------------------------------------------------
 
 test("feedback: success returns the server id; both documented reply shapes work", async () => {
-    for (const reply of [
-        { feedback_id: FID, status: "received", message: "Thank you for your feedback. We read every message." },
-        { feedback_id: FID, submission_id: "x", status: "received", message: "Your feedback was saved." },
-    ]) {
-        mockFetch(() => json(201, reply));
+    for (const echo of [false, true]) {
+        mockFetch((_u, init) => json(201, echo
+            ? { feedback_id: FID, submission_id: JSON.parse(init.body).submission_id, status: "received", message: "Your feedback was saved." }
+            : { feedback_id: FID, status: "received", message: "Thank you for your feedback. We read every message." }));
         const r: any = await client().send_feedback({ message: "The check flagged a correct answer.", kind: "false_alarm" });
         assert.equal(r.recorded, true);
         assert.equal(r.feedback_id, FID);
@@ -50,7 +53,7 @@ test("feedback: success returns the server id; both documented reply shapes work
 });
 
 test("feedback: request body has exactly the expected fields, key only in header", async () => {
-    mockFetch(() => json(201, { feedback_id: FID }));
+    mockFetch(() => json(201, FB));
     await client().send_feedback({ message: "hello there", kind: "bug", email: "a@b.co" });
     assert.equal(calls.length, 1);
     assert.equal(calls[0].url, `${BASE}/v1/feedback`);
@@ -65,7 +68,7 @@ test("feedback: request body has exactly the expected fields, key only in header
 });
 
 test("feedback: optional fields are omitted when not supplied", async () => {
-    mockFetch(() => json(201, { feedback_id: FID }));
+    mockFetch(() => json(201, FB));
     await client().send_feedback({ message: "hello there", email: "  " });
     assert.deepEqual(Object.keys(JSON.parse(calls[0].init.body)).sort(), ["message", "submission_id"]);
 });
@@ -77,7 +80,7 @@ test("report: body has exactly the expected fields and goes to the id's path", a
     assert.equal(r.report_id, FID);
     assert.equal(calls[0].url, `${BASE}/v1/detections/${DID}/report`);
     assert.deepEqual(JSON.parse(calls[0].init.body), { outcome: "wrong", reporter_kind: "human", evidence: "no such function", category: "invented_api" });
-    mockFetch(() => json(201, { report_id: FID }));
+    mockFetch(() => json(201, RP));
     await client().send_report({ detection_id: DID, outcome: "fine" });
     assert.deepEqual(JSON.parse(calls[0].init.body), { outcome: "fine", reporter_kind: "agent" });
 });
@@ -139,7 +142,7 @@ test("a caller-supplied submission_id is reused in the body and returned", async
     const r: any = await client().send_feedback({ message: "hello there", submission_id: sid });
     assert.equal(JSON.parse(calls[0].init.body).submission_id, sid);
     assert.equal(r.submission_id, sid);
-    mockFetch(() => json(201, { feedback_id: FID }));
+    mockFetch(() => json(201, FB));
     const ok: any = await client().send_feedback({ message: "hello there", submission_id: sid });
     assert.equal(ok.recorded, true);
     assert.equal(ok.submission_id, sid);
@@ -160,7 +163,7 @@ test("provably unsent (connection refused): one retry with the same body, then r
 });
 
 test("provably unsent, then success on the retry", async () => {
-    mockFetch((_u, _i, n) => { if (n === 1) return refusedConn(); return json(201, { feedback_id: FID }); });
+    mockFetch((_u, _i, n) => { if (n === 1) return refusedConn(); return json(201, FB); });
     const r: any = await client().send_feedback({ message: "hello there" });
     assert.equal(r.recorded, true);
     assert.equal(calls.length, 2);
@@ -229,7 +232,7 @@ test("server error text is never passed through: a 500 reflecting the key and a 
 test("report 404 gives a fixed message; 409 says a report already exists and points to list, not delete", async () => {
     mockFetch(() => json(404, { detail: "No detection with that id for this key." }));
     let r: any = await client().send_report({ detection_id: DID, outcome: "fine" });
-    assert.match(r.error, /NOT recorded.*no detection with that id/);
+    assert.match(r.error, /NOT recorded.*no record of that detection id/);
     mockFetch(() => json(409, { detail: "Already reported." }));
     r = await client().send_report({ detection_id: DID, outcome: "fine" });
     assert.equal(r.already_reported, true);
@@ -240,7 +243,7 @@ test("report 404 gives a fixed message; 409 says a report already exists and poi
 });
 
 test("no key or non-https URL: nothing is sent", async () => {
-    mockFetch(() => json(201, { feedback_id: FID }));
+    mockFetch(() => json(201, FB));
     let r: any = await new FeedbackClient(BASE, undefined).send_feedback({ message: "hello there" });
     assert.equal(r.recorded, false);
     r = await new FeedbackClient("http://example.test", KEY).send_feedback({ message: "hello there" });
@@ -273,7 +276,7 @@ test("input limits", () => {
 });
 
 test("module also enforces limits, bad email, multi-line evidence (no request sent)", async () => {
-    mockFetch(() => json(201, { feedback_id: FID, report_id: FID }));
+    mockFetch((u) => json(201, ackFor(u)));
     const c = client();
     assert.equal(((await c.send_feedback({ message: "   a   " })) as any).recorded, false);
     assert.equal(((await c.send_feedback({ message: "a".repeat(2001) })) as any).recorded, false);
@@ -284,7 +287,7 @@ test("module also enforces limits, bad email, multi-line evidence (no request se
 });
 
 test("credential-shaped text is refused and never sent or echoed", async () => {
-    mockFetch(() => json(201, { feedback_id: FID, report_id: FID }));
+    mockFetch((u) => json(201, ackFor(u)));
     const secrets = [
         "my key is ak_live_abcdefgh12345678",
         "Authorization: Bearer abcdefghijklmnop12345678",
@@ -313,7 +316,7 @@ test("credential-shaped text is refused and never sent or echoed", async () => {
 // ---- list / delete -----------------------------------------------------------
 
 test("list returns only whitelisted report fields; delete needs a 204", async () => {
-    mockFetch(() => json(200, { reports: [{ report_id: FID, event_id: DID, outcome: "wrong", category: null, evidence: "e", reporter_kind: "agent", created_at: "t", extra_internal: "x" }] }));
+    mockFetch(() => json(200, { reports: [{ report_id: FID, event_id: DID, outcome: "wrong", category: null, evidence: "e", reporter_kind: "agent", created_at: "2026-01-01T00:00:00Z", extra_internal: "x" }] }));
     const l: any = await client().list_reports(5);
     assert.equal(calls[0].url, `${BASE}/v1/reports?limit=5`);
     assert.deepEqual(Object.keys(l.reports[0]).sort(), ["category", "created_at", "detection_id", "evidence", "outcome", "report_id", "reporter_kind"]);
@@ -505,7 +508,7 @@ test("feedback 409 is a conflict on an existing submission, worded apart from a 
 
 test("only exactly 201 with a UUID id is recorded:true", async () => {
     for (const [status, id] of [[201, FID], [201, "not-a-uuid"], [202, FID], [200, FID], [204, FID]] as const) {
-        mockFetch(() => json(status as number, { feedback_id: id, report_id: id }));
+        mockFetch((u) => json(status as number, u.includes("/report") ? { report_id: id, status: "recorded" } : { feedback_id: id, status: "received" }));
         const f: any = await client().send_feedback({ message: "hello there" });
         const r: any = await client().send_report({ detection_id: DID, outcome: "fine" });
         const ok = status === 201 && id === FID;
@@ -602,14 +605,143 @@ test("every request with a JSON body sets Content-Type: application/json", async
     }
 });
 
-test("no source or test file carries an internal reference", () => {
+test("no source or test file carries an internal reference (this file included)", () => {
     const root = path.join(__dirname, "..", "..");
-    const banned = /#\d{3}|\bB-\d+|\bB\d{3}\b|\bCodex\b|\bDavid\b|proxy #/;
+    // Built from parts so this file's own text does not match what it forbids.
+    const banned = new RegExp([
+        "#\\d{3}", "\\bB-\\d+", "\\bB\\d{3}\\b", "\\bCod" + "ex\\b", "\\bDav" + "id\\b", "proxy" + " #",
+    ].join("|"));
+    let scanned = 0;
     for (const dir of ["src", "test"]) {
         for (const f of fs.readdirSync(path.join(root, dir))) {
             const full = path.join(root, dir, f);
-            if (!fs.statSync(full).isFile() || f === "feedback.test.ts") continue; // that file names the pattern itself
+            if (!fs.statSync(full).isFile()) continue;
+            scanned++;
             assert.ok(!banned.test(fs.readFileSync(full, "utf8")), `${full} has an internal reference`);
         }
     }
+    assert.ok(fs.readdirSync(path.join(root, "test")).includes("feedback.test.ts"));
+    assert.ok(scanned >= 9);
+    assert.ok(banned.test("see #" + "123") && banned.test("B-" + "42"), "the pattern still matches what it should");
+});
+
+// ---- round 3 -----------------------------------------------------------------
+
+test("404 on a report points to arkheia_feedback, not to re-verifying", async () => {
+    mockFetch(() => json(404, { detail: "x" }));
+    const r: any = await client().send_report({ detection_id: DID, outcome: "wrong" });
+    assert.match(r.error, /checked by a local proxy cannot be linked to a hosted record/);
+    assert.match(r.error, /arkheia_feedback \(kind false_alarm or missed_problem\)/);
+    assert.ok(!/verify (it )?again|re-?verif/i.test(r.error));
+});
+
+test("verify result says whether it is reportable: hosted yes, local no, no check no", async () => {
+    // hosted
+    mockFetch((url) => {
+        if (url.startsWith("http://localhost")) throw new TypeError("fetch failed");
+        return json(200, { risk: "LOW", confidence: 0.1, features_triggered: [], detection_id: DID });
+    });
+    let out: any = withReportability(await new ProxyClient("http://localhost:8098", 1.0, BASE, KEY).verify("p", "r", "m"));
+    assert.equal(out.reportable, true);
+    assert.equal(out.report_with, "arkheia_report");
+    assert.equal(out.detection_id, DID);
+    assert.equal(out.report_note, undefined);
+    // local proxy answered (its id is not a hosted id)
+    mockFetch(() => json(200, { risk_level: "LOW", confidence: 0, features_triggered: [], detection_id: "local-abc" }));
+    out = withReportability(await new ProxyClient("http://localhost:8098", 1.0, BASE, KEY).verify("p", "r", "m"));
+    assert.equal(out.reportable, false);
+    assert.equal(out.report_with, undefined);
+    assert.match(out.report_note, /checked locally and cannot be linked to a hosted record/);
+    assert.match(out.report_note, /arkheia_feedback/);
+    // nothing checked
+    mockFetch(() => { throw new TypeError("fetch failed"); });
+    out = withReportability(await new ProxyClient("http://localhost:8098", 1.0, BASE, KEY).verify("p", "r", "m"));
+    assert.equal(out.reportable, false);
+    assert.match(out.report_note, /nothing to report/);
+});
+
+test("lengths count code points: 500 supplementary characters pass, 501 code points are refused", async () => {
+    const astral = (n: number) => "\u{1F600}".repeat(n);
+    assert.equal(astral(251).length, 502);
+    const r = z.object(reportShape);
+    assert.ok(r.safeParse({ detection_id: DID, outcome: "fine", evidence: astral(500) }).success);
+    assert.ok(!r.safeParse({ detection_id: DID, outcome: "fine", evidence: astral(501) }).success);
+    assert.ok(!r.safeParse({ detection_id: DID, outcome: "fine", evidence: "e".repeat(501) }).success);
+    const f = z.object(feedbackShape);
+    assert.ok(f.safeParse({ message: astral(2000) }).success);
+    assert.ok(!f.safeParse({ message: astral(2001) }).success);
+    assert.ok(f.safeParse({ message: astral(5) }).success);
+    assert.ok(!f.safeParse({ message: astral(4) }).success);
+    // the client enforces the same count
+    mockFetch((u) => json(201, ackFor(u)));
+    assert.equal(((await client().send_report({ detection_id: DID, outcome: "fine", evidence: astral(500) })) as any).recorded, true);
+    assert.equal(((await client().send_report({ detection_id: DID, outcome: "fine", evidence: astral(501) })) as any).recorded, false);
+    assert.equal(((await client().send_feedback({ message: astral(2000) })) as any).recorded, true);
+    assert.equal(((await client().send_feedback({ message: astral(2001) })) as any).recorded, false);
+    assert.equal(((await client().send_feedback({ message: astral(4) })) as any).recorded, false);
+    // list readback: 251 supplementary characters (502 UTF-16 units) is valid
+    const row = { report_id: FID, event_id: DID, outcome: "wrong", category: null, evidence: astral(251), reporter_kind: "agent", created_at: null };
+    mockFetch(() => json(200, { reports: [row] }));
+    assert.equal(((await client().list_reports()) as any).reports.length, 1);
+    mockFetch(() => json(200, { reports: [{ ...row, evidence: astral(501) }] }));
+    assert.equal(((await client().list_reports()) as any).reports, undefined);
+});
+
+test("created_at must be an ISO datetime or null", async () => {
+    const row = { report_id: FID, event_id: DID, outcome: "fine", category: null, evidence: null, reporter_kind: "human" };
+    for (const [value, ok] of [["2026-11-12T17:40:00Z", true], ["2026-11-12T17:40:00.123456", true], ["2026-11-12T17:40:00+01:00", true], [null, true],
+        ["t", false], ["yesterday", false], ["2026-13-45T99:00:00Z", false], [20260101, false]] as const) {
+        mockFetch(() => json(200, { reports: [{ ...row, created_at: value }] }));
+        const l: any = await client().list_reports();
+        assert.equal(l.reports !== undefined, ok, String(value));
+    }
+});
+
+test("contradictory acknowledgements are unknown; consistent ones are recorded", async () => {
+    const run = async (fbBody: any, rpBody: any) => [
+        (await client().send_feedback({ message: "hello there" })) as any,
+        (await client().send_report({ detection_id: DID, outcome: "fine" })) as any,
+    ].map((x, i) => ({ x, body: i ? rpBody : fbBody }));
+    // pending / wrong status
+    mockFetch((u) => json(201, u.includes("/report") ? { report_id: FID, status: "pending" } : { feedback_id: FID, status: "pending" }));
+    for (const { x } of await run(0, 0)) assert.equal(x.recorded, "unknown");
+    // status absent: both contracts always send it, so absence is not accepted
+    mockFetch((u) => json(201, u.includes("/report") ? { report_id: FID } : { feedback_id: FID }));
+    for (const { x } of await run(0, 0)) assert.equal(x.recorded, "unknown");
+    // the other endpoint's status is wrong for this one
+    mockFetch((u) => json(201, u.includes("/report") ? { report_id: FID, status: "received" } : { feedback_id: FID, status: "recorded" }));
+    for (const { x } of await run(0, 0)) assert.equal(x.recorded, "unknown");
+    // echoed submission_id that is not the caller's
+    mockFetch(() => json(201, { feedback_id: FID, status: "received", submission_id: "99999999-9999-9999-9999-999999999999" }));
+    const bad: any = await client().send_feedback({ message: "hello there" });
+    assert.equal(bad.recorded, "unknown");
+    assert.ok(bad.submission_id, "the caller's own id is returned for the retry");
+    // echoed id equal to the caller's (any case) is accepted; absent echo is accepted
+    const sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    mockFetch(() => json(201, { feedback_id: FID, status: "received", submission_id: sid.toUpperCase() }));
+    assert.equal(((await client().send_feedback({ message: "hello there", submission_id: sid })) as any).recorded, true);
+    mockFetch((u) => json(201, ackFor(u)));
+    assert.equal(((await client().send_feedback({ message: "hello there" })) as any).recorded, true);
+    assert.equal(((await client().send_report({ detection_id: DID, outcome: "fine" })) as any).recorded, true);
+});
+
+test("a known refusal survives a cancellation that never finishes", async () => {
+    const resp = { ok: false, status: 401, body: { cancel: () => new Promise<void>(() => { /* never */ }) } };
+    mockFetch(() => resp as any);
+    const t0 = Date.now();
+    const r: any = await new FeedbackClient(BASE, KEY, 300).send_feedback({ message: "hello there" });
+    assert.ok(Date.now() - t0 < 250, "returned at once, not at the deadline");
+    assert.equal(r.recorded, false);
+    assert.match(r.error, /HTTP 401/);
+    assert.equal(calls.length, 1);
+    // a cancellation that rejects is also harmless
+    mockFetch(() => ({ ok: false, status: 429, body: { cancel: () => Promise.reject(new Error("x")) } }) as any);
+    assert.match(((await client().send_feedback({ message: "hello there" })) as any).error, /HTTP 429/);
+});
+
+test("engines.node is >=20 and the README says Node 20+", () => {
+    const root = path.join(__dirname, "..", "..");
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
+    assert.equal(pkg.engines.node, ">=20.0.0");
+    assert.match(fs.readFileSync(path.join(root, "README.md"), "utf8"), /Node 20\+/);
 });

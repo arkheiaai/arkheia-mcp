@@ -41,6 +41,8 @@ test("built server over stdio: fallback verify, tools/list and feedback, with no
         const verdict = JSON.parse(v.content[0].text);
         assert.equal(verdict.detection_id, "det_0123456789abcdef");
         assert.equal(verdict.source, "hosted");
+        assert.equal(verdict.reportable, true);
+        assert.equal(verdict.report_with, "arkheia_report");
 
         const f: any = await client.callTool({ name: "arkheia_feedback", arguments: { message: "Works well for me.", kind: "praise" } });
         const fb = JSON.parse(f.content[0].text);

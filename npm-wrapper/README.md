@@ -10,7 +10,7 @@ Free tier: 1,500 detections/month. No credit card.
 
 ```
 Requires:
-  - Node 18+
+  - Node 20+
   - Python 3.10–3.13 with working pyexpat
 
 macOS note: Homebrew's current `brew install python` installs 3.14,
@@ -136,7 +136,7 @@ Free-text feedback, for example "tell Arkheia the verdict on that answer was a f
 
 `kind` is optional: `bug`, `false_alarm`, `missed_problem`, `feature_request`, `praise` or `other`. `email` is optional, used only to reply to you, and sent only if you supply it. `message` is 5 to 2,000 characters.
 
-Whether a checked response was really wrong or fine. Pass the `detection_id` from the `arkheia_verify` result:
+Whether a checked response was really wrong or fine. Pass the `detection_id` from the `arkheia_verify` result. Only a result with `reportable: true` (checked by the hosted service) can be reported; a result checked by a local proxy says `reportable: false` and cannot be linked to a hosted record, so use `arkheia_feedback` with kind `false_alarm` or `missed_problem` and describe it in your own words:
 
 ```json
 {"tool": "arkheia_report", "arguments": {"detection_id": "<detection_id from arkheia_verify>", "outcome": "wrong", "evidence": "checked src/x.py: no such function", "category": "invented_api"}}
