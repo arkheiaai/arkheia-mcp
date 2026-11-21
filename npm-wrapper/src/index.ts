@@ -63,7 +63,7 @@ function handleError(toolName: string, e: any) {
 // Main
 // ---------------------------------------------------------------------------
 
-const CURRENT_VERSION = "1.2.3";
+const CURRENT_VERSION = "1.2.4";
 
 async function checkForUpdate(): Promise<void> {
     // Check once per day — skip if checked recently
@@ -125,7 +125,7 @@ async function main() {
     }
 
     const proxy = new ProxyClient(ARKHEIA_PROXY_URL, 10.0, ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
-    const server = new McpServer({ name: "arkheia-trust", version: "1.2.3" });
+    const server = new McpServer({ name: "arkheia-trust", version: "1.2.4" });
 
     // ── Detection & audit ──────────────────────────────────────────
 
@@ -189,14 +189,14 @@ async function main() {
 
     server.tool(
         "run_ollama",
-        "Call a local Ollama model and screen the response through Arkheia. No network egress.",
+        "Call a local Ollama model and screen the response through the local Arkheia verifier only. Nothing is sent off this machine; if the local verifier is unavailable the response is returned unchecked and marked not checked.",
         { prompt: z.string(), model: z.string().default("phi4:14b") },
         async ({ prompt, model }) => {
             try {
                 check("run_ollama");
                 const pr = await call_ollama(prompt, model);
                 if (pr.error) return wrapResult({ ...pr, arkheia: { risk_level: "UNKNOWN", error: pr.error } });
-                const risk = await proxy.verify(prompt, pr.response, model);
+                const risk = await proxy.verify(prompt, pr.response, model, undefined, { allowHosted: false });
                 return wrapResult({ ...pr, arkheia: risk });
             } catch (e: any) { return handleError("run_ollama", e); }
         }

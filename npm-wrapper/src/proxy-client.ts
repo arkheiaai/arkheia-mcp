@@ -55,13 +55,23 @@ export class ProxyClient {
         response: string,
         model_id: string,
         session_id?: string,
+        options: { allowHosted?: boolean } = {},
     ): Promise<VerifyResult> {
         /**
          * Detect fabrication in a model response.
          *
-         * Tries local proxy first. If unavailable, falls back to hosted API.
+         * Tries local proxy first. If unavailable, falls back to hosted API,
+         * unless allowHosted is false: then nothing is sent anywhere else.
          * Never raises -- returns UNKNOWN on any error.
          */
+        if (options.allowHosted === false) {
+            const local = await this._verify_local(prompt, response, model_id, session_id);
+            if (local.error === "proxy_unavailable" || local.error === "proxy_timeout") {
+                logger.warn("Local verification unavailable; this response is local-only, so nothing was sent to the hosted service");
+                return _unavailable("not_checked_local_verification_unavailable");
+            }
+            return local;
+        }
         // Try local proxy first (if last attempt didn't fail with ConnectError)
         if (this._local_available) {
             const result = await this._verify_local(prompt, response, model_id, session_id);

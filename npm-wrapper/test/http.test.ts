@@ -79,3 +79,26 @@ test("a real 307 redirect does not carry the key: the second server receives not
         redirector.close(); target.close();
     }
 });
+
+test("the Ollama tool call site asks for local-only verification", () => {
+    const src = require("fs").readFileSync(require("path").join(__dirname, "..", "..", "src", "index.ts"), "utf8");
+    const m = src.match(/"run_ollama",[\s\S]*?handleError\("run_ollama"/);
+    assert.ok(m, "found the run_ollama handler");
+    assert.match(m[0], /proxy\.verify\([^)]*\{ allowHosted: false \}\)/);
+    for (const other of ["run_grok", "run_gemini", "run_together"]) {
+        const o = src.match(new RegExp(`"${other}",[\\s\\S]*?handleError\\("${other}"`));
+        assert.doesNotMatch(o![0], /allowHosted/);
+    }
+});
+
+test("ProxyClient.verify with allowHosted false never contacts the hosted URL", async () => {
+    const seen: string[] = [];
+    (globalThis as any).fetch = async (url: any) => { seen.push(String(url)); throw new TypeError("fetch failed"); };
+    try {
+        const c = new ProxyClient("http://localhost:1", 2, "https://hosted.example.test", "ak_test");
+        const r = await c.verify("p", "r", "m", undefined, { allowHosted: false });
+        assert.equal(r.error, "not_checked_local_verification_unavailable");
+        assert.equal(r.risk_level, "UNKNOWN");
+        assert.deepEqual(seen, ["http://localhost:1/detect/verify"]);
+    } finally { (globalThis as any).fetch = realFetch; }
+});
