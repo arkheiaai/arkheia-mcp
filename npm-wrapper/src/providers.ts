@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import { FinishState, finishFromOpenAICompatible, finishFromGemini, finishFromOllama } from './assessment.js';
 import { displayOrigin, describeTransportError } from './egress.js';
 import { looksLikeCredential } from './feedback.js';
 
@@ -20,6 +21,8 @@ type ProviderResult = {
     usage?: Record<string, any>;
     eval_count?: number;
     error: string | null;
+    /** The provider's own finish state (Change A step 2a): only "complete" is screened. */
+    finish?: FinishState;
 };
 
 // ---------------------------------------------------------------------------
@@ -114,11 +117,18 @@ export async function call_grok(
         }
         const data = await resp.json();
         const response_text = data.choices?.[0]?.message?.content;
+        const finish = finishFromOpenAICompatible(data);
+        // A non-normal finish (length, content filter) is reported as such even with no text.
+        if (finish === "incomplete") {
+            return { response: typeof response_text === 'string' ? response_text : "", model: model,
+                     prompt_hash: _prompt_hash(prompt), usage: data.usage || {}, finish, error: null };
+        }
         if (typeof response_text !== 'string') {
             throw new Error("Invalid response format from Grok API");
         }
         return {
             response: response_text,
+            finish: finish,
             model: model,
             prompt_hash: _prompt_hash(prompt),
             usage: data.usage || {},
@@ -194,12 +204,33 @@ export async function call_gemini(
             return _err_response(model, prompt, `http_${resp.status}`);
         }
         const data = await resp.json();
-        const response_text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (typeof response_text !== 'string') {
-            throw new Error("Invalid response format from Gemini API");
+        // The whole visible reply, not its first part: screening part of a reply and reporting
+        // the verdict as the reply's would misstate what was checked. A reply that did not finish
+        // normally is returned as such (not screened, and not a provider error); a finished reply
+        // with any part that is not plain text is an unsupported shape and fails closed.
+        const finish = finishFromGemini(data);
+        const parts = data.candidates?.[0]?.content?.parts;
+        // The visible answer is the text parts that are not model thoughts.
+        const visible = Array.isArray(parts) ? parts.filter((p: any) => typeof p?.text === 'string' && p?.thought !== true) : [];
+        const allText = Array.isArray(parts) && parts.length > 0 && visible.length > 0
+            && parts.every((p: any) => typeof p?.text === 'string');
+        if (finish !== "complete") {
+            return {
+                response: visible.map((p: any) => p.text).join(""),
+                model: model,
+                prompt_hash: _prompt_hash(prompt),
+                usage: data.usageMetadata || {},
+                finish: finish === "unknown" ? "unknown" : "incomplete",
+                error: null,
+            };
         }
+        if (!allText) {
+            throw new Error("Unsupported response format from Gemini API");
+        }
+        const response_text = visible.map((p: any) => p.text).join("");
         return {
             response: response_text,
+            finish: finish,
             model: model,
             prompt_hash: _prompt_hash(prompt),
             usage: data.usageMetadata || {},
@@ -275,11 +306,18 @@ export async function call_together(
         }
         const data = await resp.json();
         const response_text = data.choices?.[0]?.message?.content;
+        const finish = finishFromOpenAICompatible(data);
+        // A non-normal finish (length, content filter) is reported as such even with no text.
+        if (finish === "incomplete") {
+            return { response: typeof response_text === 'string' ? response_text : "", model: model,
+                     prompt_hash: _prompt_hash(prompt), usage: data.usage || {}, finish, error: null };
+        }
         if (typeof response_text !== 'string') {
             throw new Error("Invalid response format from Together AI API");
         }
         return {
             response: response_text,
+            finish: finish,
             model: model,
             prompt_hash: _prompt_hash(prompt),
             usage: data.usage || {},
@@ -354,6 +392,7 @@ export async function call_ollama(
         }
         return {
             response: response_text,
+            finish: finishFromOllama(data),
             model: model,
             prompt_hash: _prompt_hash(prompt),
             eval_count: data.eval_count,

@@ -45,6 +45,7 @@ const tool_registry_js_1 = require("./tool-registry.js");
 const egress_js_1 = require("./egress.js");
 const providers_js_1 = require("./providers.js");
 const feedback_js_1 = require("./feedback.js");
+const assessment_js_1 = require("./assessment.js");
 const memory_js_1 = require("./memory.js");
 // ---------------------------------------------------------------------------
 // Config Loading
@@ -85,10 +86,10 @@ function wrapResult(result) {
 }
 function handleError(toolName, e) {
     if (e instanceof tool_registry_js_1.PolicyViolation) {
-        return wrapResult({ error: e.reason, risk_level: "UNKNOWN" });
+        return wrapResult({ error: e.reason, ...(0, assessment_js_1.notAssessed)("unknown") });
     }
     process.stderr.write(`[arkheia] ${toolName} error: ${(0, egress_js_1.describeTransportError)(e).text}\n`);
-    return wrapResult({ error: (0, egress_js_1.describeTransportError)(e).text, risk_level: "UNKNOWN" });
+    return wrapResult({ error: (0, egress_js_1.describeTransportError)(e).text, ...(0, assessment_js_1.notAssessed)("unknown") });
 }
 // ---------------------------------------------------------------------------
 // Main
@@ -154,7 +155,7 @@ async function main() {
     const feedback = new feedback_js_1.FeedbackClient(ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
     const server = new mcp_js_1.McpServer({ name: "arkheia-trust", version: "1.3.0" });
     // ── Detection & audit ──────────────────────────────────────────
-    server.tool("arkheia_verify", "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief confidence note. LOW = show normally. Never hide or suppress a response — always surface it to the user with the appropriate risk context. When the result says reportable: true, its detection_id can be passed to arkheia_report to say whether the checked response was really right or wrong. When it says reportable: false (a locally checked result), use arkheia_feedback instead.", { prompt: zod_1.z.string(), response: zod_1.z.string(), model: zod_1.z.string() }, async ({ prompt, response, model }) => {
+    server.tool("arkheia_verify", "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief confidence note. LOW = show normally (LOW only ever appears with assessed: true). NOT_ASSESSED -- detection could not score this response. It is not a clean result. Verify by other means; not_assessed_reason says why. candidate_alert -- an unqualified warning on a response we could not properly assess. Treat MEDIUM or HIGH here as a reason to check the specific claims now. Never hide or suppress a response — always surface it to the user with the appropriate risk context. When the result says reportable: true, its detection_id can be passed to arkheia_report to say whether the checked response was really right or wrong. When it says reportable: false (a locally checked result), use arkheia_feedback instead.", { prompt: zod_1.z.string(), response: zod_1.z.string(), model: zod_1.z.string() }, async ({ prompt, response, model }) => {
         try {
             (0, tool_registry_js_1.check)("arkheia_verify");
             const result = await proxy.verify(prompt, response, model);
@@ -164,10 +165,16 @@ async function main() {
             return handleError("arkheia_verify", e);
         }
     });
-    server.tool("arkheia_audit_log", egress.arkheia_audit_log.description, { session_id: zod_1.z.string().optional(), limit: zod_1.z.number().int().min(1).max(500).default(50) }, async ({ session_id, limit }) => {
+    server.tool("arkheia_audit_log", egress.arkheia_audit_log.description, {
+        session_id: zod_1.z.string().optional(),
+        limit: zod_1.z.number().int().min(1).max(500).default(50),
+        // raw: the stored records exactly as the local proxy keeps them, so their hashes verify.
+        // The default view reads each detection like a live verdict instead.
+        raw: zod_1.z.boolean().default(false),
+    }, async ({ session_id, limit, raw }) => {
         try {
             (0, tool_registry_js_1.check)("arkheia_audit_log");
-            const result = await proxy.get_audit_log(session_id, Math.min(limit, 500));
+            const result = await proxy.get_audit_log(session_id, Math.min(limit, 500), raw);
             return wrapResult(result);
         }
         catch (e) {
@@ -214,14 +221,22 @@ async function main() {
         }
     });
     // ── Provider wrappers ──────────────────────────────────────────
+    // Change A step 2a: a provider error, or a reply that did not finish normally, is returned
+    // NOT_ASSESSED and is never sent for screening. Only a complete reply is screened.
+    async function screenProviderReply(pr, prompt, model, options) {
+        if (pr.error)
+            return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)({ ...(0, assessment_js_1.notAssessed)("provider_error"), error: pr.error }) });
+        if (pr.finish !== "complete") {
+            return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)({ ...(0, assessment_js_1.notAssessed)("incomplete_response"), error: "not_checked_reply_did_not_finish_normally" }) });
+        }
+        const risk = await proxy.verify(prompt, pr.response, model, undefined, options);
+        return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)(risk) });
+    }
     server.tool("run_grok", "Call xAI Grok and screen the response through Arkheia for fabrication.", { prompt: zod_1.z.string(), model: zod_1.z.string().default("grok-4-fast-non-reasoning") }, async ({ prompt, model }) => {
         try {
             (0, tool_registry_js_1.check)("run_grok");
             const pr = await (0, providers_js_1.call_grok)(prompt, model);
-            if (pr.error)
-                return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)({ risk_level: "UNKNOWN", error: pr.error }) });
-            const risk = await proxy.verify(prompt, pr.response, model);
-            return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)(risk) });
+            return await screenProviderReply(pr, prompt, model);
         }
         catch (e) {
             return handleError("run_grok", e);
@@ -231,10 +246,7 @@ async function main() {
         try {
             (0, tool_registry_js_1.check)("run_gemini");
             const pr = await (0, providers_js_1.call_gemini)(prompt, model);
-            if (pr.error)
-                return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)({ risk_level: "UNKNOWN", error: pr.error }) });
-            const risk = await proxy.verify(prompt, pr.response, model);
-            return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)(risk) });
+            return await screenProviderReply(pr, prompt, model);
         }
         catch (e) {
             return handleError("run_gemini", e);
@@ -247,13 +259,10 @@ async function main() {
             const ollamaUrl = process.env.OLLAMA_BASE_URL || egress_js_1.DEFAULT_OLLAMA_URL;
             if ((0, egress_js_1.isArkheiaHostedOrigin)(ollamaUrl, process.env.ARKHEIA_HOSTED_URL)) {
                 const err = "configuration_error: OLLAMA_BASE_URL is the Arkheia hosted service (or cannot be read as an address); nothing was sent. Set it to your Ollama server.";
-                return wrapResult({ response: "", model: (0, providers_js_1.modelNameError)(model) ? "" : model, error: err, arkheia: (0, feedback_js_1.withReportability)({ risk_level: "UNKNOWN", error: "not_checked_ollama_address_not_usable" }) });
+                return wrapResult({ response: "", model: (0, providers_js_1.modelNameError)(model) ? "" : model, error: err, arkheia: (0, feedback_js_1.withReportability)({ ...(0, assessment_js_1.notAssessed)("provider_error"), error: "not_checked_ollama_address_not_usable" }) });
             }
             const pr = await (0, providers_js_1.call_ollama)(prompt, model);
-            if (pr.error)
-                return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)({ risk_level: "UNKNOWN", error: pr.error }) });
-            const risk = await proxy.verify(prompt, pr.response, model, undefined, { allowHosted: false });
-            return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)(risk) });
+            return await screenProviderReply(pr, prompt, model, { allowHosted: false });
         }
         catch (e) {
             return handleError("run_ollama", e);
@@ -263,10 +272,7 @@ async function main() {
         try {
             (0, tool_registry_js_1.check)("run_together");
             const pr = await (0, providers_js_1.call_together)(prompt, model);
-            if (pr.error)
-                return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)({ risk_level: "UNKNOWN", error: pr.error }) });
-            const risk = await proxy.verify(prompt, pr.response, model);
-            return wrapResult({ ...pr, arkheia: (0, feedback_js_1.withReportability)(risk) });
+            return await screenProviderReply(pr, prompt, model);
         }
         catch (e) {
             return handleError("run_together", e);

@@ -56,7 +56,7 @@ test("redirect policy is error on every fetch call site (table-driven)", async (
     (globalThis as any).fetch = async (url: any, init: any = {}) => {
         seen.push({ url: String(url), redirect: init.redirect });
         if (String(url).startsWith("http://localhost:1")) throw new TypeError("fetch failed");
-        return new Response(JSON.stringify({ risk: "LOW", response: "ok", choices: [{ message: { content: "ok" } }], candidates: [{ content: { parts: [{ text: "ok" }] } }] }), { status: 200 });
+        return new Response(JSON.stringify({ risk: "LOW", response: "ok", choices: [{ message: { content: "ok" }, finish_reason: "stop" }], candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }], done: true, done_reason: "stop" }), { status: 200 });
     };
     process.env.XAI_API_KEY = "k"; process.env.GEMINI_API_KEY = "k"; process.env.GOOGLE_API_KEY = "k"; process.env.TOGETHER_API_KEY = "k";
     try {
@@ -88,7 +88,8 @@ test("a real 307 on the local verification and audit requests: the second server
     try {
         const c = new ProxyClient(`http://127.0.0.1:${port(redirector)}`, 3, "https://hosted.example.test", "ak_test");
         const v = await c.verify("p", "r", "m", undefined, { allowHosted: false });
-        assert.equal(v.risk_level, "UNKNOWN");
+        assert.equal(v.risk_level, "NOT_ASSESSED");
+        assert.equal(v.assessed, false);
         const a = await c.get_audit_log();
         assert.ok(a.error, "the audit request fails instead of following");
         assert.equal(received, 0);
@@ -164,7 +165,8 @@ test("Ollama and verifier addresses that are the hosted service: zero requests t
             const o: any = await client.callTool({ name: "run_ollama", arguments: { prompt: "p", model: "m" } });
             const out = JSON.parse(o.content[0].text);
             assert.match(out.error, /configuration_error/);
-            assert.equal(out.arkheia.risk_level, "UNKNOWN");
+            assert.equal(out.arkheia.risk_level, "NOT_ASSESSED");
+            assert.equal(out.arkheia.assessed, false);
             assert.deepEqual(requests(), [], `nothing sent for OLLAMA_BASE_URL=${addr}`);
         });
     }

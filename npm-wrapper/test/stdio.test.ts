@@ -92,7 +92,8 @@ test("run_ollama is local-only: local verifier down + hosted key set -> no hoste
         const r: any = await client.callTool({ name: "run_ollama", arguments: { prompt: "p" } });
         const body = JSON.parse(r.content[0].text);
         assert.equal(body.response, "an answer");
-        assert.equal(body.arkheia.risk_level, "UNKNOWN");
+        assert.equal(body.arkheia.risk_level, "NOT_ASSESSED");
+        assert.equal(body.arkheia.assessed, false);
         assert.ok(body.arkheia.error, "says it was not checked");
         assert.equal(body.arkheia.reportable, false);
         assert.match(body.arkheia.report_note, /No check was completed/);
@@ -141,7 +142,8 @@ test("run_ollama with the local verifier down sends nothing to the hosted servic
         const o: any = await client.callTool({ name: "run_ollama", arguments: { prompt: "p", model: "m" } });
         const out = JSON.parse(o.content[0].text);
         assert.equal(out.response, "local answer");
-        assert.equal(out.arkheia.risk_level, "UNKNOWN");
+        assert.equal(out.arkheia.risk_level, "NOT_ASSESSED");
+        assert.equal(out.arkheia.assessed, false);
         assert.match(out.arkheia.error, /not_checked_local_verification_unavailable/);
         assert.equal(out.arkheia.detection_id, undefined);
         assert.equal(out.arkheia.reportable, false);

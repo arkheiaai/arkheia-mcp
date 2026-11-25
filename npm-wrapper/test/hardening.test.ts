@@ -17,8 +17,8 @@ function mockFetch() {
     (globalThis as any).fetch = async (url: any) => {
         calls.push(String(url));
         const u = String(url);
-        const body = u.includes("generateContent") ? { candidates: [{ content: { parts: [{ text: "ok" }] } }] }
-            : u.includes("/api/generate") ? { response: "ok" } : { choices: [{ message: { content: "ok" } }] };
+        const body = u.includes("generateContent") ? { candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] }
+            : u.includes("/api/generate") ? { response: "ok", done: true, done_reason: "stop" } : { choices: [{ message: { content: "ok" }, finish_reason: "stop" }] };
         return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     };
 }

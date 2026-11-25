@@ -1,10 +1,10 @@
 # Arkheia MCP Server — Fabrication Detection for AI Agents
 
-Know when your AI is making things up.
+Screens model responses for signs of fabrication, using behavioural fingerprinting.
 
-Arkheia screens model responses for fabrication using behavioural fingerprinting. Works with Claude, GPT, Gemini, Grok, Llama, Mistral, and 30+ other models. One tool call. Real-time risk scoring.
+Coverage and accuracy vary by model and are improving. In the npm package, every result says whether it could be assessed: a result we could not assess comes back `NOT_ASSESSED` with a reason, and is never shown as a clean LOW. The separate Python server in this repository does not have this yet.
 
-Free tier: 1,500 detections/month. No credit card.
+Free: 50,000 checks a month during the launch period. No credit card.
 
 ## Install
 
@@ -44,7 +44,7 @@ Commands for Codex, Gemini, Grok and where each stores its configuration are in 
 
 ### The Python server in this repository
 
-This repository also contains a Python MCP server (`python -m mcp_server.server`, run from a clone with `PYTHONPATH` set to the clone). It has nine tools and does **not** include `arkheia_feedback`, `arkheia_report` or `arkheia_reports`. To send feedback or reports, use the npm package above.
+This repository also contains a Python MCP server (`python -m mcp_server.server`, run from a clone with `PYTHONPATH` set to the clone). It has nine tools and does **not** include `arkheia_feedback`, `arkheia_report` or `arkheia_reports`. It also does not yet report `NOT_ASSESSED`: a result it could not assess can still read as LOW. Use the npm package above.
 
 ## Your First Detection
 
@@ -52,24 +52,24 @@ Once installed, ask your agent:
 
 > "Use arkheia_verify to check this response: HTTP/2 introduces multiplexing which allows multiple requests over a single TCP connection."
 
-You should see a **LOW** risk result — that's a truthful response.
+Check the result's `assessed` field. If it is `true`, the band (LOW, MEDIUM or HIGH) is a scored result. If the result is `NOT_ASSESSED`, the response could not be scored for this model; that is not a clean result.
 
 Now try a fabricated one:
 
 > "Use arkheia_verify to check this response: The Kafka 4.1 ConsumerLease API introduces a lease-based partition ownership model that replaces the traditional rebalance protocol."
 
-You should see a **HIGH** risk result — the Kafka 4.1 ConsumerLease API doesn't exist. Arkheia caught it.
+The Kafka 4.1 ConsumerLease API doesn't exist. Whether a given check flags it depends on the model and on how much signal the check had; results are not guaranteed for any single example.
 
 ### Test Prompts to Try
 
-These exercise different detection scenarios. Run them through your agent to see how it handles each:
+These exercise different detection scenarios. Run them through your agent to see how it handles each. They are examples, not guaranteed outcomes:
 
-**Truthful (should score LOW):**
+**Truthful statements:**
 - "Use arkheia_verify on: Docker caches each Dockerfile layer. Unchanged layers are reused. This is why COPY order matters."
 - "Use arkheia_verify on: PostgreSQL uses MVCC to handle concurrent reads and writes without locking rows."
 - "Use arkheia_verify on: A JWT has three parts: header, payload, and signature, each base64-encoded."
 
-**Fabricated (should score HIGH):**
+**Fabricated statements:**
 - "Use arkheia_verify on: The GraphQL Federation 3.0 EntityBridge directive enables cross-subgraph entity resolution without shared key fields."
 - "Use arkheia_verify on: Docker BuildKit 3.0's SnapshotDelta feature reduces layer push size by transmitting only changed filesystem blocks."
 - "Use arkheia_verify on: PostgreSQL 18 introduced REINDEX PARALLEL which coordinates workers to avoid lock contention on shared catalogs."
@@ -138,11 +138,11 @@ This catches fabrication that individual agents miss. The draft agent is confide
 | **LOW** | Response fingerprint is consistent with grounded content | Use normally |
 | **MEDIUM** | Some statistical signals triggered — the model may have interpolated or substituted | Review key claims. Check references, API names, version numbers. |
 | **HIGH** | Strong evidence of fabrication — multiple detection signals agree | Don't trust this output. Verify everything. Consider regenerating. |
-| **UNKNOWN** | No detection profile for this model yet | [Let us know](mailto:dmurfet@arkheia.ai) — we'll add it |
+| **NOT_ASSESSED** | Detection could not score this response (`not_assessed_reason` says why). Not a clean result. | Verify by other means. A `candidate_alert` of MEDIUM or HIGH means check the specific claims now. |
 
 ## Model Coverage
 
-35+ models with detection profiles:
+Detection profiles exist for the model families below. A model without its own profile returns `NOT_ASSESSED` (`no_profile` or `borrowed_profile`), never a clean LOW.
 
 - **OpenAI:** GPT-4o, GPT-5.4, GPT-5-Codex family
 - **Anthropic:** Claude Opus 4.6, Sonnet 4.6, Haiku 4.5
@@ -155,13 +155,13 @@ If your model isn't listed, [let us know](mailto:dmurfet@arkheia.ai) and we'll c
 
 ## Direct API Access
 
-The MCP server provides the richest detection because it captures the full inference signal during model calls. If you have a specific workflow where you need to call the detection API directly (CI/CD pipelines, custom orchestrators, batch processing), the REST endpoint is available:
+If you have a workflow where you need to call the detection API directly (CI/CD pipelines, custom orchestrators, batch processing), the REST endpoint is available:
 
 ```
 POST https://arkheia-proxy-production.up.railway.app/v1/detect
 ```
 
-Direct API calls without inference data provide structural analysis only. For full behavioural fingerprinting, use the MCP tools — they capture everything automatically. If you're building a custom integration and want full detection quality, [get in touch](mailto:dmurfet@arkheia.ai) and we'll help you set it up.
+The MCP tools send the same thing as a direct call: the prompt, the response and the model name, with your key in a header. Each response carries `assessed`, and `not_assessed_reason` when it could not be scored. If you're building a custom integration, [get in touch](mailto:dmurfet@arkheia.ai).
 
 ## MCP Tools
 
@@ -174,16 +174,9 @@ Direct API calls without inference data provide structural analysis only. For fu
 | `run_ollama` | Call local Ollama model + screen |
 | `run_together` | Call Together AI (Kimi, DeepSeek) + screen |
 
-## Pricing
+## Price
 
-| Plan | Price | Detections | Concurrent |
-|------|-------|------------|------------|
-| Free | $0 | 1,500/month | 5 |
-| Single Contributor | $99/month | Unlimited | 5 |
-| Professional | $499/month | Unlimited | 20 |
-| Team | $1,999/month | Unlimited | 50 |
-
-No credit card for free tier. Upgrade when you're ready.
+Free during the launch period: 50,000 checks a month, no credit card. Paid plans will be announced before the free period ends.
 
 ## Feedback
 

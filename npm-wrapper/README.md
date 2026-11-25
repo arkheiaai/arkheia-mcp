@@ -1,10 +1,10 @@
 # Arkheia MCP Server — Fabrication Detection for AI Agents
 
-Know when your AI is making things up.
+Screens model responses for signs of fabrication, using behavioural fingerprinting.
 
-Arkheia screens model responses for fabrication using behavioural fingerprinting. Works with Claude, GPT, Gemini, Grok, Llama, Mistral, and 30+ other models. One tool call. Real-time risk scoring.
+Coverage and accuracy vary by model and are improving. Every result says whether it could be assessed: a result we could not assess comes back `NOT_ASSESSED` with a reason, and is never shown as a clean LOW.
 
-Free tier: 1,500 detections/month. No credit card.
+Free: 50,000 checks a month during the launch period. No credit card.
 
 ## Prerequisites
 
@@ -109,7 +109,7 @@ grok mcp test arkheia
 
 | Tool | Description |
 |------|-------------|
-| `arkheia_verify` | Score any model response for fabrication risk (LOW/MEDIUM/HIGH) |
+| `arkheia_verify` | Check a model response for signs of fabrication: LOW, MEDIUM or HIGH when it could assess the response, otherwise `NOT_ASSESSED` with a reason |
 | `arkheia_audit_log` | Review your detection history |
 | `arkheia_feedback` | Send short feedback to Arkheia |
 | `arkheia_report` | Say whether a checked response was really wrong or fine |
@@ -121,6 +121,10 @@ grok mcp test arkheia
 | `memory_store` | Persistent knowledge graph — upsert entity |
 | `memory_retrieve` | Knowledge graph lookup |
 | `memory_relate` | Create relationship between entities |
+
+## What `arkheia_verify` sends
+
+When no local Arkheia proxy is running, `arkheia_verify` and the `run_*` tools send the prompt, the response and the model name to the hosted service, with your key in a request header. Nothing else from your machine is sent. `run_ollama` never contacts the hosted service.
 
 ## Sending feedback
 
@@ -152,20 +156,19 @@ Whether a checked response was really wrong or fine. Pass the `detection_id` fro
 
 The tool retries by itself only when the request provably never left your machine (for example connection refused), and only once. Error text from the service is never shown in the result.
 
-## 35+ Model Profiles
+## Reading a result
 
-GPT-4o, GPT-5.4, Claude Opus/Sonnet/Haiku, Gemini 2.5/3.0, Grok 4, Llama, Mixtral, CodeLlama, Falcon, Phi4, Kimi K2.5, and more. If your model isn't listed, [let us know](mailto:dmurfet@arkheia.ai).
+- `assessed: true` with `risk_level` LOW, MEDIUM or HIGH: the response was scored on that model's own profile.
+- `risk_level: "NOT_ASSESSED"`: detection could not score this response. It is not a clean result; verify by other means. `not_assessed_reason` says why: `no_profile`, `borrowed_profile`, `limited_evidence`, `service_unavailable`, `incomplete_response`, `provider_error`, `screening_disabled` or `unknown`.
+- `candidate_alert` (MEDIUM or HIGH) on a `NOT_ASSESSED` result: an unqualified warning. Check the specific claims now.
 
-## Pricing
+## Model coverage
 
-| Plan | Price | Detections |
-|------|-------|------------|
-| Free | $0 | 1,500/month |
-| Single Contributor | $99/month | Unlimited |
-| Professional | $499/month | Unlimited |
-| Team | $1,999/month | Unlimited |
+Detection profiles exist for many popular models, and the list grows. A model without its own profile returns `NOT_ASSESSED` with `no_profile` or `borrowed_profile`. If your model needs coverage, [let us know](mailto:dmurfet@arkheia.ai).
 
-Manage your account at [arkheia.ai/mcp/account](https://arkheia.ai/mcp/account).
+## Price
+
+Free during the launch period: 50,000 checks a month, no credit card. Paid plans will be announced before the free period ends.
 
 ## Where API keys are stored
 

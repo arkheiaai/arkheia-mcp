@@ -3,6 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.ProxyClient = void 0;
 const url_1 = require("url");
 const egress_js_1 = require("./egress.js");
+const assessment_js_1 = require("./assessment.js");
 // Node.js native fetch doesn't have a global logger
 const logger = {
     // stdout carries the MCP protocol; log lines go to stderr only.
@@ -32,7 +33,7 @@ class ProxyClient {
          *
          * Tries local proxy first. If unavailable, falls back to hosted API,
          * unless allowHosted is false: then nothing is sent anywhere else.
-         * Never raises -- returns UNKNOWN on any error.
+         * Never raises -- returns NOT_ASSESSED (with a reason) on any error.
          */
         if (options.allowHosted === false) {
             // A verifier address that is (or cannot be told apart from) the hosted origin would route this path to the hosted service: refuse.
@@ -100,7 +101,9 @@ class ProxyClient {
                 logger.error(`ProxyClient: /detect/verify HTTP error: ${resp.status} ${resp.statusText}`);
                 return _unavailable(`proxy_http_error_${resp.status}`);
             }
-            return await resp.json();
+            const raw = await resp.json();
+            // A local proxy's verdict goes through the same fail-closed reading as the hosted one.
+            return (0, assessment_js_1.applyAssessment)({ ...raw, source: raw?.source ?? "local" }, (0, assessment_js_1.assessmentFromDetector)(raw, "risk_level", model_id));
         }
         catch (e) {
             clearTimeout(timeoutId);
@@ -151,16 +154,15 @@ class ProxyClient {
                 return _unavailable(`hosted_http_error_${status}`);
             }
             const data = await resp.json();
-            // Map hosted response format to local format
-            return {
-                risk_level: data.risk || "UNKNOWN",
-                confidence: data.confidence || 0.0,
-                features_triggered: data.features_triggered || [],
-                detection_id: data.detection_id,
-                detection_method: data.detection_method,
-                evidence_depth_limited: data.evidence_depth_limited ?? true,
+            // Map hosted response format to local format. The band is passed only when the service
+            // says it assessed the response (Change A); otherwise NOT_ASSESSED with its reason.
+            return (0, assessment_js_1.applyAssessment)({
+                confidence: data?.confidence || 0.0,
+                features_triggered: data?.features_triggered || [],
+                detection_id: data?.detection_id,
+                evidence_depth_limited: data?.evidence_depth_limited ?? true,
                 source: "hosted",
-            };
+            }, (0, assessment_js_1.assessmentFromDetector)(data, "risk", model_id));
         }
         catch (e) {
             clearTimeout(timeoutId);
@@ -178,7 +180,7 @@ class ProxyClient {
             }
         }
     }
-    async get_audit_log(session_id, limit = 50) {
+    async get_audit_log(session_id, limit = 50, raw = false) {
         /**
          * GET /audit/log
          *
@@ -186,6 +188,9 @@ class ProxyClient {
          * Note: audit log is only available from local proxy, not hosted API.
          */
         const params = new url_1.URLSearchParams({ limit: String(Math.min(limit, 500)) });
+        // raw: ask the service for its stored records unchanged, so their hashes verify as served.
+        if (raw)
+            params.append("raw", "true");
         if (session_id) {
             params.append("session_id", session_id);
         }
@@ -202,7 +207,21 @@ class ProxyClient {
                 logger.error(`ProxyClient: /audit/log HTTP error: ${resp.status} ${resp.statusText}`);
                 return _empty_log(`proxy_http_error_${resp.status}`);
             }
-            return await resp.json();
+            // Every row is read the same way as a live verdict, including old rows with no
+            // assessment fields, and the summary is counted from the normalised rows.
+            const body = await resp.json();
+            if (!raw)
+                return (0, assessment_js_1.normaliseAuditLog)(body);
+            // raw: stored records only. An older service ignores ?raw=true and still sends its
+            // read-time view (record_kind / assessment / read_time_fields, or top-level assessment
+            // fields it added); that is not a stored record, so say raw is unavailable.
+            const events = Array.isArray(body?.events) ? body.events : [];
+            const projected = events.some((e) => e && typeof e === "object"
+                && ("record_kind" in e || "read_time_fields" in e || "assessment" in e));
+            if (projected) {
+                return { events: [], summary: {}, error: "raw_unavailable_from_this_local_proxy" };
+            }
+            return body;
         }
         catch (e) {
             clearTimeout(timeoutId);
@@ -223,18 +242,17 @@ class ProxyClient {
 }
 exports.ProxyClient = ProxyClient;
 function _unavailable(error) {
-    /** Standard UNKNOWN response when detection is unreachable. */
+    /** Detection was not reached (timeout, connection failure, HTTP error, no key): not assessed. */
     return {
-        risk_level: "UNKNOWN",
+        ...(0, assessment_js_1.notAssessed)("service_unavailable"),
         confidence: 0.0,
-        features_triggered: [],
         error: error,
     };
 }
 function _empty_log(error) {
     return {
         events: [],
-        summary: { LOW: 0, MEDIUM: 0, HIGH: 0, UNKNOWN: 0 },
+        summary: { LOW: 0, MEDIUM: 0, HIGH: 0, NOT_ASSESSED: 0, CANDIDATE_MEDIUM: 0, CANDIDATE_HIGH: 0 },
         error: error,
     };
 }
