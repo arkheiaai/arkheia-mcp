@@ -83,7 +83,7 @@ function localContradiction(raw, requestedModel) {
         return true;
     // The verdict must be about the model this call asked about.
     if (requestedModel !== undefined) {
-        for (const named of [raw?.model_id, raw?.model]) {
+        for (const named of [raw?.model_id, raw?.model, raw?.profile_model_id]) {
             if (typeof named === "string" && !sameModel(named, requestedModel))
                 return true;
         }
@@ -178,11 +178,17 @@ const HASH_FIELDS = ["this_hash", "prev_hash"];
 const SERVICE_READ_TIME = ["record_kind", "assessment", "read_time_fields"];
 /** What an audit row records, by the service's own label when it sends one. */
 function auditRecordKind(e) {
+    // A refusal is a refusal whatever a producer labels it: the detector did not run.
+    const refused = e?.action_taken === "refused" || e?.action_taken === "refuse" || e?.risk_level === "REFUSED"
+        || e?.event_type === "passthrough.forward_refused";
+    if (refused)
+        return "refusal";
     if (typeof e?.record_kind === "string")
         return e.record_kind;
     if (e?.source === "governance_push" || e?.event_type === "governance_detection_push")
         return "delivery_receipt";
-    if (e?.event_type === "passthrough.forward_refused" || e?.action_taken === "refuse")
+    if (e?.event_type === "passthrough.forward_refused" || e?.action_taken === "refuse"
+        || e?.action_taken === "refused" || e?.risk_level === "REFUSED")
         return "refusal";
     if (DETECTION_SOURCES.includes(e?.source))
         return "detection";
@@ -195,8 +201,14 @@ function assessmentFromService(e) {
         return assessmentFromDetector(e, "risk_level"); // older service
     const band = e.risk_level;
     if (a.assessed === true) {
-        const ok = isBand(band) && absent(a.not_assessed_reason) && absent(a.candidate_alert) && absent(e.risk_demoted_from);
-        return ok ? { risk_level: band, assessed: true } : notAssessed("unknown");
+        // The same checks as a live verdict, against the row's own stored facts: an affirmative
+        // assessment beside limited evidence, a gate, an error or another model's profile fails.
+        const { assessment: _a, record_kind: _k, read_time_fields: _r, ...facts } = e;
+        void _a;
+        void _k;
+        void _r;
+        return assessmentFromDetector({ ...facts, assessed: true, not_assessed_reason: a.not_assessed_reason,
+            candidate_alert: a.candidate_alert }, "risk_level");
     }
     if (a.assessed === false && typeof a.not_assessed_reason === "string"
         && exports.SERVER_REASONS.includes(a.not_assessed_reason)) {

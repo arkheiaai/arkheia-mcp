@@ -484,3 +484,52 @@ test("the capped-HIGH shape the local verifier now sends keeps its HIGH candidat
         not_assessed_reason: "limited_evidence", candidate_alert: "HIGH", evidence_depth_limited: true, source: "local" }, "risk_level", "gpt-4"),
         { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "limited_evidence", candidate_alert: "HIGH" });
 });
+
+
+// ---------------------------------------------------------------------------
+// 7. Review round 4 probes
+// ---------------------------------------------------------------------------
+
+const NESTED_OK = { source: "proxy", risk_level: "LOW", model_id: "phi4:14b", profile_model_id: "phi4:14b",
+    evidence_depth_limited: false, gate_reason: null, error: null, record_kind: "detection",
+    assessment: { assessed: true, not_assessed_reason: null, candidate_alert: null } };
+
+test("audit: a clean nested assessment stays assessed", () => {
+    assert.equal(normaliseAuditLog({ events: [NESTED_OK] }).events[0].risk_level, "LOW");
+});
+
+for (const [name, change] of [
+    ["limited evidence", { evidence_depth_limited: true }],
+    ["a suppression gate", { gate_reason: "token_count_below_80" }],
+    ["a detector error", { error: "engine_error" }],
+    ["another model's profile", { profile_model_id: "phi4:latest" }],
+] as const) {
+    test(`audit: a nested affirmative assessment beside ${name} fails closed`, () => {
+        const row = normaliseAuditLog({ events: [{ ...NESTED_OK, ...change }] }).events[0];
+        assert.deepEqual([row.risk_level, row.not_assessed_reason], ["NOT_ASSESSED", "unknown"]);
+    });
+}
+
+test("audit: an interception refusal is a refusal, even if labelled a detection", () => {
+    const out = normaliseAuditLog({ events: [
+        { source: "interception", risk_level: "REFUSED", action_taken: "refused", record_kind: "detection" },
+        { source: "interception", risk_level: "REFUSED", action_taken: "refused" },
+    ] });
+    assert.deepEqual(out.events.map((e: any) => e.record_kind), ["refusal", "refusal"]);
+    assert.equal(out.summary.NOT_ASSESSED, 0);
+});
+
+test("a scoring profile for another model fails closed even with no model echo", () => {
+    const { model_id: _m, ...noEcho } = LOCAL_ASSESSED as any; void _m;
+    assert.deepEqual(assessmentFromDetector({ ...noEcho, profile_model_id: "llama3:8b" }, "risk_level", "phi4:14b"),
+                     { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "unknown" });
+});
+
+test("audit raw asks the service for its raw mode", async () => {
+    let seen = "";
+    const restore = withFetch((u) => { seen = u; return json(200, { events: [] }); });
+    try {
+        await new ProxyClient("http://localhost:8098", 1.0, "https://hosted.example.test", "ak_live_DUMMYDUMMYDUMMY00").get_audit_log(undefined, 10, true);
+        assert.match(seen, /[?&]raw=true\b/);
+    } finally { restore(); }
+});

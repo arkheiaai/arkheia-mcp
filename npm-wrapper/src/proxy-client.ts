@@ -248,6 +248,8 @@ export class ProxyClient {
          * Note: audit log is only available from local proxy, not hosted API.
          */
         const params = new URLSearchParams({ limit: String(Math.min(limit, 500)) });
+        // raw: ask the service for its stored records unchanged, so their hashes verify as served.
+        if (raw) params.append("raw", "true");
         if (session_id) {
             params.append("session_id", session_id);
         }
