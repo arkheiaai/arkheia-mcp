@@ -64,7 +64,7 @@ for (const [name, body] of contradictions) {
 
 for (const level of ["MEDIUM", "HIGH"] as const) {
     test(`an unassessed ${level} keeps the service's candidate_alert`, () => {
-        const a = assessmentFromDetector({ risk: "MEDIUM", assessed: false, not_assessed_reason: "borrowed_profile", candidate_alert: level }, "risk");
+        const a = assessmentFromDetector({ risk: "MEDIUM", ...(level === "HIGH" ? { risk_demoted_from: "HIGH" } : {}), assessed: false, not_assessed_reason: "borrowed_profile", candidate_alert: level }, "risk");
         assert.deepEqual(a, { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "borrowed_profile", candidate_alert: level });
     });
 }
@@ -149,7 +149,7 @@ test("audit rows: unassessed LOW and legacy rows are NOT_ASSESSED; the summary c
         { risk_level: "LOW", assessed: false, not_assessed_reason: "limited_evidence", evidence_depth_limited: true },
         { risk_level: "LOW", confidence: 0.2 },  // legacy row, no assessment fields
         { risk_level: "LOW", assessed: true, evidence_depth_limited: false },
-        { risk_level: "MEDIUM", assessed: false, not_assessed_reason: "borrowed_profile", candidate_alert: "HIGH", evidence_depth_limited: true },
+        { risk_level: "MEDIUM", risk_demoted_from: "HIGH", assessed: false, not_assessed_reason: "borrowed_profile", candidate_alert: "HIGH", evidence_depth_limited: true },
     ] });
     assert.deepEqual(out.events.map((e: any) => e.risk_level), ["NOT_ASSESSED", "NOT_ASSESSED", "LOW", "NOT_ASSESSED"]);
     assert.deepEqual(out.events.map((e: any) => e.not_assessed_reason), ["limited_evidence", "unknown", undefined, "borrowed_profile"]);
@@ -271,4 +271,87 @@ test("stdio: arkheia_audit_log normalises rows and counts NOT_ASSESSED apart", a
         assert.deepEqual(out.events.map((e: any) => e.risk_level), ["NOT_ASSESSED", "NOT_ASSESSED", "LOW"]);
         assert.deepEqual(out.summary, { LOW: 1, MEDIUM: 0, HIGH: 0, NOT_ASSESSED: 2, CANDIDATE_MEDIUM: 0, CANDIDATE_HIGH: 0 });
     });
+});
+
+
+// ---------------------------------------------------------------------------
+// 4. Review round 1 probes: contradictions, finish shapes, multi-part replies, malformed rows
+// ---------------------------------------------------------------------------
+
+const moreContradictions: Array<[string, any]> = [
+    ["assessed LOW with a borrowed profile", { ...ASSESSED_LOW, profile_fingerprint_borrowed: true }],
+    ["assessed LOW with model_supported false", { ...ASSESSED_LOW, model_supported: false }],
+    ["assessed MEDIUM with a recorded demotion", { ...ASSESSED_LOW, risk: "MEDIUM", risk_demoted_from: "HIGH" }],
+    ["a HIGH candidate beside a live LOW with no demotion", { risk: "LOW", assessed: false, not_assessed_reason: "limited_evidence", candidate_alert: "HIGH" }],
+    ["a MEDIUM candidate beside a HIGH band", { risk: "HIGH", assessed: false, not_assessed_reason: "limited_evidence", candidate_alert: "MEDIUM" }],
+];
+for (const [name, body] of moreContradictions) {
+    test(`fails closed: ${name}`, () => {
+        assert.deepEqual(assessmentFromDetector(body, "risk"),
+                         { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "unknown" });
+    });
+}
+
+test("a demoted verdict keeps its pre-demotion level as the candidate", () => {
+    assert.deepEqual(
+        assessmentFromDetector({ risk: "MEDIUM", risk_demoted_from: "HIGH", assessed: false, not_assessed_reason: "borrowed_profile", candidate_alert: "HIGH" }, "risk"),
+        { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "borrowed_profile", candidate_alert: "HIGH" });
+});
+
+for (const level of ["MEDIUM", "HIGH"] as const) {
+    test(`an old row with no assessment fact keeps a service-supplied ${level} candidate with reason unknown`, () => {
+        assert.deepEqual(assessmentFromDetector({ risk_level: level, candidate_alert: level }, "risk_level"),
+                         { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "unknown", candidate_alert: level });
+    });
+}
+
+test("Ollama counts as complete only with done: true and done_reason: stop", () => {
+    assert.equal(finishFromOllama({ done: true, done_reason: "stop" }), "complete");
+    assert.equal(finishFromOllama({ done_reason: "stop" }), "unknown");
+    assert.equal(finishFromOllama({ done: "false", done_reason: "stop" }), "unknown");
+    assert.equal(finishFromOllama({ done: "true", done_reason: "stop" }), "unknown");
+    assert.equal(finishFromOllama({ done: true }), "unknown");
+});
+
+async function geminiWith(body: any) {
+    const { call_gemini } = await import('../src/providers.js');
+    const saved = process.env.GOOGLE_API_KEY;
+    process.env.GOOGLE_API_KEY = "g-dummy-key-0000";
+    const restore = withFetch(() => json(200, body));
+    try { return await call_gemini("p", "gemini-2.5-flash") as any; }
+    finally { restore(); if (saved === undefined) delete process.env.GOOGLE_API_KEY; else process.env.GOOGLE_API_KEY = saved; }
+}
+
+test("Gemini: a finished reply in two text parts is screened whole", async () => {
+    const pr = await geminiWith({ candidates: [{ content: { parts: [{ text: "first. " }, { text: "second." }] }, finishReason: "STOP" }] });
+    assert.equal(pr.response, "first. second.");
+    assert.equal(pr.finish, "complete");
+    assert.equal(pr.error, null);
+});
+
+test("Gemini: a finished reply with a non-text part is a provider error, not screened", async () => {
+    const pr = await geminiWith({ candidates: [{ content: { parts: [{ text: "a" }, { functionCall: { name: "f" } }] }, finishReason: "STOP" }] });
+    assert.ok(pr.error);
+});
+
+for (const reason of ["MAX_TOKENS", "SAFETY"]) {
+    test(`Gemini: ${reason} with no text is incomplete, not a provider error`, async () => {
+        const pr = await geminiWith({ candidates: [{ finishReason: reason }] });
+        assert.deepEqual([pr.finish, pr.error, pr.response], ["incomplete", null, ""]);
+    });
+}
+
+test("audit: a malformed row between two warnings costs neither warning", async () => {
+    const restore = withFetch(() => json(200, { events: [
+        { risk_level: "MEDIUM", candidate_alert: "MEDIUM" },
+        "not a row",
+        null,
+        { risk_level: "HIGH", candidate_alert: "HIGH" },
+    ] }));
+    try {
+        const out: any = await new ProxyClient("http://localhost:8098", 1.0, "https://hosted.example.test", "ak_live_DUMMYDUMMYDUMMY00").get_audit_log();
+        assert.deepEqual(out.events.map((e: any) => e.candidate_alert), ["MEDIUM", "HIGH"]);
+        assert.deepEqual(out.summary, { LOW: 0, MEDIUM: 0, HIGH: 0, NOT_ASSESSED: 2, CANDIDATE_MEDIUM: 1, CANDIDATE_HIGH: 1, INVALID_ROWS: 2 });
+        assert.equal(out.error, undefined);
+    } finally { restore(); }
 });

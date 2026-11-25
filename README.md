@@ -2,7 +2,7 @@
 
 Screens model responses for signs of fabrication, using behavioural fingerprinting.
 
-Coverage and accuracy vary by model and are improving. Every result says whether it could be assessed: a result we could not assess comes back `NOT_ASSESSED` with a reason, and is never shown as a clean LOW.
+Coverage and accuracy vary by model and are improving. In the npm package, every result says whether it could be assessed: a result we could not assess comes back `NOT_ASSESSED` with a reason, and is never shown as a clean LOW. The separate Python server in this repository does not have this yet.
 
 Free: 50,000 checks a month during the launch period. No credit card.
 
@@ -44,7 +44,7 @@ Commands for Codex, Gemini, Grok and where each stores its configuration are in 
 
 ### The Python server in this repository
 
-This repository also contains a Python MCP server (`python -m mcp_server.server`, run from a clone with `PYTHONPATH` set to the clone). It has nine tools and does **not** include `arkheia_feedback`, `arkheia_report` or `arkheia_reports`. To send feedback or reports, use the npm package above.
+This repository also contains a Python MCP server (`python -m mcp_server.server`, run from a clone with `PYTHONPATH` set to the clone). It has nine tools and does **not** include `arkheia_feedback`, `arkheia_report` or `arkheia_reports`. It also does not yet report `NOT_ASSESSED`: a result it could not assess can still read as LOW. Use the npm package above.
 
 ## Your First Detection
 
@@ -52,24 +52,24 @@ Once installed, ask your agent:
 
 > "Use arkheia_verify to check this response: HTTP/2 introduces multiplexing which allows multiple requests over a single TCP connection."
 
-You should see a **LOW** risk result — that's a truthful response.
+Check the result's `assessed` field. If it is `true`, the band (LOW, MEDIUM or HIGH) is a scored result. If the result is `NOT_ASSESSED`, the response could not be scored for this model; that is not a clean result.
 
 Now try a fabricated one:
 
 > "Use arkheia_verify to check this response: The Kafka 4.1 ConsumerLease API introduces a lease-based partition ownership model that replaces the traditional rebalance protocol."
 
-You should see a **HIGH** risk result — the Kafka 4.1 ConsumerLease API doesn't exist. Arkheia caught it.
+The Kafka 4.1 ConsumerLease API doesn't exist. Whether a given check flags it depends on the model and on how much signal the check had; results are not guaranteed for any single example.
 
 ### Test Prompts to Try
 
-These exercise different detection scenarios. Run them through your agent to see how it handles each:
+These exercise different detection scenarios. Run them through your agent to see how it handles each. They are examples, not guaranteed outcomes:
 
-**Truthful (should score LOW):**
+**Truthful statements:**
 - "Use arkheia_verify on: Docker caches each Dockerfile layer. Unchanged layers are reused. This is why COPY order matters."
 - "Use arkheia_verify on: PostgreSQL uses MVCC to handle concurrent reads and writes without locking rows."
 - "Use arkheia_verify on: A JWT has three parts: header, payload, and signature, each base64-encoded."
 
-**Fabricated (should score HIGH):**
+**Fabricated statements:**
 - "Use arkheia_verify on: The GraphQL Federation 3.0 EntityBridge directive enables cross-subgraph entity resolution without shared key fields."
 - "Use arkheia_verify on: Docker BuildKit 3.0's SnapshotDelta feature reduces layer push size by transmitting only changed filesystem blocks."
 - "Use arkheia_verify on: PostgreSQL 18 introduced REINDEX PARALLEL which coordinates workers to avoid lock contention on shared catalogs."
@@ -155,13 +155,13 @@ If your model isn't listed, [let us know](mailto:dmurfet@arkheia.ai) and we'll c
 
 ## Direct API Access
 
-The MCP server provides the richest detection because it captures the full inference signal during model calls. If you have a specific workflow where you need to call the detection API directly (CI/CD pipelines, custom orchestrators, batch processing), the REST endpoint is available:
+If you have a workflow where you need to call the detection API directly (CI/CD pipelines, custom orchestrators, batch processing), the REST endpoint is available:
 
 ```
 POST https://arkheia-proxy-production.up.railway.app/v1/detect
 ```
 
-Direct API calls without inference data provide structural analysis only. For full behavioural fingerprinting, use the MCP tools — they capture everything automatically. If you're building a custom integration and want full detection quality, [get in touch](mailto:dmurfet@arkheia.ai) and we'll help you set it up.
+The MCP tools send the same thing as a direct call: the prompt, the response and the model name, with your key in a header. Each response carries `assessed`, and `not_assessed_reason` when it could not be scored. If you're building a custom integration, [get in touch](mailto:dmurfet@arkheia.ai).
 
 ## MCP Tools
 

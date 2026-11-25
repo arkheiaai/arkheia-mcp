@@ -198,13 +198,30 @@ export async function call_gemini(
             return _err_response(model, prompt, `http_${resp.status}`);
         }
         const data = await resp.json();
-        const response_text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (typeof response_text !== 'string') {
-            throw new Error("Invalid response format from Gemini API");
+        // The whole visible reply, not its first part: screening part of a reply and reporting
+        // the verdict as the reply's would misstate what was checked. A reply that did not finish
+        // normally is returned as such (not screened, and not a provider error); a finished reply
+        // with any part that is not plain text is an unsupported shape and fails closed.
+        const finish = finishFromGemini(data);
+        const parts = data.candidates?.[0]?.content?.parts;
+        const allText = Array.isArray(parts) && parts.length > 0 && parts.every((p: any) => typeof p?.text === 'string');
+        if (finish !== "complete") {
+            return {
+                response: allText ? parts.map((p: any) => p.text).join("") : "",
+                model: model,
+                prompt_hash: _prompt_hash(prompt),
+                usage: data.usageMetadata || {},
+                finish: finish === "unknown" ? "unknown" : "incomplete",
+                error: null,
+            };
         }
+        if (!allText) {
+            throw new Error("Unsupported response format from Gemini API");
+        }
+        const response_text = parts.map((p: any) => p.text).join("");
         return {
             response: response_text,
-            finish: finishFromGemini(data),
+            finish: finish,
             model: model,
             prompt_hash: _prompt_hash(prompt),
             usage: data.usageMetadata || {},
