@@ -533,3 +533,37 @@ test("audit raw asks the service for its raw mode", async () => {
         assert.match(seen, /[?&]raw=true\b/);
     } finally { restore(); }
 });
+
+
+// ---------------------------------------------------------------------------
+// 8. Review round 5 probes
+// ---------------------------------------------------------------------------
+
+for (const [name, value] of [["null", null], ["a string", "yes"], ["an array", []]] as const) {
+    test(`audit: an unreadable assessment (${name}) fails closed even beside an affirmative top-level flag`, () => {
+        const row = normaliseAuditLog({ events: [{ ...NESTED_OK, assessed: true, assessment: value }] }).events[0];
+        assert.deepEqual([row.risk_level, row.not_assessed_reason], ["NOT_ASSESSED", "unknown"]);
+    });
+}
+
+test("audit: an omitted assessment is read the old way (legacy producer)", () => {
+    const { assessment: _a, record_kind: _k, ...legacy } = NESTED_OK as any; void _a; void _k;
+    const row = normaliseAuditLog({ events: [{ ...legacy, assessed: true }] }).events[0];
+    assert.deepEqual([row.risk_level, row.assessed], ["LOW", true]);
+});
+
+for (const key of ["model_id", "model", "profile_model_id"]) {
+    test(`an explicit null ${key} fails closed`, () => {
+        assert.deepEqual(assessmentFromDetector({ ...LOCAL_ASSESSED, [key]: null }, "risk_level", "phi4:14b"),
+                         { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "unknown" });
+    });
+}
+
+test("audit raw against an older producer that ignores raw reports raw as unavailable", async () => {
+    const restore = withFetch(() => json(200, { events: [{ source: "proxy", risk_level: "HIGH", this_hash: "h",
+        record_kind: "detection", assessment: { assessed: false, not_assessed_reason: "unknown", candidate_alert: "HIGH" } }] }));
+    try {
+        const out: any = await new ProxyClient("http://localhost:8098", 1.0, "https://hosted.example.test", "ak_live_DUMMYDUMMYDUMMY00").get_audit_log(undefined, 10, true);
+        assert.deepEqual(out, { events: [], summary: {}, error: "raw_unavailable_from_this_local_proxy" });
+    } finally { restore(); }
+});

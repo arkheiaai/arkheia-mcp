@@ -274,9 +274,18 @@ export class ProxyClient {
             }
             // Every row is read the same way as a live verdict, including old rows with no
             // assessment fields, and the summary is counted from the normalised rows.
-            const body = await resp.json();
-            // raw: the stored records exactly as the service sent them, so their hashes verify.
-            return (raw ? body : normaliseAuditLog(body)) as AuditLogResult;
+            const body: any = await resp.json();
+            if (!raw) return normaliseAuditLog(body) as AuditLogResult;
+            // raw: stored records only. An older service ignores ?raw=true and still sends its
+            // read-time view (record_kind / assessment / read_time_fields, or top-level assessment
+            // fields it added); that is not a stored record, so say raw is unavailable.
+            const events = Array.isArray(body?.events) ? body.events : [];
+            const projected = events.some((e: any) => e && typeof e === "object"
+                && ("record_kind" in e || "read_time_fields" in e || "assessment" in e));
+            if (projected) {
+                return { events: [], summary: {}, error: "raw_unavailable_from_this_local_proxy" } as AuditLogResult;
+            }
+            return body as AuditLogResult;
         } catch (e: any) {
             clearTimeout(timeoutId);
             if (e.name === 'AbortError') {

@@ -75,9 +75,12 @@ function localContradiction(raw, requestedModel) {
         return true; // a suppression gate produced it
     if (!absent(raw?.error))
         return true; // the detector reported an error
-    // A field the producer sends as explicit null is an explicit unknown, not an omission.
-    if (raw && "profile_model_id" in raw && !(typeof raw.profile_model_id === "string" && raw.profile_model_id.trim()))
-        return true;
+    // A field the producer sends is a claim: an explicit null or non-string identity is an explicit
+    // unknown, not an omission. Omitted fields stay compatible with verdict-only producers.
+    for (const key of ["profile_model_id", "model_id", "model"]) {
+        if (raw && key in raw && !(typeof raw[key] === "string" && raw[key].trim()))
+            return true;
+    }
     const scoredBy = raw?.profile_model_id, model = raw?.model_id;
     if (typeof scoredBy === "string" && typeof model === "string" && !sameModel(scoredBy, model))
         return true;
@@ -196,9 +199,12 @@ function auditRecordKind(e) {
 }
 /** Read the service's `assessment` object for a detection row, failing closed. */
 function assessmentFromService(e) {
-    const a = e?.assessment;
-    if (a === null || typeof a !== "object")
-        return assessmentFromDetector(e, "risk_level"); // older service
+    // Omitted: an older service, read the old way. Present but unreadable: fail closed.
+    if (!("assessment" in e))
+        return assessmentFromDetector(e, "risk_level");
+    const a = e.assessment;
+    if (a === null || typeof a !== "object" || Array.isArray(a))
+        return notAssessed("unknown");
     const band = e.risk_level;
     if (a.assessed === true) {
         // The same checks as a live verdict, against the row's own stored facts: an affirmative
