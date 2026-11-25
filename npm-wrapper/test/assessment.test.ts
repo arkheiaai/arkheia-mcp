@@ -585,6 +585,7 @@ for (const [name, change] of [
     ['profile_fingerprint_borrowed as the string "false"', { profile_fingerprint_borrowed: "false" }],
     ['model_supported as the string "false"', { model_supported: "false" }],
     ['model_supported as the string "true"', { model_supported: "true" }],
+    ["model_supported as an explicit null", { model_supported: null }],
 ] as const) {
     test(`a malformed flag fails closed: ${name}`, () => {
         assert.deepEqual(assessmentFromDetector({ ...ASSESSED_LOW, ...change }, "risk"),

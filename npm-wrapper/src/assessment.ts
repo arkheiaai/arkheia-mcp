@@ -107,7 +107,9 @@ export function assessmentFromDetector(raw: any, bandField: "risk" | "risk_level
             && raw?.evidence_depth_limited === false
             // Supplied flags must be real booleans: "true"/"false" strings are malformed and fail.
             && (absent(raw?.profile_fingerprint_borrowed) || raw.profile_fingerprint_borrowed === false)
-            && (absent(raw?.model_supported) || raw.model_supported === true)
+            // Coverage is a claim when sent: only an omitted field or a real `true` keeps it. An
+            // explicit null is an explicit unknown, so it fails closed.
+            && (raw?.model_supported === undefined || raw.model_supported === true)
             && !localContradiction(raw, requestedModel)
             && absent(raw?.risk_demoted_from)
             && absent(reason)
