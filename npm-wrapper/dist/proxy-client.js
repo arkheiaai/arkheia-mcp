@@ -103,7 +103,7 @@ class ProxyClient {
             }
             const raw = await resp.json();
             // A local proxy's verdict goes through the same fail-closed reading as the hosted one.
-            return (0, assessment_js_1.applyAssessment)({ ...raw, source: raw?.source ?? "local" }, (0, assessment_js_1.assessmentFromDetector)(raw, "risk_level"));
+            return (0, assessment_js_1.applyAssessment)({ ...raw, source: raw?.source ?? "local" }, (0, assessment_js_1.assessmentFromDetector)(raw, "risk_level", model_id));
         }
         catch (e) {
             clearTimeout(timeoutId);
@@ -162,7 +162,7 @@ class ProxyClient {
                 detection_id: data?.detection_id,
                 evidence_depth_limited: data?.evidence_depth_limited ?? true,
                 source: "hosted",
-            }, (0, assessment_js_1.assessmentFromDetector)(data, "risk"));
+            }, (0, assessment_js_1.assessmentFromDetector)(data, "risk", model_id));
         }
         catch (e) {
             clearTimeout(timeoutId);
@@ -180,7 +180,7 @@ class ProxyClient {
             }
         }
     }
-    async get_audit_log(session_id, limit = 50) {
+    async get_audit_log(session_id, limit = 50, raw = false) {
         /**
          * GET /audit/log
          *
@@ -206,7 +206,9 @@ class ProxyClient {
             }
             // Every row is read the same way as a live verdict, including old rows with no
             // assessment fields, and the summary is counted from the normalised rows.
-            return (0, assessment_js_1.normaliseAuditLog)(await resp.json());
+            const body = await resp.json();
+            // raw: the stored records exactly as the service sent them, so their hashes verify.
+            return (raw ? body : (0, assessment_js_1.normaliseAuditLog)(body));
         }
         catch (e) {
             clearTimeout(timeoutId);

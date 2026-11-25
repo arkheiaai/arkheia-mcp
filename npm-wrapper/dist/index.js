@@ -165,10 +165,16 @@ async function main() {
             return handleError("arkheia_verify", e);
         }
     });
-    server.tool("arkheia_audit_log", egress.arkheia_audit_log.description, { session_id: zod_1.z.string().optional(), limit: zod_1.z.number().int().min(1).max(500).default(50) }, async ({ session_id, limit }) => {
+    server.tool("arkheia_audit_log", egress.arkheia_audit_log.description, {
+        session_id: zod_1.z.string().optional(),
+        limit: zod_1.z.number().int().min(1).max(500).default(50),
+        // raw: the stored records exactly as the local proxy keeps them, so their hashes verify.
+        // The default view reads each detection like a live verdict instead.
+        raw: zod_1.z.boolean().default(false),
+    }, async ({ session_id, limit, raw }) => {
         try {
             (0, tool_registry_js_1.check)("arkheia_audit_log");
-            const result = await proxy.get_audit_log(session_id, Math.min(limit, 500));
+            const result = await proxy.get_audit_log(session_id, Math.min(limit, 500), raw);
             return wrapResult(result);
         }
         catch (e) {

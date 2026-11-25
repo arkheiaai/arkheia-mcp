@@ -25,6 +25,7 @@ exports.applyAssessment = applyAssessment;
 exports.finishFromOpenAICompatible = finishFromOpenAICompatible;
 exports.finishFromGemini = finishFromGemini;
 exports.finishFromOllama = finishFromOllama;
+exports.auditRecordKind = auditRecordKind;
 exports.normaliseAuditLog = normaliseAuditLog;
 exports.ASSESSED_BANDS = ["LOW", "MEDIUM", "HIGH"];
 exports.SERVER_REASONS = ["no_profile", "borrowed_profile", "limited_evidence", "unknown"];
@@ -68,18 +69,28 @@ function demotionIsPossible(raw, band) {
     return absent(raw?.risk_demoted_from) || (raw.risk_demoted_from === "HIGH" && band === "MEDIUM");
 }
 /** Facts a local verifier reports that contradict an affirmative assessment. */
-function localContradiction(raw) {
+const sameModel = (a, b) => typeof a === "string" && typeof b === "string" && a.trim().toLowerCase() === b.trim().toLowerCase();
+function localContradiction(raw, requestedModel) {
     if (!absent(raw?.gate_reason))
         return true; // a suppression gate produced it
     if (!absent(raw?.error))
         return true; // the detector reported an error
+    // A field the producer sends as explicit null is an explicit unknown, not an omission.
+    if (raw && "profile_model_id" in raw && !(typeof raw.profile_model_id === "string" && raw.profile_model_id.trim()))
+        return true;
     const scoredBy = raw?.profile_model_id, model = raw?.model_id;
-    if (typeof scoredBy === "string" && typeof model === "string"
-        && scoredBy.trim().toLowerCase() !== model.trim().toLowerCase())
-        return true; // another model's profile
+    if (typeof scoredBy === "string" && typeof model === "string" && !sameModel(scoredBy, model))
+        return true;
+    // The verdict must be about the model this call asked about.
+    if (requestedModel !== undefined) {
+        for (const named of [raw?.model_id, raw?.model]) {
+            if (typeof named === "string" && !sameModel(named, requestedModel))
+                return true;
+        }
+    }
     return false;
 }
-function assessmentFromDetector(raw, bandField) {
+function assessmentFromDetector(raw, bandField, requestedModel) {
     const band = raw?.[bandField];
     const assessed = raw?.assessed;
     const reason = raw?.not_assessed_reason;
@@ -90,7 +101,7 @@ function assessmentFromDetector(raw, bandField) {
             && raw?.evidence_depth_limited === false
             && raw?.profile_fingerprint_borrowed !== true
             && raw?.model_supported !== false
-            && !localContradiction(raw)
+            && !localContradiction(raw, requestedModel)
             && absent(raw?.risk_demoted_from)
             && absent(reason)
             && absent(raw?.candidate_alert);
@@ -162,25 +173,74 @@ function finishFromOllama(data) {
         return "incomplete";
     return "unknown";
 }
-/** Normalise one audit-log row (a stored local verdict) and count the summary from the rows. */
+const DETECTION_SOURCES = ["proxy", "passthrough", "interception"];
+const HASH_FIELDS = ["this_hash", "prev_hash"];
+const SERVICE_READ_TIME = ["record_kind", "assessment", "read_time_fields"];
+/** What an audit row records, by the service's own label when it sends one. */
+function auditRecordKind(e) {
+    if (typeof e?.record_kind === "string")
+        return e.record_kind;
+    if (e?.source === "governance_push" || e?.event_type === "governance_detection_push")
+        return "delivery_receipt";
+    if (e?.event_type === "passthrough.forward_refused" || e?.action_taken === "refuse")
+        return "refusal";
+    if (DETECTION_SOURCES.includes(e?.source))
+        return "detection";
+    return "operational";
+}
+/** Read the service's `assessment` object for a detection row, failing closed. */
+function assessmentFromService(e) {
+    const a = e?.assessment;
+    if (a === null || typeof a !== "object")
+        return assessmentFromDetector(e, "risk_level"); // older service
+    const band = e.risk_level;
+    if (a.assessed === true) {
+        const ok = isBand(band) && absent(a.not_assessed_reason) && absent(a.candidate_alert) && absent(e.risk_demoted_from);
+        return ok ? { risk_level: band, assessed: true } : notAssessed("unknown");
+    }
+    if (a.assessed === false && typeof a.not_assessed_reason === "string"
+        && exports.SERVER_REASONS.includes(a.not_assessed_reason)) {
+        const candidate = serviceCandidate({ candidate_alert: a.candidate_alert, risk_demoted_from: e.risk_demoted_from }, band);
+        if (candidate === "invalid")
+            return notAssessed("unknown");
+        return notAssessed(a.not_assessed_reason, candidate ?? undefined);
+    }
+    return notAssessed("unknown");
+}
+/**
+ * The audit log as the agent sees it. Each row is a view: detections carry the assessment and a
+ * band only when assessed; receipts, refusals and operational rows carry no band at all. The view
+ * is not the stored record, so the stored digest is kept as `stored_this_hash` with `hash_scope`
+ * saying what it covers; `arkheia_audit_log` with raw: true returns the stored records unchanged.
+ */
 function normaliseAuditLog(result) {
     const events = Array.isArray(result?.events) ? result.events : [];
-    // One malformed row must not cost the valid ones (and their warnings): drop and count it.
     const isRecord = (e) => e !== null && typeof e === "object" && !Array.isArray(e);
-    // Delivery receipts share the log with detections; they are passed through and never counted.
-    const isReceipt = (e) => e.source === "governance_push";
     const invalid = events.filter((e) => !isRecord(e)).length;
     const rows = events.filter(isRecord).map((e) => {
-        if (isReceipt(e))
-            return e;
-        const bandField = "risk_level" in e ? "risk_level" : "risk";
-        return applyAssessment(e, assessmentFromDetector(e, bandField));
+        const kind = auditRecordKind(e);
+        const view = {};
+        for (const [k, v] of Object.entries(e)) {
+            if (HASH_FIELDS.includes(k) || SERVICE_READ_TIME.includes(k))
+                continue;
+            if (["risk", "risk_level", "assessed", "not_assessed_reason", "candidate_alert"].includes(k))
+                continue;
+            view[k] = v;
+        }
+        view.record_kind = kind;
+        if (typeof e.this_hash === "string") {
+            view.stored_this_hash = e.this_hash;
+            view.hash_scope = "the stored record, not this view; call arkheia_audit_log with raw: true to verify";
+        }
+        if (kind !== "detection")
+            return view;
+        return applyAssessment(view, assessmentFromService(e));
     });
     const summary = {
         LOW: 0, MEDIUM: 0, HIGH: 0, NOT_ASSESSED: 0, CANDIDATE_MEDIUM: 0, CANDIDATE_HIGH: 0,
     };
     for (const r of rows) {
-        if (isReceipt(r))
+        if (r.record_kind !== "detection")
             continue;
         summary[r.risk_level] = (summary[r.risk_level] ?? 0) + 1;
         if (r.candidate_alert === "MEDIUM")
