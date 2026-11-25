@@ -1,10 +1,10 @@
 # Arkheia MCP Server — Fabrication Detection for AI Agents
 
-Know when your AI is making things up.
+Screens model responses for signs of fabrication, using behavioural fingerprinting.
 
-Arkheia screens model responses for fabrication using behavioural fingerprinting. Works with Claude, GPT, Gemini, Grok, Llama, Mistral, and 30+ other models. One tool call. Real-time risk scoring.
+Coverage and accuracy vary by model and are improving. Every result says whether it could be assessed: a result we could not assess comes back `NOT_ASSESSED` with a reason, and is never shown as a clean LOW.
 
-Free tier: 1,500 detections/month. No credit card.
+Free: 50,000 checks a month during the launch period. No credit card.
 
 ## Install
 
@@ -138,11 +138,11 @@ This catches fabrication that individual agents miss. The draft agent is confide
 | **LOW** | Response fingerprint is consistent with grounded content | Use normally |
 | **MEDIUM** | Some statistical signals triggered — the model may have interpolated or substituted | Review key claims. Check references, API names, version numbers. |
 | **HIGH** | Strong evidence of fabrication — multiple detection signals agree | Don't trust this output. Verify everything. Consider regenerating. |
-| **UNKNOWN** | No detection profile for this model yet | [Let us know](mailto:dmurfet@arkheia.ai) — we'll add it |
+| **NOT_ASSESSED** | Detection could not score this response (`not_assessed_reason` says why). Not a clean result. | Verify by other means. A `candidate_alert` of MEDIUM or HIGH means check the specific claims now. |
 
 ## Model Coverage
 
-35+ models with detection profiles:
+Detection profiles exist for the model families below. A model without its own profile returns `NOT_ASSESSED` (`no_profile` or `borrowed_profile`), never a clean LOW.
 
 - **OpenAI:** GPT-4o, GPT-5.4, GPT-5-Codex family
 - **Anthropic:** Claude Opus 4.6, Sonnet 4.6, Haiku 4.5
@@ -174,16 +174,9 @@ Direct API calls without inference data provide structural analysis only. For fu
 | `run_ollama` | Call local Ollama model + screen |
 | `run_together` | Call Together AI (Kimi, DeepSeek) + screen |
 
-## Pricing
+## Price
 
-| Plan | Price | Detections | Concurrent |
-|------|-------|------------|------------|
-| Free | $0 | 1,500/month | 5 |
-| Single Contributor | $99/month | Unlimited | 5 |
-| Professional | $499/month | Unlimited | 20 |
-| Team | $1,999/month | Unlimited | 50 |
-
-No credit card for free tier. Upgrade when you're ready.
+Free during the launch period: 50,000 checks a month, no credit card. Paid plans will be announced before the free period ends.
 
 ## Feedback
 

@@ -11,6 +11,7 @@ import { check, PolicyViolation } from './tool-registry.js';
 import { applyEgress, isArkheiaHostedOrigin, displayOrigin, describeTransportError, DEFAULT_OLLAMA_URL } from './egress.js';
 import { call_grok, call_gemini, call_ollama, call_together, modelNameError } from './providers.js';
 import { FeedbackClient, withReportability, feedbackShape, reportShape, reportsShape } from './feedback.js';
+import { notAssessed } from './assessment.js';
 import { store_entity, retrieve_entities, store_relation } from './memory.js';
 
 // ---------------------------------------------------------------------------
@@ -55,10 +56,10 @@ function wrapResult(result: any) {
 
 function handleError(toolName: string, e: any) {
     if (e instanceof PolicyViolation) {
-        return wrapResult({ error: e.reason, risk_level: "UNKNOWN" });
+        return wrapResult({ error: e.reason, ...notAssessed("unknown") });
     }
     process.stderr.write(`[arkheia] ${toolName} error: ${describeTransportError(e).text}\n`);
-    return wrapResult({ error: describeTransportError(e).text, risk_level: "UNKNOWN" });
+    return wrapResult({ error: describeTransportError(e).text, ...notAssessed("unknown") });
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +137,7 @@ async function main() {
 
     server.tool(
         "arkheia_verify",
-        "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief confidence note. LOW = show normally. Never hide or suppress a response — always surface it to the user with the appropriate risk context. When the result says reportable: true, its detection_id can be passed to arkheia_report to say whether the checked response was really right or wrong. When it says reportable: false (a locally checked result), use arkheia_feedback instead.",
+        "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief confidence note. LOW = show normally (LOW only ever appears with assessed: true). NOT_ASSESSED -- detection could not score this response. It is not a clean result. Verify by other means; not_assessed_reason says why. candidate_alert -- an unqualified warning on a response we could not properly assess. Treat MEDIUM or HIGH here as a reason to check the specific claims now. Never hide or suppress a response — always surface it to the user with the appropriate risk context. When the result says reportable: true, its detection_id can be passed to arkheia_report to say whether the checked response was really right or wrong. When it says reportable: false (a locally checked result), use arkheia_feedback instead.",
         { prompt: z.string(), response: z.string(), model: z.string() },
         async ({ prompt, response, model }) => {
             try {
@@ -212,6 +213,17 @@ async function main() {
     );
 
     // ── Provider wrappers ──────────────────────────────────────────
+    // Change A step 2a: a provider error, or a reply that did not finish normally, is returned
+    // NOT_ASSESSED and is never sent for screening. Only a complete reply is screened.
+
+    async function screenProviderReply(pr: any, prompt: string, model: string, options?: { allowHosted?: boolean }) {
+        if (pr.error) return wrapResult({ ...pr, arkheia: withReportability({ ...notAssessed("provider_error"), error: pr.error }) });
+        if (pr.finish !== "complete") {
+            return wrapResult({ ...pr, arkheia: withReportability({ ...notAssessed("incomplete_response"), error: "not_checked_reply_did_not_finish_normally" }) });
+        }
+        const risk = await proxy.verify(prompt, pr.response, model, undefined, options);
+        return wrapResult({ ...pr, arkheia: withReportability(risk) });
+    }
 
     server.tool(
         "run_grok",
@@ -221,9 +233,7 @@ async function main() {
             try {
                 check("run_grok");
                 const pr = await call_grok(prompt, model);
-                if (pr.error) return wrapResult({ ...pr, arkheia: withReportability({ risk_level: "UNKNOWN", error: pr.error }) });
-                const risk = await proxy.verify(prompt, pr.response, model);
-                return wrapResult({ ...pr, arkheia: withReportability(risk) });
+                return await screenProviderReply(pr, prompt, model);
             } catch (e: any) { return handleError("run_grok", e); }
         }
     );
@@ -236,9 +246,7 @@ async function main() {
             try {
                 check("run_gemini");
                 const pr = await call_gemini(prompt, model);
-                if (pr.error) return wrapResult({ ...pr, arkheia: withReportability({ risk_level: "UNKNOWN", error: pr.error }) });
-                const risk = await proxy.verify(prompt, pr.response, model);
-                return wrapResult({ ...pr, arkheia: withReportability(risk) });
+                return await screenProviderReply(pr, prompt, model);
             } catch (e: any) { return handleError("run_gemini", e); }
         }
     );
@@ -254,12 +262,10 @@ async function main() {
                 const ollamaUrl = process.env.OLLAMA_BASE_URL || DEFAULT_OLLAMA_URL;
                 if (isArkheiaHostedOrigin(ollamaUrl, process.env.ARKHEIA_HOSTED_URL)) {
                     const err = "configuration_error: OLLAMA_BASE_URL is the Arkheia hosted service (or cannot be read as an address); nothing was sent. Set it to your Ollama server.";
-                    return wrapResult({ response: "", model: modelNameError(model) ? "" : model, error: err, arkheia: withReportability({ risk_level: "UNKNOWN", error: "not_checked_ollama_address_not_usable" }) });
+                    return wrapResult({ response: "", model: modelNameError(model) ? "" : model, error: err, arkheia: withReportability({ ...notAssessed("provider_error"), error: "not_checked_ollama_address_not_usable" }) });
                 }
                 const pr = await call_ollama(prompt, model);
-                if (pr.error) return wrapResult({ ...pr, arkheia: withReportability({ risk_level: "UNKNOWN", error: pr.error }) });
-                const risk = await proxy.verify(prompt, pr.response, model, undefined, { allowHosted: false });
-                return wrapResult({ ...pr, arkheia: withReportability(risk) });
+                return await screenProviderReply(pr, prompt, model, { allowHosted: false });
             } catch (e: any) { return handleError("run_ollama", e); }
         }
     );
@@ -272,9 +278,7 @@ async function main() {
             try {
                 check("run_together");
                 const pr = await call_together(prompt, model);
-                if (pr.error) return wrapResult({ ...pr, arkheia: withReportability({ risk_level: "UNKNOWN", error: pr.error }) });
-                const risk = await proxy.verify(prompt, pr.response, model);
-                return wrapResult({ ...pr, arkheia: withReportability(risk) });
+                return await screenProviderReply(pr, prompt, model);
             } catch (e: any) { return handleError("run_together", e); }
         }
     );

@@ -122,7 +122,7 @@ You should see a detection result with `risk_level: HIGH` and a confidence score
 
 ## Free Tier
 
-1,500 detections/month. No credit card required. Upgrade at https://arkheia.ai.
+50,000 checks a month during the launch period. No credit card required.
 
 ## Troubleshooting
 
@@ -144,7 +144,7 @@ curl -X POST https://arkheia-proxy-production.up.railway.app/v1/detect \
 ```
 
 **Quota exceeded (429)**
-Free tier is 1,500/month. Check usage or upgrade at https://arkheia.ai.
+The free allowance is 50,000 checks a month during the launch period.
 
 ## Support
 

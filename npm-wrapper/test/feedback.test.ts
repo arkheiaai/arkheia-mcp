@@ -411,7 +411,8 @@ test("hosted verification refuses a redirect: key is never sent to the target", 
         // real fetch here: no mock
         const p = new ProxyClient("http://127.0.0.1:1", 2.0, `http://127.0.0.1:${sport}`, KEY);
         const out: any = await p.verify("p", "r", "m");
-        assert.equal(out.risk_level, "UNKNOWN");
+        assert.equal(out.risk_level, "NOT_ASSESSED");
+        assert.equal(out.assessed, false);
         assert.ok(out.error);
         assert.equal(sourceHits, 1);
         assert.equal(targetHits, 0, "the redirect target received nothing");
@@ -752,7 +753,8 @@ test("local-only verify never contacts the hosted service", async () => {
     mockFetch((url) => { if (url.startsWith("http://localhost")) throw new TypeError("fetch failed"); return json(200, { risk: "LOW", detection_id: DID }); });
     const p = new ProxyClient("http://localhost:8098", 1.0, BASE, KEY);
     const r: any = await p.verify("p", "r", "m", undefined, { allowHosted: false });
-    assert.equal(r.risk_level, "UNKNOWN");
+    assert.equal(r.risk_level, "NOT_ASSESSED");
+    assert.equal(r.assessed, false);
     assert.ok(r.error);
     assert.ok(calls.every((c) => c.url.startsWith("http://localhost")), "only the local verifier was contacted");
     // it does not flip the shared flag: the ordinary path still tries local first, then hosted

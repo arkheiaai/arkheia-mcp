@@ -13,9 +13,9 @@ function stubFetch(seen: Seen[]) {
         const u = String(url);
         if (u.startsWith("http://localhost:1")) throw new TypeError("fetch failed");
         const body = u.endsWith("/v1/detect") ? { risk: "LOW", confidence: 0.1, features_triggered: [], detection_id: "det_x" }
-            : u.includes("generateContent") ? { candidates: [{ content: { parts: [{ text: "ok" }] } }] }
-            : u.includes("/api/generate") ? { response: "ok" }
-            : { choices: [{ message: { content: "ok" } }] };
+            : u.includes("generateContent") ? { candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] }
+            : u.includes("/api/generate") ? { response: "ok", done: true, done_reason: "stop" }
+            : { choices: [{ message: { content: "ok" }, finish_reason: "stop" }] };
         return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     };
 }
@@ -71,7 +71,8 @@ test("a real 307 redirect does not carry the key: the second server receives not
     try {
         const c = new ProxyClient("http://127.0.0.1:1", 3, hostedUrl, "ak_test_dummy");
         const r = await c.verify("p", "r", "m");
-        assert.equal(r.risk_level, "UNKNOWN");
+        assert.equal(r.risk_level, "NOT_ASSESSED");
+        assert.equal(r.assessed, false);
         const o = await call_ollama("p");
         assert.ok(o.error, "the redirected provider call fails");
         assert.equal(received, 0, "the redirect target received no request");
@@ -84,7 +85,12 @@ test("the Ollama tool call site asks for local-only verification", () => {
     const src = require("fs").readFileSync(require("path").join(__dirname, "..", "..", "src", "index.ts"), "utf8");
     const m = src.match(/"run_ollama",[\s\S]*?handleError\("run_ollama"/);
     assert.ok(m, "found the run_ollama handler");
-    assert.match(m[0], /proxy\.verify\([^)]*\{ allowHosted: false \}\)/);
+    // Change A: the handlers screen through one helper; the Ollama one must ask it for local-only,
+    // and the helper must hand that option to proxy.verify unchanged.
+    assert.match(m[0], /screenProviderReply\([^)]*\{ allowHosted: false \}\)/);
+    const helper = src.match(/async function screenProviderReply\(pr: any, prompt: string, model: string, options\?[^)]*\)[\s\S]*?\n    \}\n/);
+    assert.ok(helper, "found the shared screening helper");
+    assert.match(helper![0], /proxy\.verify\(prompt, pr\.response, model, undefined, options\)/);
     for (const other of ["run_grok", "run_gemini", "run_together"]) {
         const o = src.match(new RegExp(`"${other}",[\\s\\S]*?handleError\\("${other}"`));
         assert.doesNotMatch(o![0], /allowHosted/);
@@ -98,7 +104,8 @@ test("ProxyClient.verify with allowHosted false never contacts the hosted URL", 
         const c = new ProxyClient("http://localhost:1", 2, "https://hosted.example.test", "ak_test");
         const r = await c.verify("p", "r", "m", undefined, { allowHosted: false });
         assert.equal(r.error, "not_checked_local_verification_unavailable");
-        assert.equal(r.risk_level, "UNKNOWN");
+        assert.equal(r.risk_level, "NOT_ASSESSED");
+        assert.equal(r.assessed, false);
         assert.deepEqual(seen, ["http://localhost:1/detect/verify"]);
     } finally { (globalThis as any).fetch = realFetch; }
 });

@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import { FinishState, finishFromOpenAICompatible, finishFromGemini, finishFromOllama } from './assessment.js';
 import { displayOrigin, describeTransportError } from './egress.js';
 import { looksLikeCredential } from './feedback.js';
 
@@ -20,6 +21,8 @@ type ProviderResult = {
     usage?: Record<string, any>;
     eval_count?: number;
     error: string | null;
+    /** The provider's own finish state (Change A step 2a): only "complete" is screened. */
+    finish?: FinishState;
 };
 
 // ---------------------------------------------------------------------------
@@ -119,6 +122,7 @@ export async function call_grok(
         }
         return {
             response: response_text,
+            finish: finishFromOpenAICompatible(data),
             model: model,
             prompt_hash: _prompt_hash(prompt),
             usage: data.usage || {},
@@ -200,6 +204,7 @@ export async function call_gemini(
         }
         return {
             response: response_text,
+            finish: finishFromGemini(data),
             model: model,
             prompt_hash: _prompt_hash(prompt),
             usage: data.usageMetadata || {},
@@ -280,6 +285,7 @@ export async function call_together(
         }
         return {
             response: response_text,
+            finish: finishFromOpenAICompatible(data),
             model: model,
             prompt_hash: _prompt_hash(prompt),
             usage: data.usage || {},
@@ -354,6 +360,7 @@ export async function call_ollama(
         }
         return {
             response: response_text,
+            finish: finishFromOllama(data),
             model: model,
             prompt_hash: _prompt_hash(prompt),
             eval_count: data.eval_count,

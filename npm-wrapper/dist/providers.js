@@ -40,6 +40,7 @@ exports.call_gemini = call_gemini;
 exports.call_together = call_together;
 exports.call_ollama = call_ollama;
 const crypto = __importStar(require("crypto"));
+const assessment_js_1 = require("./assessment.js");
 const egress_js_1 = require("./egress.js");
 const feedback_js_1 = require("./feedback.js");
 // Node.js native fetch doesn't have a global logger, use console
@@ -137,6 +138,7 @@ async function call_grok(prompt, model = "grok-4-fast-non-reasoning", kwargs = {
         }
         return {
             response: response_text,
+            finish: (0, assessment_js_1.finishFromOpenAICompatible)(data),
             model: model,
             prompt_hash: _prompt_hash(prompt),
             usage: data.usage || {},
@@ -208,6 +210,7 @@ async function call_gemini(prompt, model = "gemini-2.5-flash", max_output_tokens
         }
         return {
             response: response_text,
+            finish: (0, assessment_js_1.finishFromGemini)(data),
             model: model,
             prompt_hash: _prompt_hash(prompt),
             usage: data.usageMetadata || {},
@@ -279,6 +282,7 @@ async function call_together(prompt, model = "moonshotai/Kimi-K2.5", max_tokens 
         }
         return {
             response: response_text,
+            finish: (0, assessment_js_1.finishFromOpenAICompatible)(data),
             model: model,
             prompt_hash: _prompt_hash(prompt),
             usage: data.usage || {},
@@ -345,6 +349,7 @@ async function call_ollama(prompt, model = "phi4:14b", kwargs = {}) {
         }
         return {
             response: response_text,
+            finish: (0, assessment_js_1.finishFromOllama)(data),
             model: model,
             prompt_hash: _prompt_hash(prompt),
             eval_count: data.eval_count,

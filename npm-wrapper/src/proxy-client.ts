@@ -1,5 +1,6 @@
 import { URLSearchParams } from 'url';
 import { isArkheiaHostedOrigin, displayOrigin, describeTransportError, HOSTED_API_URL } from './egress.js';
+import { Reason, applyAssessment, assessmentFromDetector, normaliseAuditLog, notAssessed } from './assessment.js';
 
 // Node.js native fetch doesn't have a global logger
 const logger = {
@@ -11,12 +12,16 @@ const logger = {
 
 // Hosted API defaults
 
+// Release pack Change A: every result says whether it was assessed. risk_level is LOW, MEDIUM or
+// HIGH only when assessed is true; otherwise it is NOT_ASSESSED and not_assessed_reason says why.
 type VerifyResult = {
     risk_level: string;
-    confidence: number;
-    features_triggered: string[];
+    assessed: boolean;
+    not_assessed_reason?: Reason;
+    candidate_alert?: "MEDIUM" | "HIGH";
+    confidence?: number;
+    features_triggered?: string[];
     detection_id?: string;
-    detection_method?: string;
     evidence_depth_limited?: boolean;
     source?: string;
     error?: string;
@@ -24,7 +29,7 @@ type VerifyResult = {
 
 type AuditLogResult = {
     events: any[]; // Adjust based on actual event structure if known
-    summary: { LOW: number; MEDIUM: number; HIGH: number; UNKNOWN: number };
+    summary: Record<string, number>;
     error?: string;
 };
 
@@ -62,7 +67,7 @@ export class ProxyClient {
          *
          * Tries local proxy first. If unavailable, falls back to hosted API,
          * unless allowHosted is false: then nothing is sent anywhere else.
-         * Never raises -- returns UNKNOWN on any error.
+         * Never raises -- returns NOT_ASSESSED (with a reason) on any error.
          */
         if (options.allowHosted === false) {
             // A verifier address that is (or cannot be told apart from) the hosted origin would route this path to the hosted service: refuse.
@@ -145,7 +150,10 @@ export class ProxyClient {
                 logger.error(`ProxyClient: /detect/verify HTTP error: ${resp.status} ${resp.statusText}`);
                 return _unavailable(`proxy_http_error_${resp.status}`);
             }
-            return await resp.json() as VerifyResult;
+            const raw: any = await resp.json();
+            // A local proxy's verdict goes through the same fail-closed reading as the hosted one.
+            return applyAssessment({ ...raw, source: raw?.source ?? "local" },
+                                   assessmentFromDetector(raw, "risk_level")) as VerifyResult;
         } catch (e: any) {
             clearTimeout(timeoutId);
             if (e.name === 'AbortError') {
@@ -203,17 +211,16 @@ export class ProxyClient {
                 logger.error(`ProxyClient: hosted /v1/detect HTTP error: ${status} ${resp.statusText}`);
                 return _unavailable(`hosted_http_error_${status}`);
             }
-            const data = await resp.json();
-            // Map hosted response format to local format
-            return {
-                risk_level: data.risk || "UNKNOWN",
-                confidence: data.confidence || 0.0,
-                features_triggered: data.features_triggered || [],
-                detection_id: data.detection_id,
-                detection_method: data.detection_method,
-                evidence_depth_limited: data.evidence_depth_limited ?? true,
+            const data: any = await resp.json();
+            // Map hosted response format to local format. The band is passed only when the service
+            // says it assessed the response (Change A); otherwise NOT_ASSESSED with its reason.
+            return applyAssessment({
+                confidence: data?.confidence || 0.0,
+                features_triggered: data?.features_triggered || [],
+                detection_id: data?.detection_id,
+                evidence_depth_limited: data?.evidence_depth_limited ?? true,
                 source: "hosted",
-            };
+            }, assessmentFromDetector(data, "risk")) as VerifyResult;
         } catch (e: any) {
             clearTimeout(timeoutId);
             if (e.name === 'AbortError') {
@@ -262,7 +269,9 @@ export class ProxyClient {
                 logger.error(`ProxyClient: /audit/log HTTP error: ${resp.status} ${resp.statusText}`);
                 return _empty_log(`proxy_http_error_${resp.status}`);
             }
-            return await resp.json() as AuditLogResult;
+            // Every row is read the same way as a live verdict, including old rows with no
+            // assessment fields, and the summary is counted from the normalised rows.
+            return normaliseAuditLog(await resp.json()) as AuditLogResult;
         } catch (e: any) {
             clearTimeout(timeoutId);
             if (e.name === 'AbortError') {
@@ -280,11 +289,10 @@ export class ProxyClient {
 }
 
 function _unavailable(error: string): VerifyResult {
-    /** Standard UNKNOWN response when detection is unreachable. */
+    /** Detection was not reached (timeout, connection failure, HTTP error, no key): not assessed. */
     return {
-        risk_level: "UNKNOWN",
+        ...notAssessed("service_unavailable"),
         confidence: 0.0,
-        features_triggered: [],
         error: error,
     };
 }
@@ -292,7 +300,7 @@ function _unavailable(error: string): VerifyResult {
 function _empty_log(error: string): AuditLogResult {
     return {
         events: [],
-        summary: { LOW: 0, MEDIUM: 0, HIGH: 0, UNKNOWN: 0 },
+        summary: { LOW: 0, MEDIUM: 0, HIGH: 0, NOT_ASSESSED: 0, CANDIDATE_MEDIUM: 0, CANDIDATE_HIGH: 0 },
         error: error,
     };
 }
