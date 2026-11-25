@@ -567,3 +567,14 @@ test("audit raw against an older producer that ignores raw reports raw as unavai
         assert.deepEqual(out, { events: [], summary: {}, error: "raw_unavailable_from_this_local_proxy" });
     } finally { restore(); }
 });
+
+
+for (const [name, change] of [
+    ["a model alias that disagrees with the scoring profile", { model: "phi4:14b", profile_model_id: "llama3:8b", model_id: undefined }],
+    ["a model alias that disagrees with matching model_id and profile", { model: "llama3:8b" }],
+] as const) {
+    test(`audit: ${name} fails closed with no requested model`, () => {
+        const row = normaliseAuditLog({ events: [{ ...NESTED_OK, ...change }] }).events[0];
+        assert.deepEqual([row.risk_level, row.not_assessed_reason], ["NOT_ASSESSED", "unknown"]);
+    });
+}

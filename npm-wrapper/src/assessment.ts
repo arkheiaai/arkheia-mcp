@@ -82,8 +82,10 @@ function localContradiction(raw: any, requestedModel?: string): boolean {
     for (const key of ["profile_model_id", "model_id", "model"]) {
         if (raw && key in raw && !(typeof raw[key] === "string" && raw[key].trim())) return true;
     }
-    const scoredBy = raw?.profile_model_id, model = raw?.model_id;
-    if (typeof scoredBy === "string" && typeof model === "string" && !sameModel(scoredBy, model)) return true;
+    // Every identity the producer supplies must agree with every other (model_id, model,
+    // profile_model_id), with or without a requested model.
+    const ids = [raw?.model_id, raw?.model, raw?.profile_model_id].filter((v) => typeof v === "string");
+    if (ids.some((v) => !sameModel(v, ids[0]))) return true;
     // The verdict must be about the model this call asked about.
     if (requestedModel !== undefined) {
         for (const named of [raw?.model_id, raw?.model, raw?.profile_model_id]) {
