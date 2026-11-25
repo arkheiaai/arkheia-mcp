@@ -133,12 +133,18 @@ async function call_grok(prompt, model = "grok-4-fast-non-reasoning", kwargs = {
         }
         const data = await resp.json();
         const response_text = data.choices?.[0]?.message?.content;
+        const finish = (0, assessment_js_1.finishFromOpenAICompatible)(data);
+        // A non-normal finish (length, content filter) is reported as such even with no text.
+        if (finish === "incomplete") {
+            return { response: typeof response_text === 'string' ? response_text : "", model: model,
+                prompt_hash: _prompt_hash(prompt), usage: data.usage || {}, finish, error: null };
+        }
         if (typeof response_text !== 'string') {
             throw new Error("Invalid response format from Grok API");
         }
         return {
             response: response_text,
-            finish: (0, assessment_js_1.finishFromOpenAICompatible)(data),
+            finish: finish,
             model: model,
             prompt_hash: _prompt_hash(prompt),
             usage: data.usage || {},
@@ -210,10 +216,13 @@ async function call_gemini(prompt, model = "gemini-2.5-flash", max_output_tokens
         // with any part that is not plain text is an unsupported shape and fails closed.
         const finish = (0, assessment_js_1.finishFromGemini)(data);
         const parts = data.candidates?.[0]?.content?.parts;
-        const allText = Array.isArray(parts) && parts.length > 0 && parts.every((p) => typeof p?.text === 'string');
+        // The visible answer is the text parts that are not model thoughts.
+        const visible = Array.isArray(parts) ? parts.filter((p) => typeof p?.text === 'string' && p?.thought !== true) : [];
+        const allText = Array.isArray(parts) && parts.length > 0 && visible.length > 0
+            && parts.every((p) => typeof p?.text === 'string');
         if (finish !== "complete") {
             return {
-                response: allText ? parts.map((p) => p.text).join("") : "",
+                response: visible.map((p) => p.text).join(""),
                 model: model,
                 prompt_hash: _prompt_hash(prompt),
                 usage: data.usageMetadata || {},
@@ -224,7 +233,7 @@ async function call_gemini(prompt, model = "gemini-2.5-flash", max_output_tokens
         if (!allText) {
             throw new Error("Unsupported response format from Gemini API");
         }
-        const response_text = parts.map((p) => p.text).join("");
+        const response_text = visible.map((p) => p.text).join("");
         return {
             response: response_text,
             finish: finish,
@@ -294,12 +303,18 @@ async function call_together(prompt, model = "moonshotai/Kimi-K2.5", max_tokens 
         }
         const data = await resp.json();
         const response_text = data.choices?.[0]?.message?.content;
+        const finish = (0, assessment_js_1.finishFromOpenAICompatible)(data);
+        // A non-normal finish (length, content filter) is reported as such even with no text.
+        if (finish === "incomplete") {
+            return { response: typeof response_text === 'string' ? response_text : "", model: model,
+                prompt_hash: _prompt_hash(prompt), usage: data.usage || {}, finish, error: null };
+        }
         if (typeof response_text !== 'string') {
             throw new Error("Invalid response format from Together AI API");
         }
         return {
             response: response_text,
-            finish: (0, assessment_js_1.finishFromOpenAICompatible)(data),
+            finish: finish,
             model: model,
             prompt_hash: _prompt_hash(prompt),
             usage: data.usage || {},

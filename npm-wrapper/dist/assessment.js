@@ -58,8 +58,26 @@ function serviceCandidate(raw, band) {
         return null;
     if (!CANDIDATE_LEVELS.includes(candidate))
         return "invalid";
+    if (!demotionIsPossible(raw, band))
+        return "invalid";
     const level = absent(raw?.risk_demoted_from) ? band : raw.risk_demoted_from;
     return candidate === level ? candidate : "invalid";
+}
+/** The only demotion the service makes is an advisory cap: HIGH published as MEDIUM. */
+function demotionIsPossible(raw, band) {
+    return absent(raw?.risk_demoted_from) || (raw.risk_demoted_from === "HIGH" && band === "MEDIUM");
+}
+/** Facts a local verifier reports that contradict an affirmative assessment. */
+function localContradiction(raw) {
+    if (!absent(raw?.gate_reason))
+        return true; // a suppression gate produced it
+    if (!absent(raw?.error))
+        return true; // the detector reported an error
+    const scoredBy = raw?.profile_model_id, model = raw?.model_id;
+    if (typeof scoredBy === "string" && typeof model === "string"
+        && scoredBy.trim().toLowerCase() !== model.trim().toLowerCase())
+        return true; // another model's profile
+    return false;
 }
 function assessmentFromDetector(raw, bandField) {
     const band = raw?.[bandField];
@@ -72,6 +90,7 @@ function assessmentFromDetector(raw, bandField) {
             && raw?.evidence_depth_limited === false
             && raw?.profile_fingerprint_borrowed !== true
             && raw?.model_supported !== false
+            && !localContradiction(raw)
             && absent(raw?.risk_demoted_from)
             && absent(reason)
             && absent(raw?.candidate_alert);
@@ -111,10 +130,12 @@ function applyAssessment(base, a) {
     void candidate_alert;
     const out = { ...rest, ...a };
     if (a.assessed) {
+        // A scored result keeps the fields it has always carried.
         if (features_triggered !== undefined)
             out.features_triggered = features_triggered;
+        if (detection_method !== undefined)
+            out.detection_method = detection_method;
     }
-    void detection_method;
     return out;
 }
 function finishFromOpenAICompatible(data) {
@@ -146,8 +167,12 @@ function normaliseAuditLog(result) {
     const events = Array.isArray(result?.events) ? result.events : [];
     // One malformed row must not cost the valid ones (and their warnings): drop and count it.
     const isRecord = (e) => e !== null && typeof e === "object" && !Array.isArray(e);
+    // Delivery receipts share the log with detections; they are passed through and never counted.
+    const isReceipt = (e) => e.source === "governance_push";
     const invalid = events.filter((e) => !isRecord(e)).length;
     const rows = events.filter(isRecord).map((e) => {
+        if (isReceipt(e))
+            return e;
         const bandField = "risk_level" in e ? "risk_level" : "risk";
         return applyAssessment(e, assessmentFromDetector(e, bandField));
     });
@@ -155,6 +180,8 @@ function normaliseAuditLog(result) {
         LOW: 0, MEDIUM: 0, HIGH: 0, NOT_ASSESSED: 0, CANDIDATE_MEDIUM: 0, CANDIDATE_HIGH: 0,
     };
     for (const r of rows) {
+        if (isReceipt(r))
+            continue;
         summary[r.risk_level] = (summary[r.risk_level] ?? 0) + 1;
         if (r.candidate_alert === "MEDIUM")
             summary.CANDIDATE_MEDIUM += 1;

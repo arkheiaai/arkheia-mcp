@@ -355,3 +355,67 @@ test("audit: a malformed row between two warnings costs neither warning", async 
         assert.equal(out.error, undefined);
     } finally { restore(); }
 });
+
+
+// ---------------------------------------------------------------------------
+// 5. Review round 2 probes
+// ---------------------------------------------------------------------------
+
+const LOCAL_ASSESSED = { risk_level: "LOW", assessed: true, evidence_depth_limited: false,
+    not_assessed_reason: null, candidate_alert: null, model_id: "phi4:14b", profile_model_id: "phi4:14b",
+    gate_reason: null, error: null, detection_method: "profile_ensemble" };
+
+test("a consistent local own-profile verdict stays assessed and keeps detection_method", () => {
+    assert.deepEqual(assessmentFromDetector(LOCAL_ASSESSED, "risk_level"), { risk_level: "LOW", assessed: true });
+});
+
+const localContradictions: Array<[string, any]> = [
+    ["a suppression gate", { ...LOCAL_ASSESSED, gate_reason: "token_count_below_80" }],
+    ["another model's profile", { ...LOCAL_ASSESSED, profile_model_id: "phi4:latest" }],
+    ["a detector error", { ...LOCAL_ASSESSED, error: "engine_error" }],
+    ["an impossible demotion", { ...LOCAL_ASSESSED, risk_level: "LOW", assessed: false, not_assessed_reason: "limited_evidence", risk_demoted_from: "HIGH", candidate_alert: "HIGH" }],
+];
+for (const [name, body] of localContradictions) {
+    test(`local verdict fails closed on ${name}`, () => {
+        assert.deepEqual(assessmentFromDetector(body, "risk_level"),
+                         { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "unknown" });
+    });
+}
+
+test("applyAssessment keeps detection_method on assessed results only", async () => {
+    const { applyAssessment } = await import('../src/assessment.js');
+    assert.equal(applyAssessment(LOCAL_ASSESSED, { risk_level: "LOW", assessed: true }).detection_method, "profile_ensemble");
+    assert.equal("detection_method" in applyAssessment(LOCAL_ASSESSED, { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "unknown" }), false);
+});
+
+test("Gemini: a thought part is neither shown nor screened", async () => {
+    const pr = await geminiWith({ candidates: [{ content: { parts: [{ text: "thinking...", thought: true }, { text: "answer." }] }, finishReason: "STOP" }] });
+    assert.deepEqual([pr.response, pr.finish, pr.error], ["answer.", "complete", null]);
+});
+
+test("Gemini: an incomplete reply keeps its visible text beside a non-text part", async () => {
+    const pr = await geminiWith({ candidates: [{ content: { parts: [{ text: "partial" }, { functionCall: { name: "f" } }] }, finishReason: "MAX_TOKENS" }] });
+    assert.deepEqual([pr.response, pr.finish, pr.error], ["partial", "incomplete", null]);
+});
+
+for (const [name, fn, key] of [["grok", "call_grok", "XAI_API_KEY"], ["together", "call_together", "TOGETHER_API_KEY"]] as const) {
+    test(`${name}: a content-filtered reply with null text is incomplete, not a provider error`, async () => {
+        const mod: any = await import('../src/providers.js');
+        const saved = process.env[key];
+        process.env[key] = "dummy-key-00000000";
+        const restore = withFetch(() => json(200, { choices: [{ message: { content: null }, finish_reason: "content_filter" }] }));
+        try {
+            const pr = await mod[fn]("p");
+            assert.deepEqual([pr.finish, pr.error, pr.response], ["incomplete", null, ""]);
+        } finally { restore(); if (saved === undefined) delete process.env[key]; else process.env[key] = saved; }
+    });
+}
+
+test("audit: a delivery receipt is passed through and not counted", () => {
+    const out = normaliseAuditLog({ events: [
+        { source: "proxy", risk_level: "HIGH", assessed: true, evidence_depth_limited: false, model_id: "m", profile_model_id: "m" },
+        { source: "governance_push", event_type: "governance_detection_push", risk_level: "HIGH" },
+    ] });
+    assert.deepEqual(out.events[1], { source: "governance_push", event_type: "governance_detection_push", risk_level: "HIGH" });
+    assert.deepEqual(out.summary, { LOW: 0, MEDIUM: 0, HIGH: 1, NOT_ASSESSED: 0, CANDIDATE_MEDIUM: 0, CANDIDATE_HIGH: 0 });
+});
