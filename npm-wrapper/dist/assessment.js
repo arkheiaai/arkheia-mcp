@@ -104,8 +104,9 @@ function assessmentFromDetector(raw, bandField, requestedModel) {
         // full evidence, its own profile, a supported model, no demotion, no reason, no candidate.
         const consistent = isBand(band)
             && raw?.evidence_depth_limited === false
-            && raw?.profile_fingerprint_borrowed !== true
-            && raw?.model_supported !== false
+            // Supplied flags must be real booleans: "true"/"false" strings are malformed and fail.
+            && (absent(raw?.profile_fingerprint_borrowed) || raw.profile_fingerprint_borrowed === false)
+            && (absent(raw?.model_supported) || raw.model_supported === true)
             && !localContradiction(raw, requestedModel)
             && absent(raw?.risk_demoted_from)
             && absent(reason)

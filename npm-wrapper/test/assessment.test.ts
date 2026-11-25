@@ -578,3 +578,22 @@ for (const [name, change] of [
         assert.deepEqual([row.risk_level, row.not_assessed_reason], ["NOT_ASSESSED", "unknown"]);
     });
 }
+
+
+for (const [name, change] of [
+    ['profile_fingerprint_borrowed as the string "true"', { profile_fingerprint_borrowed: "true" }],
+    ['profile_fingerprint_borrowed as the string "false"', { profile_fingerprint_borrowed: "false" }],
+    ['model_supported as the string "false"', { model_supported: "false" }],
+    ['model_supported as the string "true"', { model_supported: "true" }],
+] as const) {
+    test(`a malformed flag fails closed: ${name}`, () => {
+        assert.deepEqual(assessmentFromDetector({ ...ASSESSED_LOW, ...change }, "risk"),
+                         { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "unknown" });
+    });
+}
+
+test("real boolean flags and omitted flags keep an assessed LOW", () => {
+    for (const change of [{}, { profile_fingerprint_borrowed: false }, { model_supported: true }, { profile_fingerprint_borrowed: null }]) {
+        assert.deepEqual(assessmentFromDetector({ ...ASSESSED_LOW, ...change }, "risk"), { risk_level: "LOW", assessed: true });
+    }
+});
