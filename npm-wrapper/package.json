@@ -27,7 +27,10 @@
     "hallucination",
     "governance"
   ],
-  "author": "Arkheia AI <dmurfet@arkheia.ai>",
+  "author": "Arkheia AI (https://arkheia.ai)",
+  "bugs": {
+    "url": "https://github.com/arkheiaai/arkheia-mcp/issues"
+  },
   "license": "MIT",
   "engines": {
     "node": ">=20.0.0"

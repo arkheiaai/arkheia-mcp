@@ -161,7 +161,7 @@ If you have a workflow where you need to call the detection API directly (CI/CD 
 POST https://arkheia-proxy-production.up.railway.app/v1/detect
 ```
 
-The MCP tools send the same thing as a direct call: the prompt, the response and the model name, with your key in a header. Each response carries `assessed`, and `not_assessed_reason` when it could not be scored. If you're building a custom integration, [get in touch](mailto:dmurfet@arkheia.ai).
+The MCP tools send the same thing as a direct call: the prompt, the response and the model name, with your key in a header. Each response carries `assessed`, and `not_assessed_reason` when it could not be scored. If you're building a custom integration, [open an issue](https://github.com/arkheiaai/arkheia-mcp/issues).
 
 ## MCP Tools
 
@@ -185,7 +185,6 @@ We built this because we needed it. We run 151 AI agents in production and every
 If you're using it — whether you love it, hate it, or wish it did something different — we want to hear from you:
 
 - **GitHub Issues:** https://github.com/arkheiaai/arkheia-mcp/issues — bugs, feature requests, questions
-- **Email:** dmurfet@arkheia.ai — anything at all
 - **From your agent:** with the npm package installed, ask it to use `arkheia_feedback` to send short feedback, or `arkheia_report` to say whether a checked response was really wrong or fine. Each returns an id from the service on success and says plainly when it could not confirm that the message was stored. See [Sending feedback](npm-wrapper/README.md#sending-feedback).
 
 Every message is read. Every piece of feedback shapes what we build next.
@@ -199,4 +198,4 @@ Every message is read. Every piece of feedback shapes what we build next.
 
 - Website: https://arkheia.ai
 - GitHub: https://github.com/arkheiaai/arkheia-mcp
-- Support: dmurfet@arkheia.ai
+- Support: https://github.com/arkheiaai/arkheia-mcp/issues

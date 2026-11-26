@@ -149,7 +149,6 @@ The free allowance is 50,000 checks a month during the launch period.
 ## Support
 
 - GitHub Issues: https://github.com/arkheiaai/arkheia-mcp/issues
-- Email: support@arkheia.ai
 - Website: https://arkheia.ai
 
 ## For AI Agents Contributing to This Repo

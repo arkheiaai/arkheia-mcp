@@ -204,7 +204,6 @@ See the [GitHub repo](https://github.com/arkheiaai/arkheia-mcp) for:
 ## Feedback
 
 - **GitHub Issues:** https://github.com/arkheiaai/arkheia-mcp/issues
-- **Email:** dmurfet@arkheia.ai
 
 Every message is read by the founder.
 
