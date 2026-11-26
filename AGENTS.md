@@ -99,7 +99,7 @@ You should see a detection result with `risk_level: HIGH`.
 
 | Tool | What it does |
 |------|-------------|
-| `arkheia_verify` | Score any (prompt, response, model) triple for fabrication risk. Returns LOW/MEDIUM/HIGH, or NOT_ASSESSED when Arkheia could not score the response (see `assessed`). |
+| `arkheia_verify` | Score any (prompt, response, model) triple for fabrication risk. Returns LOW/MEDIUM/HIGH, or NOT_ASSESSED when Arkheia could not score the response (see `assessed`). For a fuller assessment, pass the provider's full response object as the optional `provider_response`, and enable your provider's detailed output option when you call the model. |
 | `arkheia_audit_log` | Retrieve your detection history. |
 | `run_grok` | Call xAI Grok and screen the response (requires `XAI_API_KEY`). |
 | `run_gemini` | Call Google Gemini and screen the response (requires `GOOGLE_API_KEY`). |

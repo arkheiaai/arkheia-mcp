@@ -29,7 +29,7 @@ import logging
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from mcp_server.proxy_client import ProxyClient
+from mcp_server.proxy_client import ProxyClient, check_provider_response
 from mcp_server.tool_registry import check, PolicyViolation
 from mcp_server.tools.providers import call_grok, call_gemini, call_ollama, call_together
 from mcp_server.tools.memory import store_entity, retrieve_entities, store_relation
@@ -62,7 +62,7 @@ proxy = ProxyClient(
     idempotentHint=True,
     openWorldHint=False,
 ))
-async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
+async def arkheia_verify(prompt: str, response: str, model: str, provider_response: dict | str | None = None) -> dict:
     """
     Verify whether an AI response shows signs of fabrication.
 
@@ -74,6 +74,10 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
         response: The model's response to evaluate
         model:    The model identifier (e.g. 'gpt-4o', 'llama-3-70b',
                   'claude-sonnet-4-6')
+        provider_response: The full response object your model provider returned,
+                  exactly as received (for example the JSON from a chat
+                  completions call). Optional. Including it allows a fuller
+                  assessment.
 
     Returns:
         risk_level:          LOW / MEDIUM / HIGH / NOT_ASSESSED / UNKNOWN
@@ -90,7 +94,11 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
         LOW     -- surface normally
     """
     check("arkheia_verify")
-    result = await proxy.verify(prompt=prompt, response=response, model_id=model)
+    pr, pr_error = check_provider_response(provider_response)
+    if pr_error:
+        return {"risk_level": "NOT_ASSESSED", "assessed": False, "not_assessed_reason": "unknown", "error": pr_error}
+    extra = {} if pr is None else {"provider_response": pr}
+    result = await proxy.verify(prompt=prompt, response=response, model_id=model, **extra)
     logger.debug(
         "arkheia_verify: model=%s risk=%s confidence=%.2f",
         model,

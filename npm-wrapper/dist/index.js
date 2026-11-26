@@ -45,6 +45,7 @@ const tool_registry_js_1 = require("./tool-registry.js");
 const egress_js_1 = require("./egress.js");
 const providers_js_1 = require("./providers.js");
 const feedback_js_1 = require("./feedback.js");
+const provider_response_js_1 = require("./provider-response.js");
 const assessment_js_1 = require("./assessment.js");
 const memory_js_1 = require("./memory.js");
 // ---------------------------------------------------------------------------
@@ -155,10 +156,18 @@ async function main() {
     const feedback = new feedback_js_1.FeedbackClient(ARKHEIA_HOSTED_URL, ARKHEIA_API_KEY);
     const server = new mcp_js_1.McpServer({ name: "arkheia-trust", version: "1.3.0" });
     // ── Detection & audit ──────────────────────────────────────────
-    server.tool("arkheia_verify", "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief note that Arkheia raised a warning. LOW = show normally (LOW only ever appears with assessed: true). NOT_ASSESSED -- detection could not score this response. It is not a clean result. Verify by other means; not_assessed_reason says why. candidate_alert -- an unqualified warning on a response we could not properly assess. Treat MEDIUM or HIGH here as a reason to check the specific claims now. Never hide or suppress a response — always surface it to the user with the appropriate risk context. When the result says reportable: true, its detection_id can be passed to arkheia_report to say whether the checked response was really right or wrong. When it says reportable: false (a locally checked result), use arkheia_feedback instead.", { prompt: zod_1.z.string(), response: zod_1.z.string(), model: zod_1.z.string() }, async ({ prompt, response, model }) => {
+    server.tool("arkheia_verify", "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief note that Arkheia raised a warning. LOW = show normally (LOW only ever appears with assessed: true). NOT_ASSESSED -- detection could not score this response. It is not a clean result. Verify by other means; not_assessed_reason says why. candidate_alert -- an unqualified warning on a response we could not properly assess. Treat MEDIUM or HIGH here as a reason to check the specific claims now. Never hide or suppress a response — always surface it to the user with the appropriate risk context. When the result says reportable: true, its detection_id can be passed to arkheia_report to say whether the checked response was really right or wrong. When it says reportable: false (a locally checked result), use arkheia_feedback instead.", {
+        prompt: zod_1.z.string(),
+        response: zod_1.z.string(),
+        model: zod_1.z.string(),
+        provider_response: zod_1.z.any().optional().describe("The full response object your model provider returned, exactly as received (for example the JSON from a chat completions call). Optional. Including it allows a fuller assessment."),
+    }, async ({ prompt, response, model, provider_response }) => {
         try {
             (0, tool_registry_js_1.check)("arkheia_verify");
-            const result = await proxy.verify(prompt, response, model);
+            const pr = (0, provider_response_js_1.checkProviderResponse)(provider_response);
+            if (!pr.ok)
+                return wrapResult({ error: pr.error, ...(0, assessment_js_1.notAssessed)("unknown") });
+            const result = await proxy.verify(prompt, response, model, undefined, pr.value === undefined ? {} : { provider_response: pr.value });
             return wrapResult((0, feedback_js_1.withReportability)(result));
         }
         catch (e) {

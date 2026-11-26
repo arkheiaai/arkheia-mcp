@@ -124,7 +124,11 @@ grok mcp test arkheia
 
 ## What `arkheia_verify` sends
 
-When no local Arkheia proxy is running, `arkheia_verify` and the `run_*` tools send the prompt, the response and the model name to the hosted service, with your key in a request header. Nothing else from your machine is sent. `run_ollama` never contacts the hosted service.
+When no local Arkheia proxy is running, `arkheia_verify` and the `run_*` tools send the prompt, the response and the model name to the hosted service, with your key in a request header. Nothing else from your machine is sent, except the optional `provider_response` when you pass one. `run_ollama` never contacts the hosted service.
+
+### For a fuller assessment
+
+Pass the provider's full response object to `arkheia_verify` as the optional `provider_response` input, exactly as received (an object, or a JSON string that parses to one; up to about 2 MB), and enable your provider's detailed output option when you call the model. It is passed on unchanged, and it is sent to the hosted service only when you include it. It is never logged or shown in the tool's output.
 
 ## Sending feedback
 

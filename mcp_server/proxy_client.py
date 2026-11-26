@@ -23,6 +23,36 @@ logger = logging.getLogger(__name__)
 HOSTED_API_URL = "https://arkheia-proxy-production.up.railway.app"
 
 
+MAX_PROVIDER_RESPONSE_BYTES = 2 * 1024 * 1024
+_NOT_OBJECT = "provider_response must be a JSON object, or a JSON string that parses to an object."
+_TOO_LARGE = "provider_response is too large (limit about 2 MB)."
+
+
+def check_provider_response(value):
+    """Shape and size check for the optional provider_response. Returns (object_or_None, error_or_None).
+
+    The object is passed on unchanged; it is never read, logged or returned.
+    """
+    if value is None:
+        return None, None
+    if isinstance(value, str):
+        if len(value.encode("utf-8")) > MAX_PROVIDER_RESPONSE_BYTES:
+            return None, _TOO_LARGE
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None, _NOT_OBJECT
+    if not isinstance(value, dict):
+        return None, _NOT_OBJECT
+    try:
+        size = len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        return None, _NOT_OBJECT
+    if size > MAX_PROVIDER_RESPONSE_BYTES:
+        return None, _TOO_LARGE
+    return value, None
+
+
 class ProxyClient:
     """
     Thin async HTTP client wrapping Arkheia detection endpoints.
@@ -47,9 +77,10 @@ class ProxyClient:
         self._local_available = bool(self.base_url)  # optimistic when set; flips on ConnectError
 
     async def verify(self, prompt: str, response: str, model_id: str,
-                     session_id: Optional[str] = None) -> dict:
+                     session_id: Optional[str] = None,
+                     provider_response: Optional[dict] = None) -> dict:
         """Detect fabrication in a model response; returns the signal only (see SIGNAL_FIELDS)."""
-        return signal_only(await self._verify_any(prompt, response, model_id, session_id))
+        return signal_only(await self._verify_any(prompt, response, model_id, session_id, provider_response))
 
     async def _verify_any(
         self,
@@ -57,6 +88,7 @@ class ProxyClient:
         response: str,
         model_id: str,
         session_id: Optional[str] = None,
+        provider_response: Optional[dict] = None,
     ) -> dict:
         """
         Detect fabrication in a model response.
@@ -75,7 +107,7 @@ class ProxyClient:
 
         # Fallback: hosted API
         if self.api_key:
-            result = await self._verify_hosted(prompt, response, model_id)
+            result = await self._verify_hosted(prompt, response, model_id, provider_response)
             if result.get("error") not in ("hosted_unavailable",):
                 return result
             # Hosted also failed -- try local once more in case it came back (only if one is configured)
@@ -132,6 +164,7 @@ class ProxyClient:
         prompt: str,
         response: str,
         model_id: str,
+        provider_response: Optional[dict] = None,
     ) -> dict:
         """POST /v1/detect on hosted Arkheia API (arkheia-proxy-production.up.railway.app)."""
         payload = {
@@ -139,6 +172,8 @@ class ProxyClient:
             "response": response,
             "prompt": prompt,
         }
+        if provider_response is not None:
+            payload["provider_response"] = provider_response  # passed on exactly as given; never read, logged or returned
         headers = {"X-Arkheia-Key": self.api_key}
 
         try:

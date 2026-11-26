@@ -60,7 +60,7 @@ class ProxyClient {
         }
         // Fallback: hosted API
         if (this.api_key) {
-            const result = await this._verify_hosted(prompt, response, model_id);
+            const result = await this._verify_hosted(prompt, response, model_id, options.provider_response);
             if (result.error !== "hosted_unavailable") {
                 return result;
             }
@@ -125,12 +125,14 @@ class ProxyClient {
             }
         }
     }
-    async _verify_hosted(prompt, response, model_id) {
+    async _verify_hosted(prompt, response, model_id, provider_response) {
         /** POST /v1/detect on hosted Arkheia API (arkheia-proxy-production.up.railway.app). */
         const payload = {
             model: model_id,
             response: response,
             prompt: prompt,
+            // Passed on exactly as given; never read, logged or returned.
+            ...(provider_response !== undefined ? { provider_response } : {}),
         };
         const headers = { "X-Arkheia-Key": this.api_key || "", "Content-Type": "application/json" };
         const controller = new AbortController();
