@@ -57,6 +57,12 @@ export function safeMeta(raw: any): { confidence: number; detection_id?: string 
     const id = raw?.detection_id;
     return { confidence, ...(typeof id === "string" && ID_PATTERN.test(id) ? { detection_id: id } : {}) };
 }
+const MODEL_PATTERN = /^[A-Za-z0-9_.:/@+-]{1,100}$/;
+const TIME_PATTERN = /^[0-9TZ:.+ -]{1,40}$/;
+const safeId = (v: unknown): string | undefined => (typeof v === "string" && ID_PATTERN.test(v) ? v : undefined);
+const safeModel = (v: unknown): string | undefined => (typeof v === "string" && MODEL_PATTERN.test(v) ? v : undefined);
+const safeTime = (v: unknown): string | number | undefined =>
+    typeof v === "number" ? (Number.isSafeInteger(v) ? v : undefined) : (typeof v === "string" && TIME_PATTERN.test(v) ? v : undefined);
 export const safeSource = (v: unknown): string => (typeof v === "string" && SOURCES.includes(v) ? v : "local");
 
 function candidateFitsBand(raw: any, band: unknown): boolean {
@@ -175,7 +181,9 @@ function assessmentFromService(e: any): Assessment {
     const a = e.assessment;
     if (a === null || typeof a !== "object" || Array.isArray(a)) return notAssessed("unknown");
     const band = e.risk_level;
+    if ("assessed" in e && e.assessed !== a.assessed) return notAssessed("unknown");
     if (a.assessed === true) {
+        if (!absent(e.not_assessed_reason) || !absent(e.candidate_alert)) return notAssessed("unknown");
         const { assessment: _a, record_kind: _k, read_time_fields: _r, ...facts } = e;
         void _a; void _k; void _r;
         return assessmentFromDetector({ ...facts, assessed: true, not_assessed_reason: a.not_assessed_reason,
@@ -189,16 +197,14 @@ function assessmentFromService(e: any): Assessment {
     return notAssessed("unknown");
 }
 
-const VIEW_STRING_MAX = 200;
-const safeText = (v: unknown) => (typeof v === "string" && v.length <= VIEW_STRING_MAX ? v : undefined);
 
-function canonical(v: any): string {
+export function canonical(v: any): string {
     if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
     if (v !== null && typeof v === "object") {
         return `{${Object.keys(v).sort().map((k) => `${canonical(k)}:${canonical(v[k])}`).join(",")}}`;
     }
     // Non-ASCII is written as lower-case \uXXXX so every client hashes the same bytes.
-    return JSON.stringify(v).replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+    return JSON.stringify(v).replace(/[\u007f-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 const sha256 = (t: string) => createHash("sha256").update(t).digest("hex");
 
@@ -215,11 +221,11 @@ export function normaliseAuditLog(result: any): any {
     const rows = events.filter(isRecord).map((e: any) => {
         const kind = auditRecordKind(e);
         const view: Record<string, any> = { record_kind: kind };
-        const id = safeText(e.detection_id);
+        const id = safeId(e.detection_id);
         if (id !== undefined) view.id = id;
-        const ts = typeof e.timestamp === "number" && Number.isSafeInteger(e.timestamp) ? e.timestamp : safeText(e.timestamp);
+        const ts = safeTime(e.timestamp);
         if (ts !== undefined) view.timestamp = ts;
-        const model = safeText(e.model_id) ?? safeText(e.model);
+        const model = safeModel(e.model_id) ?? safeModel(e.model);
         if (model !== undefined) view.model = model;
         const out = kind === "detection" ? applyAssessment(view, assessmentFromService(e)) : view;
         out.view_hash = sha256(canonical(out));

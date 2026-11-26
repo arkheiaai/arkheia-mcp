@@ -172,3 +172,44 @@ def test_hash_uses_ascii_escaped_canonical_json():
     with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=_resp(body)):
         out = _run(c.get_audit_log())
     assert out["events"][0]["timestamp"] == 1700000000 and out["hash_scheme"] == "sha256-canonical-json-v1"
+
+
+SHARED_CANONICAL = '{"a":"x\\u007fy\\u00e9\\ud83d\\ude00\\n","b":[1,true,null],"k\\u00e9":{"z":1700000000}}'
+SHARED_DIGEST = "1caa770f794065bad26bbb09a8f3ea3e3d78b4aa7a9d201e620f972fad1d9646"
+
+
+def test_canonical_encoding_matches_the_shared_digest():
+    from mcp_server.proxy_client import _canonical, _sha256
+    v = {"a": "x\x7fyé\U0001F600\n", "b": [1, True, None], "ké": {"z": 1700000000}}
+    assert _canonical(v) == SHARED_CANONICAL and _sha256(_canonical(v)) == SHARED_DIGEST
+
+
+def _audit(rows):
+    c = ProxyClient("http://localhost:8098", api_key=None)
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=_resp({"events": rows})):
+        return _run(c.get_audit_log())
+
+
+def test_disputed_audit_rows_stay_unassessed():
+    base = {"source": "proxy", "risk_level": "LOW", "evidence_depth_limited": False}
+    rows = [
+        {**base, "assessed": False, "assessment": {"assessed": True}},
+        {**base, "assessed": 1, "assessment": {"assessed": True}},
+        {**base, "not_assessed_reason": "r", "assessment": {"assessed": True}},
+        {**base, "candidate_alert": "HIGH", "assessment": {"assessed": True}},
+        {**base, "assessed": True, "assessment": {"assessed": False, "not_assessed_reason": "r"}},
+    ]
+    out = _audit(rows)
+    assert [r["risk_level"] for r in out["events"]] == ["NOT_ASSESSED"] * 5
+    ok = _audit([{**base, "assessment": {"assessed": True}}])
+    assert ok["events"][0]["risk_level"] == "LOW"
+
+
+def test_audit_fields_use_the_same_patterns_as_verify():
+    row = {"source": "proxy", "risk_level": "HIGH", "assessed": True, "evidence_depth_limited": False,
+           "detection_id": "d1\n", "model_id": "", "model": "phi4:14b", "timestamp": "2026-01-01T00:00:00Z"}
+    r = _audit([row])["events"][0]
+    assert "id" not in r and r["model"] == "phi4:14b" and r["timestamp"] == "2026-01-01T00:00:00Z"
+    assert "id" not in _audit([{**row, "detection_id": "bad id"}])["events"][0]
+    out = _run(_local({**CLEAN, "risk_level": "LOW", "detection_id": "d1\n"}))
+    assert "detection_id" not in out

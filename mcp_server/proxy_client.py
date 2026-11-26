@@ -221,7 +221,13 @@ def _rank(v):
     return _RANK[v] if isinstance(v, str) and v in _RANK else None
 
 
-_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
+_ID_PATTERN = re.compile(r"[A-Za-z0-9_.:-]{1,100}")
+_MODEL_PATTERN = re.compile(r"[A-Za-z0-9_.:/@+-]{1,100}")
+_TIME_PATTERN = re.compile(r"[0-9TZ:.+ -]{1,40}")
+
+
+def _safe(pattern, v):
+    return v if isinstance(v, str) and pattern.fullmatch(v) else None
 _GATE_ACTIONS = ("block", "advise")
 
 
@@ -307,7 +313,7 @@ def verdict_fields(raw: dict, band_field: str, requested_model=None, source=None
     ok = isinstance(conf, (int, float)) and not isinstance(conf, bool) and 0 <= conf <= 1
     out["confidence"] = float(conf) if ok else 0.0
     did = raw.get("detection_id")
-    if isinstance(did, str) and _ID_PATTERN.match(did):
+    if _safe(_ID_PATTERN, did) is not None:
         out["detection_id"] = did
     if raw.get("gate_action") in _GATE_ACTIONS:
         out["gate_action"] = raw["gate_action"]
@@ -329,10 +335,6 @@ def _canonical(v) -> str:
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
-
-
-def _text(v):
-    return v if isinstance(v, str) and len(v) <= _TEXT_MAX else None
 
 
 _RECORD_KINDS = ("detection", "refusal", "delivery_receipt", "operational")
@@ -358,7 +360,11 @@ def _row_assessment(e: dict) -> dict:
     if not isinstance(a, dict):
         return _not_assessed("unknown")
     facts = {k: v for k, v in e.items() if k not in ("assessment", "record_kind", "read_time_fields")}
+    if "assessed" in e and e["assessed"] is not a.get("assessed"):
+        return _not_assessed("unknown")
     if a.get("assessed") is True:
+        if e.get("not_assessed_reason") is not None or e.get("candidate_alert") is not None:
+            return _not_assessed("unknown")
         return assess({**facts, "assessed": True, "not_assessed_reason": a.get("not_assessed_reason"),
                        "candidate_alert": a.get("candidate_alert")}, "risk_level")
     reason = a.get("not_assessed_reason")
@@ -385,16 +391,16 @@ def audit_view(body) -> dict:
         try:
             kind = _record_kind(e)
             row: dict = {"record_kind": kind}
-            if _text(e.get("detection_id")) is not None:
+            if _safe(_ID_PATTERN, e.get("detection_id")) is not None:
                 row["id"] = e["detection_id"]
             ts = e.get("timestamp")
             if isinstance(ts, float) and ts.is_integer():
                 ts = int(ts)
             if isinstance(ts, int) and not isinstance(ts, bool) and abs(ts) <= 2**53 - 1:
                 row["timestamp"] = ts
-            elif _text(ts) is not None:
+            elif _safe(_TIME_PATTERN, ts) is not None:
                 row["timestamp"] = ts
-            model = _text(e.get("model_id")) or _text(e.get("model"))
+            model = _safe(_MODEL_PATTERN, e.get("model_id")) or _safe(_MODEL_PATTERN, e.get("model"))
             if model:
                 row["model"] = model
             if kind == "detection":

@@ -622,3 +622,29 @@ test("audit: an unknown record kind does not hide a detection; the hash escapes 
     assert.equal(out.hash_scheme, "sha256-canonical-json-v1");
     assert.doesNotMatch(JSON.stringify(out), /zz/);
 });
+
+test("canonical encoding matches the shared digest", async () => {
+    const { canonical } = await import('../src/assessment.js');
+    const { createHash } = await import('node:crypto');
+    const v = { a: "x\x7fyé\u{1F600}\n", b: [1, true, null], "ké": { z: 1700000000 } };
+    assert.equal(canonical(v), '{"a":"x\\u007fy\\u00e9\\ud83d\\ude00\\n","b":[1,true,null],"k\\u00e9":{"z":1700000000}}');
+    assert.equal(createHash("sha256").update(canonical(v)).digest("hex"), "1caa770f794065bad26bbb09a8f3ea3e3d78b4aa7a9d201e620f972fad1d9646");
+});
+
+test("disputed audit rows stay unassessed, and audit fields use the verify patterns", () => {
+    const base = { source: "proxy", risk_level: "LOW", evidence_depth_limited: false };
+    const rows = [
+        { ...base, assessed: false, assessment: { assessed: true } },
+        { ...base, assessed: 1, assessment: { assessed: true } },
+        { ...base, not_assessed_reason: "r", assessment: { assessed: true } },
+        { ...base, candidate_alert: "HIGH", assessment: { assessed: true } },
+        { ...base, assessed: true, assessment: { assessed: false, not_assessed_reason: "r" } },
+    ];
+    const out = normaliseAuditLog({ events: rows });
+    assert.deepEqual(out.events.map((r: any) => r.risk_level), Array(5).fill("NOT_ASSESSED"));
+    assert.equal(normaliseAuditLog({ events: [{ ...base, assessment: { assessed: true } }] }).events[0].risk_level, "LOW");
+    const r = normaliseAuditLog({ events: [{ source: "proxy", risk_level: "HIGH", assessed: true, evidence_depth_limited: false,
+        detection_id: "d1\n", model_id: "", model: "phi4:14b", timestamp: "2026-01-01T00:00:00Z" }] }).events[0];
+    assert.equal("id" in r, false);
+    assert.equal(r.model, "phi4:14b");
+});
