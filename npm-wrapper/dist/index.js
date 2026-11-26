@@ -168,13 +168,10 @@ async function main() {
     server.tool("arkheia_audit_log", egress.arkheia_audit_log.description, {
         session_id: zod_1.z.string().optional(),
         limit: zod_1.z.number().int().min(1).max(500).default(50),
-        // raw: the stored records exactly as the local proxy keeps them, so their hashes verify.
-        // The default view reads each detection like a live verdict instead.
-        raw: zod_1.z.boolean().default(false),
-    }, async ({ session_id, limit, raw }) => {
+    }, async ({ session_id, limit }) => {
         try {
             (0, tool_registry_js_1.check)("arkheia_audit_log");
-            const result = await proxy.get_audit_log(session_id, Math.min(limit, 500), raw);
+            const result = await proxy.get_audit_log(session_id, Math.min(limit, 500));
             return wrapResult(result);
         }
         catch (e) {

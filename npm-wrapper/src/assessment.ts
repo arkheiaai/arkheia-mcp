@@ -1,18 +1,10 @@
 /**
- * Release pack Change A, client half: an unscored check never reads as LOW.
- *
- * The service states whether it assessed a response (`assessed`), and any unqualified alert it
- * still carries (`candidate_alert`). This module passes the verdict through and fails closed:
- *
- *   - assessed: true is accepted only with a LOW/MEDIUM/HIGH band and nothing in the answer that
- *     contradicts it (extra facts the service sends are read here and never passed on);
- *   - assessed: false with any reason from the service becomes the single reason `not_assessed`;
- *   - anything missing or contradictory becomes NOT_ASSESSED with reason `unknown`.
- *
- * The client sets its own reason only where there is no service answer to pass through, in this
- * order: screening_disabled, provider_error, incomplete_response, service_unavailable, unknown.
- * An unassessed result carries risk_level NOT_ASSESSED and the word LOW appears nowhere in it.
+ * An unscored check never reads as LOW. A band is passed on only when the service says it
+ * assessed the response and nothing in the answer contradicts that; anything else is
+ * NOT_ASSESSED, and the word LOW appears nowhere in it.
  */
+
+import { createHash } from "node:crypto";
 
 export const ASSESSED_BANDS = ["LOW", "MEDIUM", "HIGH"] as const;
 export const CLIENT_REASONS = [
@@ -40,49 +32,37 @@ function isBand(v: unknown): v is typeof ASSESSED_BANDS[number] {
     return typeof v === "string" && (ASSESSED_BANDS as readonly string[]).includes(v);
 }
 
-/**
- * Normalise a detector answer (hosted `/v1/detect` body, or a local proxy's verdict). `bandField`
- * is the field the source puts its band in (`risk` for hosted, `risk_level` for local).
- */
 const absent = (v: unknown) => v === null || v === undefined;
 
-/**
- * The candidate the service supplied, if it is coherent: MEDIUM or HIGH, and equal to the
- * service's own level for this verdict (its pre-demotion level when it records a demotion,
- * otherwise its band). Returns null when no candidate was supplied, "invalid" when one was
- * supplied that does not fit.
- */
 function serviceCandidate(raw: any, band: unknown): "MEDIUM" | "HIGH" | null | "invalid" {
     const candidate = raw?.candidate_alert;
     if (absent(candidate)) return null;
     if (!CANDIDATE_LEVELS.includes(candidate)) return "invalid";
-    if (!demotionIsPossible(raw, band)) return "invalid";
+    if (!candidateFitsBand(raw, band)) return "invalid";
     const level = absent(raw?.risk_demoted_from) ? band : raw.risk_demoted_from;
     return candidate === level ? candidate : "invalid";
 }
 
-/** The only demotion the service makes is an advisory cap: HIGH published as MEDIUM. */
-function demotionIsPossible(raw: any, band: unknown): boolean {
-    return absent(raw?.risk_demoted_from) || (raw.risk_demoted_from === "HIGH" && band === "MEDIUM");
+const RANK: Record<string, number> = { LOW: 1, MEDIUM: 2, HIGH: 3 };
+
+function candidateFitsBand(raw: any, band: unknown): boolean {
+    if (absent(raw?.risk_demoted_from)) return true;
+    const from = RANK[raw.risk_demoted_from as string];
+    const to = RANK[band as string];
+    return from !== undefined && to !== undefined && to >= 2 && from === to + 1;
 }
 
-/** Facts a local verifier reports that contradict an affirmative assessment. */
 const sameModel = (a: unknown, b: unknown) =>
     typeof a === "string" && typeof b === "string" && a.trim().toLowerCase() === b.trim().toLowerCase();
 
 function localContradiction(raw: any, requestedModel?: string): boolean {
-    if (!absent(raw?.gate_reason)) return true;          // the service qualified this result
-    if (!absent(raw?.error)) return true;                // the detector reported an error
-    // A field the producer sends is a claim: an explicit null or non-string identity is an explicit
-    // unknown, not an omission. Omitted fields stay compatible with verdict-only producers.
+    if (!absent(raw?.gate_reason)) return true;
+    if (!absent(raw?.error)) return true;
     for (const key of ["profile_model_id", "model_id", "model"]) {
         if (raw && key in raw && !(typeof raw[key] === "string" && raw[key].trim())) return true;
     }
-    // Every identity the producer supplies must agree with every other (model_id, model,
-    // profile_model_id), with or without a requested model.
     const ids = [raw?.model_id, raw?.model, raw?.profile_model_id].filter((v) => typeof v === "string");
     if (ids.some((v) => !sameModel(v, ids[0]))) return true;
-    // The verdict must be about the model this call asked about.
     if (requestedModel !== undefined) {
         for (const named of [raw?.model_id, raw?.model, raw?.profile_model_id]) {
             if (typeof named === "string" && !sameModel(named, requestedModel)) return true;
@@ -97,13 +77,9 @@ export function assessmentFromDetector(raw: any, bandField: "risk" | "risk_level
     const reason = raw?.not_assessed_reason;
 
     if (assessed === true) {
-        // The affirmative flag is believed only when nothing else the service said contradicts it.
         const consistent = isBand(band)
             && raw?.evidence_depth_limited === false
-            // Supplied flags must be real booleans: "true"/"false" strings are malformed and fail.
             && (absent(raw?.profile_fingerprint_borrowed) || raw.profile_fingerprint_borrowed === false)
-            // Coverage is a claim when sent: only an omitted field or a real `true` keeps it. An
-            // explicit null is an explicit unknown, so it fails closed.
             && (raw?.model_supported === undefined || raw.model_supported === true)
             && !localContradiction(raw, requestedModel)
             && absent(raw?.risk_demoted_from)
@@ -117,8 +93,6 @@ export function assessmentFromDetector(raw: any, bandField: "risk" | "risk_level
     if (assessed === false && typeof reason === "string" && reason.trim()) {
         return notAssessed("not_assessed", candidate ?? undefined);
     }
-    // No assessment fact, or one we cannot read: the service did not say it assessed this. An
-    // explicit, coherent service-supplied candidate (an old audit row's warning) is kept.
     return notAssessed("unknown", candidate ?? undefined);
 }
 
@@ -167,14 +141,9 @@ export function finishFromOllama(data: any): FinishState {
 }
 
 const DETECTION_SOURCES = ["proxy", "passthrough", "interception"];
-const HASH_FIELDS = ["this_hash", "prev_hash"];
-/** Keys that describe how a verdict was reached. They are read where needed and never shown. */
-const INTERNAL_KEY = /feature|profile|method|evidence|gate_reason|metric|borrowed|demoted|supported/i;
-const SERVICE_READ_TIME = ["record_kind", "assessment", "read_time_fields"];
 
 /** What an audit row records, by the service's own label when it sends one. */
 export function auditRecordKind(e: any): string {
-    // A refusal is a refusal whatever a producer labels it: the detector did not run.
     const refused = e?.action_taken === "refused" || e?.action_taken === "refuse" || e?.risk_level === "REFUSED"
         || e?.event_type === "passthrough.forward_refused";
     if (refused) return "refusal";
@@ -186,15 +155,13 @@ export function auditRecordKind(e: any): string {
     return "operational";
 }
 
-/** Read the service's `assessment` object for a detection row, failing closed. */
+
 function assessmentFromService(e: any): Assessment {
-    // Omitted: an older service, read the old way. Present but unreadable: fail closed.
     if (!("assessment" in e)) return assessmentFromDetector(e, "risk_level");
     const a = e.assessment;
     if (a === null || typeof a !== "object" || Array.isArray(a)) return notAssessed("unknown");
     const band = e.risk_level;
     if (a.assessed === true) {
-        // The same checks as a live verdict, against the row's own stored facts.
         const { assessment: _a, record_kind: _k, read_time_fields: _r, ...facts } = e;
         void _a; void _k; void _r;
         return assessmentFromDetector({ ...facts, assessed: true, not_assessed_reason: a.not_assessed_reason,
@@ -208,11 +175,23 @@ function assessmentFromService(e: any): Assessment {
     return notAssessed("unknown");
 }
 
+const VIEW_STRING_MAX = 200;
+const safeText = (v: unknown) => (typeof v === "string" && v.length <= VIEW_STRING_MAX ? v : undefined);
+
+function canonical(v: any): string {
+    if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
+    if (v !== null && typeof v === "object") {
+        return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}`;
+    }
+    return JSON.stringify(v);
+}
+const sha256 = (t: string) => createHash("sha256").update(t).digest("hex");
+
 /**
- * The audit log as the agent sees it. Each row is a view: detections carry the assessment and a
- * band only when assessed; receipts, refusals and operational rows carry no band at all. The view
- * is not the stored record, so the stored digest is kept as `stored_this_hash` with `hash_scope`
- * saying what it covers; `arkheia_audit_log` with raw: true returns the stored records unchanged.
+ * The audit log as the agent sees it: each row is built from a fixed list of typed fields (id,
+ * timestamp, model, record kind and the verdict). Detections carry the assessment; other rows
+ * carry no band. Every row has a `view_hash` and the export has an `export_hash`, both computed
+ * over this exported view (canonical JSON, sorted keys).
  */
 export function normaliseAuditLog(result: any): any {
     const events = Array.isArray(result?.events) ? result.events : [];
@@ -220,20 +199,16 @@ export function normaliseAuditLog(result: any): any {
     const invalid = events.filter((e: any) => !isRecord(e)).length;
     const rows = events.filter(isRecord).map((e: any) => {
         const kind = auditRecordKind(e);
-        const view: Record<string, any> = {};
-        for (const [k, v] of Object.entries(e)) {
-            if (HASH_FIELDS.includes(k) || SERVICE_READ_TIME.includes(k)) continue;
-            if (["risk", "risk_level", "assessed", "not_assessed_reason", "candidate_alert"].includes(k)) continue;
-            if (INTERNAL_KEY.test(k)) continue;
-            view[k] = v;
-        }
-        view.record_kind = kind;
-        if (typeof e.this_hash === "string") {
-            view.stored_this_hash = e.this_hash;
-            view.hash_scope = "the stored record, not this view; call arkheia_audit_log with raw: true to verify";
-        }
-        if (kind !== "detection") return view;
-        return applyAssessment(view, assessmentFromService(e));
+        const view: Record<string, any> = { record_kind: kind };
+        const id = safeText(e.detection_id);
+        if (id !== undefined) view.id = id;
+        const ts = typeof e.timestamp === "number" && Number.isFinite(e.timestamp) ? e.timestamp : safeText(e.timestamp);
+        if (ts !== undefined) view.timestamp = ts;
+        const model = safeText(e.model_id) ?? safeText(e.model);
+        if (model !== undefined) view.model = model;
+        const out = kind === "detection" ? applyAssessment(view, assessmentFromService(e)) : view;
+        out.view_hash = sha256(canonical(out));
+        return out;
     });
     const summary: Record<string, number> = {
         LOW: 0, MEDIUM: 0, HIGH: 0, NOT_ASSESSED: 0, CANDIDATE_MEDIUM: 0, CANDIDATE_HIGH: 0,
@@ -245,5 +220,8 @@ export function normaliseAuditLog(result: any): any {
         if (r.candidate_alert === "HIGH") summary.CANDIDATE_HIGH += 1;
     }
     if (invalid) summary.INVALID_ROWS = invalid;
-    return { ...result, events: rows, summary };
+    const out: Record<string, any> = { events: rows, summary, export_hash: sha256(canonical(rows)) };
+    const error = safeText(result?.error);
+    if (error !== undefined) out.error = error;
+    return out;
 }

@@ -183,7 +183,7 @@ class ProxyClient {
             }
         }
     }
-    async get_audit_log(session_id, limit = 50, raw = false) {
+    async get_audit_log(session_id, limit = 50) {
         /**
          * GET /audit/log
          *
@@ -191,9 +191,6 @@ class ProxyClient {
          * Note: audit log is only available from local proxy, not hosted API.
          */
         const params = new url_1.URLSearchParams({ limit: String(Math.min(limit, 500)) });
-        // raw: ask the service for its stored records unchanged, so their hashes verify as served.
-        if (raw)
-            params.append("raw", "true");
         if (session_id) {
             params.append("session_id", session_id);
         }
@@ -210,21 +207,8 @@ class ProxyClient {
                 logger.error(`ProxyClient: /audit/log HTTP error: ${resp.status} ${resp.statusText}`);
                 return _empty_log(`proxy_http_error_${resp.status}`);
             }
-            // Every row is read the same way as a live verdict, including old rows with no
-            // assessment fields, and the summary is counted from the normalised rows.
             const body = await resp.json();
-            if (!raw)
-                return (0, assessment_js_1.normaliseAuditLog)(body);
-            // raw: stored records only. An older service ignores ?raw=true and still sends its
-            // read-time view (record_kind / assessment / read_time_fields, or top-level assessment
-            // fields it added); that is not a stored record, so say raw is unavailable.
-            const events = Array.isArray(body?.events) ? body.events : [];
-            const projected = events.some((e) => e && typeof e === "object"
-                && ("record_kind" in e || "read_time_fields" in e || "assessment" in e));
-            if (projected) {
-                return { events: [], summary: {}, error: "raw_unavailable_from_this_local_proxy" };
-            }
-            return body;
+            return (0, assessment_js_1.normaliseAuditLog)(body);
         }
         catch (e) {
             clearTimeout(timeoutId);

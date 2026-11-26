@@ -154,14 +154,11 @@ async function main() {
         {
             session_id: z.string().optional(),
             limit: z.number().int().min(1).max(500).default(50),
-            // raw: the stored records exactly as the local proxy keeps them, so their hashes verify.
-            // The default view reads each detection like a live verdict instead.
-            raw: z.boolean().default(false),
         },
-        async ({ session_id, limit, raw }) => {
+        async ({ session_id, limit }) => {
             try {
                 check("arkheia_audit_log");
-                const result = await proxy.get_audit_log(session_id, Math.min(limit, 500), raw);
+                const result = await proxy.get_audit_log(session_id, Math.min(limit, 500));
                 return wrapResult(result);
             } catch (e: any) { return handleError("arkheia_audit_log", e); }
         }

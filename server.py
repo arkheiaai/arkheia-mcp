@@ -11,7 +11,7 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 
-from mcp_server.proxy_client import assess, signal_only
+from mcp_server.proxy_client import audit_view, signal_only, verdict_fields
 
 ARKHEIA_PROXY_URL = os.getenv("ARKHEIA_PROXY_URL", "http://localhost:8099")
 
@@ -40,8 +40,7 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
             timeout=10.0,
         )
         r.raise_for_status()
-        raw = r.json()
-        return signal_only({**raw, **assess(raw, "risk_level")})
+        return signal_only(verdict_fields(r.json(), "risk_level", model))
 
 
 @mcp.tool()
@@ -67,7 +66,7 @@ async def arkheia_audit_log(session_id: str | None = None, limit: int = 50) -> d
             timeout=10.0,
         )
         r.raise_for_status()
-        return r.json()
+        return audit_view(r.json())
 
 
 if __name__ == "__main__":

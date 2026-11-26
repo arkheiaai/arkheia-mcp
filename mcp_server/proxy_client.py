@@ -8,6 +8,8 @@ All methods return dicts -- never raise exceptions to the caller.
 Failures surface as UNKNOWN risk with error field set.
 """
 
+import hashlib
+import json
 import logging
 import os
 from typing import Optional
@@ -109,7 +111,8 @@ class ProxyClient:
                 )
                 resp.raise_for_status()
                 raw = resp.json()
-                return {**raw, **assess(raw, "risk_level"), "source": raw.get("source", "local")}
+                src = raw.get("source") if isinstance(raw, dict) and raw.get("source") in ("proxy", "local") else "local"
+                return verdict_fields(raw, "risk_level", model_id, src)
         except httpx.TimeoutException:
             logger.warning("ProxyClient: /detect/verify timed out for model=%s", model_id)
             return _unavailable("proxy_timeout")
@@ -147,13 +150,7 @@ class ProxyClient:
                 resp.raise_for_status()
                 data = resp.json()
                 # Map hosted response format to local format
-                return {
-                    "confidence": data.get("confidence", 0.0),
-                    "detection_id": data.get("detection_id"),
-                    "gate_action": data.get("gate_action"),
-                    "source": "hosted",
-                    **assess(data, "risk"),
-                }
+                return verdict_fields(data, "risk", model_id, "hosted")
         except httpx.TimeoutException:
             logger.warning("ProxyClient: hosted /v1/detect timed out for model=%s", model_id)
             return _unavailable("hosted_timeout")
@@ -196,7 +193,7 @@ class ProxyClient:
                     params=params,
                 )
                 resp.raise_for_status()
-                return resp.json()
+                return audit_view(resp.json())
         except httpx.TimeoutException:
             logger.warning("ProxyClient: /audit/log timed out")
             return _empty_log("proxy_timeout")
@@ -209,48 +206,198 @@ class ProxyClient:
 
 
 
-#: The signal, and only the signal. Whatever a server sends, a caller of this package sees these
-#: fields and nothing else.
+#: The verdict, and only the verdict. A caller sees these fields and nothing else.
 SIGNAL_FIELDS = ("risk_level", "assessed", "not_assessed_reason", "candidate_alert", "confidence",
                  "detection_id", "gate_action", "source", "error")
 
 _BANDS = ("LOW", "MEDIUM", "HIGH")
+_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+_TEXT_MAX = 200
+_ID_KEYS = ("profile_model_id", "model_id", "model")
 
 
-def assess(raw: dict, band_field: str) -> dict:
-    """Read a server answer and fail closed: a band is passed on only when the server says it
-    assessed the response and nothing else in the answer contradicts that. Anything else is
-    NOT_ASSESSED, never LOW. Extra facts are read here and never passed on."""
-    band = raw.get(band_field)
-    clean = (
-        raw.get("assessed") is True
-        and band in _BANDS
-        and raw.get("evidence_depth_limited") is False
-        and raw.get("not_assessed_reason") is None
-        and raw.get("candidate_alert") is None
-        and raw.get("risk_demoted_from") is None
-        and raw.get("gate_reason") is None
-        and raw.get("error") is None
-        and raw.get("profile_fingerprint_borrowed") in (None, False)
-        and raw.get("model_supported") in (None, True)
-    )
-    if clean:
-        return {"risk_level": band, "assessed": True}
-    reason = raw.get("not_assessed_reason")
-    out = {
-        "risk_level": "NOT_ASSESSED",
-        "assessed": False,
-        "not_assessed_reason": "not_assessed" if raw.get("assessed") is False and isinstance(reason, str) and reason.strip() else "unknown",
-    }
-    candidate = raw.get("candidate_alert")
+def _absent(v) -> bool:
+    return v is None
+
+
+def _same_model(a, b) -> bool:
+    return isinstance(a, str) and isinstance(b, str) and a.strip().lower() == b.strip().lower()
+
+
+def _identity_conflict(raw: dict, requested_model) -> bool:
+    for key in _ID_KEYS:
+        if key in raw and not (isinstance(raw[key], str) and raw[key].strip()):
+            return True
+    ids = [raw[k] for k in _ID_KEYS if isinstance(raw.get(k), str)]
+    if any(not _same_model(v, ids[0]) for v in ids):
+        return True
+    if requested_model is not None and any(not _same_model(v, requested_model) for v in ids):
+        return True
+    return False
+
+
+def _candidate(raw: dict, band):
+    """The candidate alert if coherent, None if absent, "invalid" otherwise."""
+    cand = raw.get("candidate_alert")
+    if _absent(cand):
+        return None
+    if cand not in ("MEDIUM", "HIGH"):
+        return "invalid"
+    lower = raw.get("risk_demoted_from")
+    if _absent(lower):
+        return cand if cand == band else "invalid"
+    from_, to = _RANK.get(lower), _RANK.get(band)
+    if from_ is None or to is None or not (to >= 2 and from_ == to + 1):
+        return "invalid"
+    return cand if cand == lower else "invalid"
+
+
+def _not_assessed(reason: str, candidate=None) -> dict:
+    out = {"risk_level": "NOT_ASSESSED", "assessed": False, "not_assessed_reason": reason}
     if candidate in ("MEDIUM", "HIGH"):
         out["candidate_alert"] = candidate
     return out
 
 
+def assess(raw: dict, band_field: str, requested_model=None) -> dict:
+    """Read a server answer and fail closed. Returns fresh verdict fields only: a band is passed
+    on when the server says it assessed the response and nothing in the answer contradicts that;
+    anything else is NOT_ASSESSED, never LOW."""
+    if not isinstance(raw, dict):
+        return _not_assessed("unknown")
+    band = raw.get(band_field)
+    assessed = raw.get("assessed")
+    reason = raw.get("not_assessed_reason")
+    if assessed is True:
+        clean = (
+            isinstance(band, str) and band in _BANDS
+            and raw.get("evidence_depth_limited") is False
+            and (_absent(raw.get("profile_fingerprint_borrowed")) or raw.get("profile_fingerprint_borrowed") is False)
+            and ("model_supported" not in raw or raw.get("model_supported") is True)
+            and _absent(raw.get("gate_reason"))
+            and _absent(raw.get("error"))
+            and not _identity_conflict(raw, requested_model)
+            and _absent(raw.get("risk_demoted_from"))
+            and _absent(reason)
+            and _absent(raw.get("candidate_alert"))
+        )
+        return {"risk_level": band, "assessed": True} if clean else _not_assessed("unknown")
+    cand = _candidate(raw, band)
+    if cand == "invalid":
+        return _not_assessed("unknown")
+    if assessed is False and isinstance(reason, str) and reason.strip():
+        return _not_assessed("not_assessed", cand)
+    return _not_assessed("unknown", cand)
+
+
+def verdict_fields(raw: dict, band_field: str, requested_model=None, source=None) -> dict:
+    """The caller-facing result, built fresh: normalised verdict plus typed safe fields."""
+    out = assess(raw, band_field, requested_model)
+    conf = raw.get("confidence") if isinstance(raw, dict) else None
+    if isinstance(conf, (int, float)) and not isinstance(conf, bool):
+        out["confidence"] = float(conf)
+    if isinstance(raw, dict):
+        for key in ("detection_id", "gate_action"):
+            v = raw.get(key)
+            if isinstance(v, str) and 0 < len(v) <= _TEXT_MAX:
+                out[key] = v
+        err = raw.get("error")
+        if isinstance(err, str) and 0 < len(err) <= _TEXT_MAX:
+            out["error"] = err
+    if source:
+        out["source"] = source
+    return out
+
+
 def signal_only(result: dict) -> dict:
-    """Project a verdict onto SIGNAL_FIELDS, dropping anything else a server returned."""
+    """Project a result onto SIGNAL_FIELDS, dropping anything else."""
     return {k: result[k] for k in SIGNAL_FIELDS if k in result and result[k] is not None}
+
+
+def _canonical(v) -> str:
+    return json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _text(v):
+    return v if isinstance(v, str) and len(v) <= _TEXT_MAX else None
+
+
+def _record_kind(e: dict) -> str:
+    if (e.get("action_taken") in ("refused", "refuse") or e.get("risk_level") == "REFUSED"
+            or e.get("event_type") == "passthrough.forward_refused"):
+        return "refusal"
+    if isinstance(e.get("record_kind"), str):
+        return e["record_kind"]
+    if e.get("source") == "governance_push" or e.get("event_type") == "governance_detection_push":
+        return "delivery_receipt"
+    if e.get("source") in ("proxy", "passthrough", "interception"):
+        return "detection"
+    return "operational"
+
+
+def _row_assessment(e: dict) -> dict:
+    a = e.get("assessment")
+    if "assessment" not in e:
+        return assess(e, "risk_level")
+    if not isinstance(a, dict):
+        return _not_assessed("unknown")
+    facts = {k: v for k, v in e.items() if k not in ("assessment", "record_kind", "read_time_fields")}
+    if a.get("assessed") is True:
+        return assess({**facts, "assessed": True, "not_assessed_reason": a.get("not_assessed_reason"),
+                       "candidate_alert": a.get("candidate_alert")}, "risk_level")
+    reason = a.get("not_assessed_reason")
+    if a.get("assessed") is False and isinstance(reason, str) and reason.strip():
+        cand = _candidate({"candidate_alert": a.get("candidate_alert"),
+                           "risk_demoted_from": e.get("risk_demoted_from")}, e.get("risk_level"))
+        if cand == "invalid":
+            return _not_assessed("unknown")
+        return _not_assessed("not_assessed", cand)
+    return _not_assessed("unknown")
+
+
+def audit_view(body) -> dict:
+    """The audit log as an agent sees it: each row is built from a fixed list of typed fields
+    (id, timestamp, model, record kind, verdict). Hashes are computed over this exported view."""
+    events = body.get("events") if isinstance(body, dict) else None
+    events = events if isinstance(events, list) else []
+    rows, invalid = [], 0
+    summary = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "NOT_ASSESSED": 0, "CANDIDATE_MEDIUM": 0, "CANDIDATE_HIGH": 0}
+    for e in events:
+        if not isinstance(e, dict):
+            invalid += 1
+            continue
+        kind = _record_kind(e)
+        row: dict = {"record_kind": kind}
+        if _text(e.get("detection_id")) is not None:
+            row["id"] = e["detection_id"]
+        ts = e.get("timestamp")
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+            row["timestamp"] = ts
+        elif _text(ts) is not None:
+            row["timestamp"] = ts
+        model = _text(e.get("model_id")) or _text(e.get("model"))
+        if model:
+            row["model"] = model
+        if kind == "detection":
+            row.update(_row_assessment(e))
+            summary[row["risk_level"]] = summary.get(row["risk_level"], 0) + 1
+            if row.get("candidate_alert") == "MEDIUM":
+                summary["CANDIDATE_MEDIUM"] += 1
+            if row.get("candidate_alert") == "HIGH":
+                summary["CANDIDATE_HIGH"] += 1
+        row["view_hash"] = _sha256(_canonical(row))
+        rows.append(row)
+    if invalid:
+        summary["INVALID_ROWS"] = invalid
+    out = {"events": rows, "summary": summary, "export_hash": _sha256(_canonical(rows))}
+    err = _text(body.get("error")) if isinstance(body, dict) else None
+    if err:
+        out["error"] = err
+    return out
 
 
 def _unavailable(error: str) -> dict:

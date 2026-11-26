@@ -277,10 +277,10 @@ test("stdio: arkheia_audit_log normalises rows and counts NOT_ASSESSED apart", a
 // ---------------------------------------------------------------------------
 
 const moreContradictions: Array<[string, any]> = [
-    ["assessed LOW with a borrowed profile", { ...ASSESSED_LOW, profile_fingerprint_borrowed: true }],
+    ["assessed LOW with a qualifier set", { ...ASSESSED_LOW, profile_fingerprint_borrowed: true }],
     ["assessed LOW with model_supported false", { ...ASSESSED_LOW, model_supported: false }],
-    ["assessed MEDIUM with a recorded demotion", { ...ASSESSED_LOW, risk: "MEDIUM", risk_demoted_from: "HIGH" }],
-    ["a HIGH candidate beside a live LOW with no demotion", { risk: "LOW", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "HIGH" }],
+    ["assessed MEDIUM with a lower-band marker", { ...ASSESSED_LOW, risk: "MEDIUM", risk_demoted_from: "HIGH" }],
+    ["a HIGH candidate beside a LOW band with no marker", { risk: "LOW", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "HIGH" }],
     ["a MEDIUM candidate beside a HIGH band", { risk: "HIGH", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "MEDIUM" }],
 ];
 for (const [name, body] of moreContradictions) {
@@ -290,7 +290,7 @@ for (const [name, body] of moreContradictions) {
     });
 }
 
-test("a demoted verdict keeps its pre-demotion level as the candidate", () => {
+test("a lower-band marker keeps its candidate", () => {
     assert.deepEqual(
         assessmentFromDetector({ risk: "MEDIUM", risk_demoted_from: "HIGH", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "HIGH" }, "risk"),
         { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "HIGH" });
@@ -368,10 +368,10 @@ test("a consistent local verdict stays assessed", () => {
 });
 
 const localContradictions: Array<[string, any]> = [
-    ["a suppression gate", { ...LOCAL_ASSESSED, gate_reason: "x" }],
-    ["another model's profile", { ...LOCAL_ASSESSED, profile_model_id: "phi4:latest" }],
+    ["a qualified result", { ...LOCAL_ASSESSED, gate_reason: "x" }],
+    ["a different identity", { ...LOCAL_ASSESSED, profile_model_id: "phi4:latest" }],
     ["a detector error", { ...LOCAL_ASSESSED, error: "engine_error" }],
-    ["an impossible demotion", { ...LOCAL_ASSESSED, risk_level: "LOW", assessed: false, not_assessed_reason: "not_assessed", risk_demoted_from: "HIGH", candidate_alert: "HIGH" }],
+    ["an impossible marker", { ...LOCAL_ASSESSED, risk_level: "LOW", assessed: false, not_assessed_reason: "not_assessed", risk_demoted_from: "HIGH", candidate_alert: "HIGH" }],
 ];
 for (const [name, body] of localContradictions) {
     test(`local verdict fails closed on ${name}`, () => {
@@ -414,7 +414,8 @@ test("audit: a delivery receipt is passed through and not counted", () => {
         { source: "proxy", risk_level: "HIGH", assessed: true, evidence_depth_limited: false, model_id: "m", profile_model_id: "m" },
         { source: "governance_push", event_type: "governance_detection_push", risk_level: "HIGH" },
     ] });
-    assert.deepEqual(out.events[1], { source: "governance_push", event_type: "governance_detection_push", record_kind: "delivery_receipt" });
+    assert.equal(out.events[1].record_kind, "delivery_receipt");
+    assert.equal("risk_level" in out.events[1], false);
     assert.deepEqual(out.summary, { LOW: 0, MEDIUM: 0, HIGH: 1, NOT_ASSESSED: 0, CANDIDATE_MEDIUM: 0, CANDIDATE_HIGH: 0 });
 });
 
@@ -423,22 +424,19 @@ test("audit: a delivery receipt is passed through and not counted", () => {
 // 6. Review round 3 probes
 // ---------------------------------------------------------------------------
 
-test("audit: the service's assessment object is used, and stored fields keep their digest scope", () => {
+test("audit: the service's assessment object is used, and the export carries hashes over the exported view", () => {
     const out = normaliseAuditLog({ events: [
         { source: "passthrough", detection_id: "pt", risk_level: "HIGH", this_hash: "h1", prev_hash: "h0",
-          record_kind: "detection", assessment: { assessed: false, not_assessed_reason: "unknown", candidate_alert: "HIGH" },
-          read_time_fields: ["record_kind", "assessment", "read_time_fields"] },
+          record_kind: "detection", assessment: { assessed: false, not_assessed_reason: "unknown", candidate_alert: "HIGH" } },
         { source: "passthrough", detection_id: "rf", risk_level: "HIGH", action_taken: "refuse", record_kind: "refusal" },
         { source: "governance_push", detection_id: "pt", risk_level: "LOW", record_kind: "delivery_receipt", delivery_status: "delivered" },
     ] });
     const [det, refusal, receipt] = out.events;
     assert.deepEqual([det.risk_level, det.not_assessed_reason, det.candidate_alert], ["NOT_ASSESSED", "not_assessed", "HIGH"]);
-    assert.equal(det.stored_this_hash, "h1");
-    assert.match(det.hash_scope, /stored record, not this view/);
-    assert.equal("this_hash" in det, false);
-    assert.equal("assessment" in det, false);
+    assert.match(det.view_hash, /^[0-9a-f]{64}$/);
+    assert.match(out.export_hash, /^[0-9a-f]{64}$/);
+    for (const k of ["this_hash", "prev_hash", "assessment", "stored_this_hash", "delivery_status"]) assert.equal(k in det || k in receipt, false);
     for (const r of [refusal, receipt]) assert.equal("risk_level" in r, false, "no band on a non-detection row");
-    assert.equal(receipt.delivery_status, "delivered");
     assert.doesNotMatch(JSON.stringify(out.events), /"LOW"/);
     assert.deepEqual(out.summary, { LOW: 0, MEDIUM: 0, HIGH: 0, NOT_ASSESSED: 1, CANDIDATE_MEDIUM: 0, CANDIDATE_HIGH: 1 });
 });
@@ -452,17 +450,9 @@ test("audit: an incoherent service assessment fails closed", () => {
                      [["NOT_ASSESSED", "unknown", null], ["NOT_ASSESSED", "unknown", null]]);
 });
 
-test("audit raw: the stored records come back unchanged", async () => {
-    const body = { events: [{ source: "proxy", risk_level: "HIGH", this_hash: "h1" }], summary: { HIGH: 1 } };
-    const restore = withFetch(() => json(200, body));
-    try {
-        const out: any = await new ProxyClient("http://localhost:8098", 1.0, "https://hosted.example.test", "ak_live_DUMMYDUMMYDUMMY00").get_audit_log(undefined, 50, true);
-        assert.deepEqual(out, body);
-    } finally { restore(); }
-});
 
 const identityContradictions: Array<[string, any]> = [
-    ["an explicit null profile id", { ...LOCAL_ASSESSED, profile_model_id: null }],
+    ["an explicit null identity", { ...LOCAL_ASSESSED, profile_model_id: null }],
     ["a model other than the one requested", { ...LOCAL_ASSESSED, model_id: "llama3:8b", profile_model_id: "llama3:8b" }],
 ];
 for (const [name, body] of identityContradictions) {
@@ -477,7 +467,7 @@ test("a verdict about the requested model, in another case, stays assessed", () 
                      { risk_level: "LOW", assessed: true });
 });
 
-test("the capped-HIGH shape the local verifier now sends keeps its HIGH candidate", () => {
+test("a MEDIUM band with a HIGH candidate keeps the candidate", () => {
     assert.deepEqual(assessmentFromDetector({ risk_level: "MEDIUM", risk_demoted_from: "HIGH", assessed: false,
         not_assessed_reason: "not_assessed", candidate_alert: "HIGH", evidence_depth_limited: true, source: "local" }, "risk_level", "gpt-4"),
         { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "HIGH" });
@@ -498,9 +488,9 @@ test("audit: a clean nested assessment stays assessed", () => {
 
 for (const [name, change] of [
     ["limited evidence", { evidence_depth_limited: true }],
-    ["a suppression gate", { gate_reason: "x" }],
+    ["a qualified result", { gate_reason: "x" }],
     ["a detector error", { error: "engine_error" }],
-    ["another model's profile", { profile_model_id: "phi4:latest" }],
+    ["a different identity", { profile_model_id: "phi4:latest" }],
 ] as const) {
     test(`audit: a nested affirmative assessment beside ${name} fails closed`, () => {
         const row = normaliseAuditLog({ events: [{ ...NESTED_OK, ...change }] }).events[0];
@@ -517,20 +507,12 @@ test("audit: an interception refusal is a refusal, even if labelled a detection"
     assert.equal(out.summary.NOT_ASSESSED, 0);
 });
 
-test("a scoring profile for another model fails closed even with no model echo", () => {
+test("a different supplied identity fails closed even with no model echo", () => {
     const { model_id: _m, ...noEcho } = LOCAL_ASSESSED as any; void _m;
     assert.deepEqual(assessmentFromDetector({ ...noEcho, profile_model_id: "llama3:8b" }, "risk_level", "phi4:14b"),
                      { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "unknown" });
 });
 
-test("audit raw asks the service for its raw mode", async () => {
-    let seen = "";
-    const restore = withFetch((u) => { seen = u; return json(200, { events: [] }); });
-    try {
-        await new ProxyClient("http://localhost:8098", 1.0, "https://hosted.example.test", "ak_live_DUMMYDUMMYDUMMY00").get_audit_log(undefined, 10, true);
-        assert.match(seen, /[?&]raw=true\b/);
-    } finally { restore(); }
-});
 
 
 // ---------------------------------------------------------------------------
@@ -557,19 +539,11 @@ for (const key of ["model_id", "model", "profile_model_id"]) {
     });
 }
 
-test("audit raw against an older producer that ignores raw reports raw as unavailable", async () => {
-    const restore = withFetch(() => json(200, { events: [{ source: "proxy", risk_level: "HIGH", this_hash: "h",
-        record_kind: "detection", assessment: { assessed: false, not_assessed_reason: "unknown", candidate_alert: "HIGH" } }] }));
-    try {
-        const out: any = await new ProxyClient("http://localhost:8098", 1.0, "https://hosted.example.test", "ak_live_DUMMYDUMMYDUMMY00").get_audit_log(undefined, 10, true);
-        assert.deepEqual(out, { events: [], summary: {}, error: "raw_unavailable_from_this_local_proxy" });
-    } finally { restore(); }
-});
 
 
 for (const [name, change] of [
-    ["a model alias that disagrees with the scoring profile", { model: "phi4:14b", profile_model_id: "llama3:8b", model_id: undefined }],
-    ["a model alias that disagrees with matching model_id and profile", { model: "llama3:8b" }],
+    ["a model alias that disagrees with the supplied identity", { model: "phi4:14b", profile_model_id: "llama3:8b", model_id: undefined }],
+    ["a model alias that disagrees with the other supplied identities", { model: "llama3:8b" }],
 ] as const) {
     test(`audit: ${name} fails closed with no requested model`, () => {
         const row = normaliseAuditLog({ events: [{ ...NESTED_OK, ...change }] }).events[0];
@@ -604,12 +578,21 @@ for (const r of ["unlisted_reason", "provider_error"]) {
     });
 }
 
-test("audit view never carries fields that describe how a verdict was reached", () => {
+test("audit view is a typed allowlist: nested, long and unknown fields never appear", () => {
     const out = normaliseAuditLog({ events: [
         { source: "proxy", risk_level: "HIGH", assessed: true, evidence_depth_limited: false, detection_id: "d1",
-          extra_method: "m", extra_features: ["f"], profile_version: "1", metrics: { a: 1 } },
+          timestamp: "2026-01-01T00:00:00Z", model_id: "m", message: "x".repeat(500), nested: { a: { b: 1 } },
+          extra_method: "m", extra_features: ["f"], metrics: { a: 1 } },
     ] });
-    assert.deepEqual(Object.keys(out.events[0]).sort(), ["assessed", "detection_id", "record_kind", "risk_level", "source"]);
+    assert.deepEqual(Object.keys(out.events[0]).sort(),
+        ["assessed", "id", "model", "record_kind", "risk_level", "timestamp", "view_hash"]);
+    assert.equal(out.events[0].id, "d1");
+});
+
+test("the audit export hash changes when any row changes", () => {
+    const ev = (id: string) => ({ events: [{ source: "proxy", risk_level: "HIGH", assessed: true, evidence_depth_limited: false, detection_id: id }] });
+    assert.notEqual(normaliseAuditLog(ev("a")).export_hash, normaliseAuditLog(ev("b")).export_hash);
+    assert.equal(normaliseAuditLog(ev("a")).export_hash, normaliseAuditLog(ev("a")).export_hash);
 });
 
 test("a local verdict passes on only the verdict fields", async () => {
