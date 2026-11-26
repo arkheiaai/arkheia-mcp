@@ -600,3 +600,25 @@ test("a local verdict passes on only the verdict fields", async () => {
         confidence: 0.9, detection_id: "d9", extra_method: "m", extra_features: ["f"], model_id: "m" }); });
     assert.deepEqual(Object.keys(r).sort(), ["assessed", "confidence", "detection_id", "risk_level", "source"]);
 });
+
+test("metadata is validated with fixed fallbacks", async () => {
+    const r = await verifyWith(() => json(200, { risk_level: "HIGH", assessed: true, evidence_depth_limited: false,
+        confidence: { x: "zz" }, detection_id: { x: "zz" }, model_id: "m", error: undefined, source: { x: "zz" } }));
+    assert.deepEqual(r, { risk_level: "HIGH", assessed: true, confidence: 0, source: "local" });
+    const e = await verifyWith(() => json(200, { risk_level: "LOW", assessed: false, not_assessed_reason: "r", error: "zz detail", detection_id: "bad id" }));
+    assert.equal((e as any).error, "service_error");
+    assert.doesNotMatch(JSON.stringify(e), /zz/);
+});
+
+test("audit: an unknown record kind does not hide a detection; the hash escapes non-ASCII; bad band values are safe", () => {
+    const out = normaliseAuditLog({ events: [
+        { source: "proxy", record_kind: "zz", risk_level: "HIGH", assessed: true, evidence_depth_limited: false, detection_id: "local-café", timestamp: 1700000000 },
+        { source: "proxy", risk_level: "toString", assessed: false, not_assessed_reason: "r", candidate_alert: "HIGH", risk_demoted_from: "constructor" },
+    ], error: "zz detail" });
+    assert.equal(out.events[0].record_kind, "detection");
+    assert.equal(out.summary.HIGH, 1);
+    assert.equal(out.events.length, 2);
+    assert.equal(out.error, "audit_unavailable");
+    assert.equal(out.hash_scheme, "sha256-canonical-json-v1");
+    assert.doesNotMatch(JSON.stringify(out), /zz/);
+});

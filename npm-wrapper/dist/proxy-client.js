@@ -104,10 +104,9 @@ class ProxyClient {
             const raw = await resp.json();
             // A local proxy's verdict goes through the same fail-closed reading as the hosted one.
             return (0, assessment_js_1.applyAssessment)({
-                ...(raw?.confidence !== undefined ? { confidence: raw.confidence } : {}),
-                ...(raw?.detection_id !== undefined ? { detection_id: raw.detection_id } : {}),
-                ...(raw?.error !== undefined && raw?.error !== null ? { error: raw.error } : {}),
-                source: raw?.source ?? "local",
+                ...(0, assessment_js_1.safeMeta)(raw),
+                ...(raw?.error !== undefined && raw?.error !== null ? { error: "service_error" } : {}),
+                source: (0, assessment_js_1.safeSource)(raw?.source),
             }, (0, assessment_js_1.assessmentFromDetector)(raw, "risk_level", model_id));
         }
         catch (e) {
@@ -162,8 +161,7 @@ class ProxyClient {
             // Map hosted response format to local format. The band is passed only when the service
             // says it assessed the response (Change A); otherwise NOT_ASSESSED with its reason.
             return (0, assessment_js_1.applyAssessment)({
-                confidence: data?.confidence || 0.0,
-                detection_id: data?.detection_id,
+                ...(0, assessment_js_1.safeMeta)(data),
                 source: "hosted",
             }, (0, assessment_js_1.assessmentFromDetector)(data, "risk", model_id));
         }

@@ -15,11 +15,11 @@ arkheia_verify(prompt=<original prompt>, response=<model output>, model=<model i
 - **HIGH risk**: Warn the user that the response may be fabricated. Include the `detection_id`. Still show the response — never hide or suppress it. Ask the user if they want you to verify with a different model.
 - **MEDIUM risk**: Show the response with a brief note (e.g. "Arkheia raised a warning on this").
 - **LOW risk**: Show normally. No annotation needed.
-- **NOT_ASSESSED or UNKNOWN**: Not a clean result. Verify by other means. Include the `detection_id` in your response.
+- **NOT_ASSESSED or UNKNOWN**: Not a clean result. Verify by other means. Include the `detection_id` in your response. If `candidate_alert` is MEDIUM or HIGH, check the specific claims now.
 
 ## Cross-Model Verification
 
-When a HIGH or UNKNOWN risk is detected, offer to verify using a different model:
+When HIGH, NOT_ASSESSED or UNKNOWN is returned, offer to verify using a different model:
 - `run_grok` — xAI Grok
 - `run_gemini` — Google Gemini
 - `run_ollama` — local Ollama model (no network egress)
@@ -43,6 +43,6 @@ Store entities when you learn something the user would want persisted across ses
 ## Key Rules
 
 1. Never hide a response from the user regardless of risk level
-2. Always include the `detection_id` when reporting HIGH or UNKNOWN risk
+2. Always include the `detection_id` when reporting HIGH, NOT_ASSESSED or UNKNOWN
 3. Call `arkheia_verify` proactively — do not wait for the user to ask
 4. Audit logging happens automatically through `arkheia_verify` — no extra action needed

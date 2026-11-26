@@ -116,7 +116,7 @@ async def arkheia_audit_log(session_id: str | None = None, limit: int = 50) -> d
         limit:      Max number of events to return (default 50, max 500)
 
     Returns:
-        events:  List of detection events with timestamps, risk levels, detection_ids
+        events:  List of detection events with timestamps, risk levels, ids
         summary: Aggregate counts by risk level {"LOW": n, "MEDIUM": n, ...}
         error:   Set if audit log could not be retrieved
     """

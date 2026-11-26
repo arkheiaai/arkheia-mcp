@@ -13,6 +13,7 @@ Before presenting any substantive response to the user:
 - **LOW**: Present normally
 - **MEDIUM**: Present with caveat — "Arkheia raised a warning on this response. Key claims should be verified."
 - **HIGH**: Do not present as-is. Investigate the specific claims against known sources. If claims cannot be verified, regenerate or escalate to the user with the detection result.
+- **NOT_ASSESSED** (or UNKNOWN): Not a clean result. Verify by other means and include the `detection_id`. If `candidate_alert` is MEDIUM or HIGH, check the specific claims now.
 
 ### Sub-Agent Outputs
 When spawning background agents or parallel workers:

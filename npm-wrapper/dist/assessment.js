@@ -5,7 +5,8 @@
  * NOT_ASSESSED, and the word LOW appears nowhere in it.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.NOT_ASSESSED = exports.ALL_REASONS = exports.CLIENT_REASONS = exports.ASSESSED_BANDS = void 0;
+exports.safeSource = exports.NOT_ASSESSED = exports.ALL_REASONS = exports.CLIENT_REASONS = exports.ASSESSED_BANDS = void 0;
+exports.safeMeta = safeMeta;
 exports.assessmentFromDetector = assessmentFromDetector;
 exports.notAssessed = notAssessed;
 exports.applyAssessment = applyAssessment;
@@ -42,11 +43,23 @@ function serviceCandidate(raw, band) {
     return candidate === level ? candidate : "invalid";
 }
 const RANK = { LOW: 1, MEDIUM: 2, HIGH: 3 };
+const rankOf = (v) => typeof v === "string" && Object.prototype.hasOwnProperty.call(RANK, v) ? RANK[v] : undefined;
+const ID_PATTERN = /^[A-Za-z0-9_.:-]{1,100}$/;
+const SOURCES = ["proxy", "local"];
+/** The only non-verdict fields a result may carry, each validated, with a fixed fallback. */
+function safeMeta(raw) {
+    const c = raw?.confidence;
+    const confidence = typeof c === "number" && Number.isFinite(c) && c >= 0 && c <= 1 ? c : 0.0;
+    const id = raw?.detection_id;
+    return { confidence, ...(typeof id === "string" && ID_PATTERN.test(id) ? { detection_id: id } : {}) };
+}
+const safeSource = (v) => (typeof v === "string" && SOURCES.includes(v) ? v : "local");
+exports.safeSource = safeSource;
 function candidateFitsBand(raw, band) {
     if (absent(raw?.risk_demoted_from))
         return true;
-    const from = RANK[raw.risk_demoted_from];
-    const to = RANK[band];
+    const from = rankOf(raw.risk_demoted_from);
+    const to = rankOf(band);
     return from !== undefined && to !== undefined && to >= 2 && from === to + 1;
 }
 const sameModel = (a, b) => typeof a === "string" && typeof b === "string" && a.trim().toLowerCase() === b.trim().toLowerCase();
@@ -143,18 +156,16 @@ function finishFromOllama(data) {
 }
 const DETECTION_SOURCES = ["proxy", "passthrough", "interception"];
 /** What an audit row records, by the service's own label when it sends one. */
+const RECORD_KINDS = ["detection", "refusal", "delivery_receipt", "operational"];
 function auditRecordKind(e) {
     const refused = e?.action_taken === "refused" || e?.action_taken === "refuse" || e?.risk_level === "REFUSED"
         || e?.event_type === "passthrough.forward_refused";
     if (refused)
         return "refusal";
-    if (typeof e?.record_kind === "string")
+    if (typeof e?.record_kind === "string" && RECORD_KINDS.includes(e.record_kind))
         return e.record_kind;
     if (e?.source === "governance_push" || e?.event_type === "governance_detection_push")
         return "delivery_receipt";
-    if (e?.event_type === "passthrough.forward_refused" || e?.action_taken === "refuse"
-        || e?.action_taken === "refused" || e?.risk_level === "REFUSED")
-        return "refusal";
     if (DETECTION_SOURCES.includes(e?.source))
         return "detection";
     return "operational";
@@ -188,9 +199,10 @@ function canonical(v) {
     if (Array.isArray(v))
         return `[${v.map(canonical).join(",")}]`;
     if (v !== null && typeof v === "object") {
-        return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonical(v[k])}`).join(",")}}`;
+        return `{${Object.keys(v).sort().map((k) => `${canonical(k)}:${canonical(v[k])}`).join(",")}}`;
     }
-    return JSON.stringify(v);
+    // Non-ASCII is written as lower-case \uXXXX so every client hashes the same bytes.
+    return JSON.stringify(v).replace(/[\u0080-\uffff]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 const sha256 = (t) => (0, node_crypto_1.createHash)("sha256").update(t).digest("hex");
 /**
@@ -209,7 +221,7 @@ function normaliseAuditLog(result) {
         const id = safeText(e.detection_id);
         if (id !== undefined)
             view.id = id;
-        const ts = typeof e.timestamp === "number" && Number.isFinite(e.timestamp) ? e.timestamp : safeText(e.timestamp);
+        const ts = typeof e.timestamp === "number" && Number.isSafeInteger(e.timestamp) ? e.timestamp : safeText(e.timestamp);
         if (ts !== undefined)
             view.timestamp = ts;
         const model = safeText(e.model_id) ?? safeText(e.model);
@@ -233,9 +245,9 @@ function normaliseAuditLog(result) {
     }
     if (invalid)
         summary.INVALID_ROWS = invalid;
-    const out = { events: rows, summary, export_hash: sha256(canonical(rows)) };
-    const error = safeText(result?.error);
-    if (error !== undefined)
-        out.error = error;
+    const out = { events: rows, summary, hash_scheme: "sha256-canonical-json-v1",
+        export_hash: sha256(canonical(rows)) };
+    if (typeof result?.error === "string" && result.error)
+        out.error = "audit_unavailable";
     return out;
 }

@@ -44,7 +44,7 @@ Commands for Codex, Gemini, Grok and where each stores its configuration are in 
 
 ### The Python server in this repository
 
-This repository also contains a Python MCP server (`python -m mcp_server.server`, run from a clone with `PYTHONPATH` set to the clone). It has nine tools and does **not** include `arkheia_feedback`, `arkheia_report` or `arkheia_reports`. It also does not yet report `NOT_ASSESSED`: a result it could not assess can still read as LOW. Use the npm package above.
+This repository also contains a Python MCP server (`python -m mcp_server.server`, run from a clone with `PYTHONPATH` set to the clone). It has nine tools and does **not** include `arkheia_feedback`, `arkheia_report` or `arkheia_reports`. Like the npm package, it reports `NOT_ASSESSED` for a result it could not assess, never a clean LOW; a failure to reach the service comes back as `UNKNOWN` with `assessed: false`. Use the npm package above.
 
 ## Your First Detection
 

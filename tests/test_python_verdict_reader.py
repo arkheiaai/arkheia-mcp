@@ -89,7 +89,7 @@ def test_only_typed_fields_are_passed_on():
     out = _run(_local(body))
     assert set(out) <= {"risk_level", "assessed", "not_assessed_reason", "candidate_alert", "confidence",
                         "detection_id", "gate_action", "source", "error"}
-    assert "detection_id" not in out and "confidence" not in out and "gate_action" not in out
+    assert "detection_id" not in out and out["confidence"] == 0.0 and "gate_action" not in out
 
 
 def test_root_server_builds_fresh_fields():
@@ -134,3 +134,41 @@ def test_root_server_audit_uses_the_same_view():
     with patch("httpx.AsyncClient", return_value=client):
         out = _run(server.arkheia_audit_log())
     assert "export_hash" in out and "this_hash" not in json.dumps(out)
+
+
+def test_metadata_is_validated_with_fixed_fallbacks():
+    body = {**CLEAN, "risk_level": "HIGH", "confidence": {"x": "sentinel_value"}, "detection_id": {"x": "sentinel_value"},
+            "gate_action": "sentinel_value"}
+    out = _run(_local(body))
+    assert out["confidence"] == 0.0 and "detection_id" not in out and "gate_action" not in out
+    assert "sentinel_value" not in json.dumps(out)
+    out = _run(_local({**CLEAN, "risk_level": "HIGH", "confidence": 7, "detection_id": "has space"}))
+    assert out["confidence"] == 0.0 and "detection_id" not in out
+    out = _run(_hosted({"risk": "LOW", "assessed": False, "not_assessed_reason": "r", "error": "sentinel_value text"}))
+    assert out["error"] == "service_error" and "sentinel_value" not in json.dumps(out)
+
+
+def test_audit_unknown_kind_does_not_hide_a_detection_and_bad_rows_are_isolated():
+    body = {"events": [
+        {"source": "proxy", "record_kind": "sentinel_value", "risk_level": "HIGH", "assessed": True,
+         "evidence_depth_limited": False, "detection_id": "d1"},
+        {"source": "proxy", "risk_level": ["x"], "assessed": False, "not_assessed_reason": "r",
+         "candidate_alert": "HIGH", "risk_demoted_from": {"a": 1}},
+        {"source": "proxy", "risk_level": "MEDIUM", "assessed": False, "not_assessed_reason": "r",
+         "candidate_alert": "HIGH", "risk_demoted_from": ["x"]},
+    ], "error": "sentinel_value"}
+    c = ProxyClient("http://localhost:8098", api_key=None)
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=_resp(body)):
+        out = _run(c.get_audit_log())
+    assert out["events"][0]["record_kind"] == "detection" and out["events"][0]["risk_level"] == "HIGH"
+    assert len(out["events"]) == 3 and out["summary"]["HIGH"] == 1
+    assert "sentinel_value" not in json.dumps(out) and out["error"] == "audit_unavailable"
+
+
+def test_hash_uses_ascii_escaped_canonical_json():
+    body = {"events": [{"source": "proxy", "risk_level": "HIGH", "assessed": True, "evidence_depth_limited": False,
+                        "detection_id": "local-café", "timestamp": 1700000000.0}]}
+    c = ProxyClient("http://localhost:8098", api_key=None)
+    with patch("httpx.AsyncClient.get", new_callable=AsyncMock, return_value=_resp(body)):
+        out = _run(c.get_audit_log())
+    assert out["events"][0]["timestamp"] == 1700000000 and out["hash_scheme"] == "sha256-canonical-json-v1"

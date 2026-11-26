@@ -11,6 +11,7 @@ Failures surface as UNKNOWN risk with error field set.
 import hashlib
 import json
 import logging
+import re
 import os
 from typing import Optional
 
@@ -216,6 +217,14 @@ _TEXT_MAX = 200
 _ID_KEYS = ("profile_model_id", "model_id", "model")
 
 
+def _rank(v):
+    return _RANK[v] if isinstance(v, str) and v in _RANK else None
+
+
+_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,100}$")
+_GATE_ACTIONS = ("block", "advise")
+
+
 def _absent(v) -> bool:
     return v is None
 
@@ -246,7 +255,7 @@ def _candidate(raw: dict, band):
     lower = raw.get("risk_demoted_from")
     if _absent(lower):
         return cand if cand == band else "invalid"
-    from_, to = _RANK.get(lower), _RANK.get(band)
+    from_, to = _rank(lower), _rank(band)
     if from_ is None or to is None or not (to >= 2 and from_ == to + 1):
         return "invalid"
     return cand if cand == lower else "invalid"
@@ -291,19 +300,19 @@ def assess(raw: dict, band_field: str, requested_model=None) -> dict:
 
 
 def verdict_fields(raw: dict, band_field: str, requested_model=None, source=None) -> dict:
-    """The caller-facing result, built fresh: normalised verdict plus typed safe fields."""
+    """The caller-facing result, built fresh: normalised verdict plus validated public fields."""
     out = assess(raw, band_field, requested_model)
-    conf = raw.get("confidence") if isinstance(raw, dict) else None
-    if isinstance(conf, (int, float)) and not isinstance(conf, bool):
-        out["confidence"] = float(conf)
-    if isinstance(raw, dict):
-        for key in ("detection_id", "gate_action"):
-            v = raw.get(key)
-            if isinstance(v, str) and 0 < len(v) <= _TEXT_MAX:
-                out[key] = v
-        err = raw.get("error")
-        if isinstance(err, str) and 0 < len(err) <= _TEXT_MAX:
-            out["error"] = err
+    raw = raw if isinstance(raw, dict) else {}
+    conf = raw.get("confidence")
+    ok = isinstance(conf, (int, float)) and not isinstance(conf, bool) and 0 <= conf <= 1
+    out["confidence"] = float(conf) if ok else 0.0
+    did = raw.get("detection_id")
+    if isinstance(did, str) and _ID_PATTERN.match(did):
+        out["detection_id"] = did
+    if raw.get("gate_action") in _GATE_ACTIONS:
+        out["gate_action"] = raw["gate_action"]
+    if raw.get("error") is not None:
+        out["error"] = "service_error"
     if source:
         out["source"] = source
     return out
@@ -326,11 +335,14 @@ def _text(v):
     return v if isinstance(v, str) and len(v) <= _TEXT_MAX else None
 
 
+_RECORD_KINDS = ("detection", "refusal", "delivery_receipt", "operational")
+
+
 def _record_kind(e: dict) -> str:
     if (e.get("action_taken") in ("refused", "refuse") or e.get("risk_level") == "REFUSED"
             or e.get("event_type") == "passthrough.forward_refused"):
         return "refusal"
-    if isinstance(e.get("record_kind"), str):
+    if isinstance(e.get("record_kind"), str) and e["record_kind"] in _RECORD_KINDS:
         return e["record_kind"]
     if e.get("source") == "governance_push" or e.get("event_type") == "governance_detection_push":
         return "delivery_receipt"
@@ -370,33 +382,39 @@ def audit_view(body) -> dict:
         if not isinstance(e, dict):
             invalid += 1
             continue
-        kind = _record_kind(e)
-        row: dict = {"record_kind": kind}
-        if _text(e.get("detection_id")) is not None:
-            row["id"] = e["detection_id"]
-        ts = e.get("timestamp")
-        if isinstance(ts, (int, float)) and not isinstance(ts, bool):
-            row["timestamp"] = ts
-        elif _text(ts) is not None:
-            row["timestamp"] = ts
-        model = _text(e.get("model_id")) or _text(e.get("model"))
-        if model:
-            row["model"] = model
-        if kind == "detection":
-            row.update(_row_assessment(e))
-            summary[row["risk_level"]] = summary.get(row["risk_level"], 0) + 1
-            if row.get("candidate_alert") == "MEDIUM":
-                summary["CANDIDATE_MEDIUM"] += 1
-            if row.get("candidate_alert") == "HIGH":
-                summary["CANDIDATE_HIGH"] += 1
+        try:
+            kind = _record_kind(e)
+            row: dict = {"record_kind": kind}
+            if _text(e.get("detection_id")) is not None:
+                row["id"] = e["detection_id"]
+            ts = e.get("timestamp")
+            if isinstance(ts, float) and ts.is_integer():
+                ts = int(ts)
+            if isinstance(ts, int) and not isinstance(ts, bool) and abs(ts) <= 2**53 - 1:
+                row["timestamp"] = ts
+            elif _text(ts) is not None:
+                row["timestamp"] = ts
+            model = _text(e.get("model_id")) or _text(e.get("model"))
+            if model:
+                row["model"] = model
+            if kind == "detection":
+                row.update(_row_assessment(e))
+                summary[row["risk_level"]] = summary.get(row["risk_level"], 0) + 1
+                if row.get("candidate_alert") == "MEDIUM":
+                    summary["CANDIDATE_MEDIUM"] += 1
+                if row.get("candidate_alert") == "HIGH":
+                    summary["CANDIDATE_HIGH"] += 1
+        except Exception:
+            invalid += 1
+            continue
         row["view_hash"] = _sha256(_canonical(row))
         rows.append(row)
     if invalid:
         summary["INVALID_ROWS"] = invalid
-    out = {"events": rows, "summary": summary, "export_hash": _sha256(_canonical(rows))}
-    err = _text(body.get("error")) if isinstance(body, dict) else None
-    if err:
-        out["error"] = err
+    out = {"events": rows, "summary": summary, "hash_scheme": "sha256-canonical-json-v1",
+           "export_hash": _sha256(_canonical(rows))}
+    if isinstance(body, dict) and isinstance(body.get("error"), str) and body["error"]:
+        out["error"] = "audit_unavailable"
     return out
 
 

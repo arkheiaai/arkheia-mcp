@@ -1,6 +1,6 @@
 import { URLSearchParams } from 'url';
 import { isArkheiaHostedOrigin, displayOrigin, describeTransportError, HOSTED_API_URL } from './egress.js';
-import { Reason, applyAssessment, assessmentFromDetector, normaliseAuditLog, notAssessed } from './assessment.js';
+import { Reason, applyAssessment, assessmentFromDetector, normaliseAuditLog, notAssessed, safeMeta, safeSource } from './assessment.js';
 
 // Node.js native fetch doesn't have a global logger
 const logger = {
@@ -151,10 +151,9 @@ export class ProxyClient {
             const raw: any = await resp.json();
             // A local proxy's verdict goes through the same fail-closed reading as the hosted one.
             return applyAssessment({
-                ...(raw?.confidence !== undefined ? { confidence: raw.confidence } : {}),
-                ...(raw?.detection_id !== undefined ? { detection_id: raw.detection_id } : {}),
-                ...(raw?.error !== undefined && raw?.error !== null ? { error: raw.error } : {}),
-                source: raw?.source ?? "local",
+                ...safeMeta(raw),
+                ...(raw?.error !== undefined && raw?.error !== null ? { error: "service_error" } : {}),
+                source: safeSource(raw?.source),
             },
                                    assessmentFromDetector(raw, "risk_level", model_id)) as VerifyResult;
         } catch (e: any) {
@@ -218,8 +217,7 @@ export class ProxyClient {
             // Map hosted response format to local format. The band is passed only when the service
             // says it assessed the response (Change A); otherwise NOT_ASSESSED with its reason.
             return applyAssessment({
-                confidence: data?.confidence || 0.0,
-                detection_id: data?.detection_id,
+                ...safeMeta(data),
                 source: "hosted",
             }, assessmentFromDetector(data, "risk", model_id)) as VerifyResult;
         } catch (e: any) {
