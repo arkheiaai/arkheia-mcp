@@ -1,6 +1,6 @@
 # Arkheia MCP Server — Fabrication Detection for AI Agents
 
-Screens model responses for signs of fabrication, using behavioural fingerprinting.
+Screens model responses for signs of fabrication.
 
 Coverage and accuracy vary by model and are improving. Every result says whether it could be assessed: a result we could not assess comes back `NOT_ASSESSED` with a reason, and is never shown as a clean LOW.
 
@@ -158,13 +158,13 @@ The tool retries by itself only when the request provably never left your machin
 
 ## Reading a result
 
-- `assessed: true` with `risk_level` LOW, MEDIUM or HIGH: the response was scored on that model's own profile.
-- `risk_level: "NOT_ASSESSED"`: detection could not score this response. It is not a clean result; verify by other means. `not_assessed_reason` says why: `no_profile`, `borrowed_profile`, `limited_evidence`, `service_unavailable`, `incomplete_response`, `provider_error`, `screening_disabled` or `unknown`.
+- `assessed: true` with `risk_level` LOW, MEDIUM or HIGH: Arkheia scored the response.
+- `risk_level: "NOT_ASSESSED"`: detection could not score this response. It is not a clean result; verify by other means. `not_assessed_reason` says why: `not_assessed`, `service_unavailable`, `incomplete_response`, `provider_error`, `screening_disabled` or `unknown`.
 - `candidate_alert` (MEDIUM or HIGH) on a `NOT_ASSESSED` result: an unqualified warning. Check the specific claims now.
 
-## Model coverage
+## Supported models
 
-Detection profiles exist for many popular models, and the list grows. A model without its own profile returns `NOT_ASSESSED` with `no_profile` or `borrowed_profile`. If your model needs coverage, [let us know](mailto:dmurfet@arkheia.ai).
+Coverage varies by model. If a result says `NOT_ASSESSED`, verify it yourself. If your model needs coverage, [ask us](https://github.com/arkheiaai/arkheia-mcp/issues).
 
 ## Price
 
@@ -204,7 +204,6 @@ See the [GitHub repo](https://github.com/arkheiaai/arkheia-mcp) for:
 ## Feedback
 
 - **GitHub Issues:** https://github.com/arkheiaai/arkheia-mcp/issues
-- **Email:** dmurfet@arkheia.ai
 
 Every message is read by the founder.
 

@@ -93,13 +93,13 @@ Close and reopen Claude Desktop (or restart Claude Code). The Arkheia tools will
 
 Ask Claude: "Use arkheia_verify to check this response for fabrication: 'The Eiffel Tower is located in Berlin, Germany.'"
 
-You should see a detection result with `risk_level: HIGH` and a confidence score.
+You should see a detection result with `risk_level: HIGH`.
 
 ## Available Tools
 
 | Tool | What it does |
 |------|-------------|
-| `arkheia_verify` | Score any (prompt, response, model) triple for fabrication risk. Returns LOW/MEDIUM/HIGH with confidence. |
+| `arkheia_verify` | Score any (prompt, response, model) triple for fabrication risk. Returns LOW/MEDIUM/HIGH, or NOT_ASSESSED when Arkheia could not score the response (see `assessed`). |
 | `arkheia_audit_log` | Retrieve your detection history. |
 | `run_grok` | Call xAI Grok and screen the response (requires `XAI_API_KEY`). |
 | `run_gemini` | Call Google Gemini and screen the response (requires `GOOGLE_API_KEY`). |
@@ -149,7 +149,6 @@ The free allowance is 50,000 checks a month during the launch period.
 ## Support
 
 - GitHub Issues: https://github.com/arkheiaai/arkheia-mcp/issues
-- Email: support@arkheia.ai
 - Website: https://arkheia.ai
 
 ## For AI Agents Contributing to This Repo

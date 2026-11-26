@@ -1,6 +1,6 @@
 import { URLSearchParams } from 'url';
 import { isArkheiaHostedOrigin, displayOrigin, describeTransportError, HOSTED_API_URL } from './egress.js';
-import { Reason, applyAssessment, assessmentFromDetector, normaliseAuditLog, notAssessed } from './assessment.js';
+import { Reason, applyAssessment, assessmentFromDetector, normaliseAuditLog, notAssessed, safeMeta, safeSource } from './assessment.js';
 
 // Node.js native fetch doesn't have a global logger
 const logger = {
@@ -20,9 +20,7 @@ type VerifyResult = {
     not_assessed_reason?: Reason;
     candidate_alert?: "MEDIUM" | "HIGH";
     confidence?: number;
-    features_triggered?: string[];
     detection_id?: string;
-    evidence_depth_limited?: boolean;
     source?: string;
     error?: string;
 };
@@ -152,7 +150,11 @@ export class ProxyClient {
             }
             const raw: any = await resp.json();
             // A local proxy's verdict goes through the same fail-closed reading as the hosted one.
-            return applyAssessment({ ...raw, source: raw?.source ?? "local" },
+            return applyAssessment({
+                ...safeMeta(raw),
+                ...(raw?.error !== undefined && raw?.error !== null ? { error: "service_error" } : {}),
+                source: safeSource(raw?.source),
+            },
                                    assessmentFromDetector(raw, "risk_level", model_id)) as VerifyResult;
         } catch (e: any) {
             clearTimeout(timeoutId);
@@ -215,10 +217,7 @@ export class ProxyClient {
             // Map hosted response format to local format. The band is passed only when the service
             // says it assessed the response (Change A); otherwise NOT_ASSESSED with its reason.
             return applyAssessment({
-                confidence: data?.confidence || 0.0,
-                features_triggered: data?.features_triggered || [],
-                detection_id: data?.detection_id,
-                evidence_depth_limited: data?.evidence_depth_limited ?? true,
+                ...safeMeta(data),
                 source: "hosted",
             }, assessmentFromDetector(data, "risk", model_id)) as VerifyResult;
         } catch (e: any) {
@@ -239,7 +238,6 @@ export class ProxyClient {
     async get_audit_log(
         session_id?: string,
         limit: number = 50,
-        raw: boolean = false,
     ): Promise<AuditLogResult> {
         /**
          * GET /audit/log
@@ -248,8 +246,6 @@ export class ProxyClient {
          * Note: audit log is only available from local proxy, not hosted API.
          */
         const params = new URLSearchParams({ limit: String(Math.min(limit, 500)) });
-        // raw: ask the service for its stored records unchanged, so their hashes verify as served.
-        if (raw) params.append("raw", "true");
         if (session_id) {
             params.append("session_id", session_id);
         }
@@ -272,20 +268,8 @@ export class ProxyClient {
                 logger.error(`ProxyClient: /audit/log HTTP error: ${resp.status} ${resp.statusText}`);
                 return _empty_log(`proxy_http_error_${resp.status}`);
             }
-            // Every row is read the same way as a live verdict, including old rows with no
-            // assessment fields, and the summary is counted from the normalised rows.
             const body: any = await resp.json();
-            if (!raw) return normaliseAuditLog(body) as AuditLogResult;
-            // raw: stored records only. An older service ignores ?raw=true and still sends its
-            // read-time view (record_kind / assessment / read_time_fields, or top-level assessment
-            // fields it added); that is not a stored record, so say raw is unavailable.
-            const events = Array.isArray(body?.events) ? body.events : [];
-            const projected = events.some((e: any) => e && typeof e === "object"
-                && ("record_kind" in e || "read_time_fields" in e || "assessment" in e));
-            if (projected) {
-                return { events: [], summary: {}, error: "raw_unavailable_from_this_local_proxy" } as AuditLogResult;
-            }
-            return body as AuditLogResult;
+            return normaliseAuditLog(body) as AuditLogResult;
         } catch (e: any) {
             clearTimeout(timeoutId);
             if (e.name === 'AbortError') {

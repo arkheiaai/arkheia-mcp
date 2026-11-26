@@ -342,7 +342,7 @@ test("list returns only whitelisted report fields; delete needs a 204", async ()
 });
 
 test("results never carry risk or detection detail", async () => {
-    mockFetch(() => json(201, { feedback_id: FID, risk: "HIGH", features_triggered: ["x"], confidence: 0.9 }));
+    mockFetch(() => json(201, { feedback_id: FID, risk: "HIGH", confidence: 0.9 }));
     const r = JSON.stringify(await client().send_feedback({ message: "hello there" }));
     assert.ok(!/risk|feature|confidence|HIGH/i.test(r));
 });
@@ -359,7 +359,7 @@ test("tools are in the allowlist", () => {
 test("arkheia_verify output carries detection_id (hosted result)", async () => {
     mockFetch((url) => {
         if (url.startsWith("http://localhost")) throw new TypeError("fetch failed");
-        return json(200, { risk: "LOW", confidence: 0.1, features_triggered: [], detection_id: DID });
+        return json(200, { risk: "LOW", confidence: 0.1, detection_id: DID });
     });
     const p = new ProxyClient("http://localhost:8098", 1.0, BASE, KEY);
     const out: any = await p.verify("p", "r", "m");
@@ -591,7 +591,7 @@ test("every request with a JSON body sets Content-Type: application/json", async
         }
         // local proxy verify path alone
         calls = [];
-        mockFetch(() => json(200, { risk_level: "LOW", confidence: 0, features_triggered: [] }));
+        mockFetch(() => json(200, { risk_level: "LOW", confidence: 0 }));
         await new ProxyClient("http://localhost:8098", 1.0, BASE, KEY).verify("p", "r", "m");
         assert.equal(ctype(calls[0].init), "application/json");
         // requests without a body (list, delete, audit log) carry none
@@ -640,7 +640,7 @@ test("verify result says whether it is reportable: hosted yes, local no, no chec
     // hosted
     mockFetch((url) => {
         if (url.startsWith("http://localhost")) throw new TypeError("fetch failed");
-        return json(200, { risk: "LOW", confidence: 0.1, features_triggered: [], detection_id: DID });
+        return json(200, { risk: "LOW", confidence: 0.1, detection_id: DID });
     });
     let out: any = withReportability(await new ProxyClient("http://localhost:8098", 1.0, BASE, KEY).verify("p", "r", "m"));
     assert.equal(out.reportable, true);
@@ -648,7 +648,7 @@ test("verify result says whether it is reportable: hosted yes, local no, no chec
     assert.equal(out.detection_id, DID);
     assert.equal(out.report_note, undefined);
     // local proxy answered (its id is not a hosted id)
-    mockFetch(() => json(200, { risk_level: "LOW", confidence: 0, features_triggered: [], detection_id: "local-abc" }));
+    mockFetch(() => json(200, { risk_level: "LOW", confidence: 0, detection_id: "local-abc" }));
     out = withReportability(await new ProxyClient("http://localhost:8098", 1.0, BASE, KEY).verify("p", "r", "m"));
     assert.equal(out.reportable, false);
     assert.equal(out.report_with, undefined);

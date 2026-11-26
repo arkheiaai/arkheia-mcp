@@ -11,6 +11,8 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 
+from mcp_server.proxy_client import audit_view, signal_only, verdict_fields
+
 ARKHEIA_PROXY_URL = os.getenv("ARKHEIA_PROXY_URL", "http://localhost:8099")
 
 mcp = FastMCP("arkheia-trust")
@@ -27,10 +29,9 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
         model:    The model identifier (e.g. 'gpt-4o', 'llama-3-70b')
 
     Returns:
-        risk_level:   LOW / MEDIUM / HIGH
+        risk_level:   LOW / MEDIUM / HIGH / NOT_ASSESSED
+        assessed:     whether Arkheia could score this response
         confidence:   0.0 – 1.0
-        features:     Which signals triggered
-        evidence:     Specific spans of concern (if any)
     """
     async with httpx.AsyncClient() as client:
         r = await client.post(
@@ -39,7 +40,7 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
             timeout=10.0,
         )
         r.raise_for_status()
-        return r.json()
+        return signal_only(verdict_fields(r.json(), "risk_level", model))
 
 
 @mcp.tool()
@@ -52,7 +53,7 @@ async def arkheia_audit_log(session_id: str | None = None, limit: int = 50) -> d
         limit:      Max number of events to return (default 50)
 
     Returns:
-        events: List of detection events with timestamps, risk levels, evidence
+        events: List of detection events with timestamps and risk levels
         summary: Aggregate counts by risk level
     """
     async with httpx.AsyncClient() as client:
@@ -65,7 +66,7 @@ async def arkheia_audit_log(session_id: str | None = None, limit: int = 50) -> d
             timeout=10.0,
         )
         r.raise_for_status()
-        return r.json()
+        return audit_view(r.json())
 
 
 if __name__ == "__main__":

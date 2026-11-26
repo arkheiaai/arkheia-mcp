@@ -103,7 +103,11 @@ class ProxyClient {
             }
             const raw = await resp.json();
             // A local proxy's verdict goes through the same fail-closed reading as the hosted one.
-            return (0, assessment_js_1.applyAssessment)({ ...raw, source: raw?.source ?? "local" }, (0, assessment_js_1.assessmentFromDetector)(raw, "risk_level", model_id));
+            return (0, assessment_js_1.applyAssessment)({
+                ...(0, assessment_js_1.safeMeta)(raw),
+                ...(raw?.error !== undefined && raw?.error !== null ? { error: "service_error" } : {}),
+                source: (0, assessment_js_1.safeSource)(raw?.source),
+            }, (0, assessment_js_1.assessmentFromDetector)(raw, "risk_level", model_id));
         }
         catch (e) {
             clearTimeout(timeoutId);
@@ -157,10 +161,7 @@ class ProxyClient {
             // Map hosted response format to local format. The band is passed only when the service
             // says it assessed the response (Change A); otherwise NOT_ASSESSED with its reason.
             return (0, assessment_js_1.applyAssessment)({
-                confidence: data?.confidence || 0.0,
-                features_triggered: data?.features_triggered || [],
-                detection_id: data?.detection_id,
-                evidence_depth_limited: data?.evidence_depth_limited ?? true,
+                ...(0, assessment_js_1.safeMeta)(data),
                 source: "hosted",
             }, (0, assessment_js_1.assessmentFromDetector)(data, "risk", model_id));
         }
@@ -180,7 +181,7 @@ class ProxyClient {
             }
         }
     }
-    async get_audit_log(session_id, limit = 50, raw = false) {
+    async get_audit_log(session_id, limit = 50) {
         /**
          * GET /audit/log
          *
@@ -188,9 +189,6 @@ class ProxyClient {
          * Note: audit log is only available from local proxy, not hosted API.
          */
         const params = new url_1.URLSearchParams({ limit: String(Math.min(limit, 500)) });
-        // raw: ask the service for its stored records unchanged, so their hashes verify as served.
-        if (raw)
-            params.append("raw", "true");
         if (session_id) {
             params.append("session_id", session_id);
         }
@@ -207,21 +205,8 @@ class ProxyClient {
                 logger.error(`ProxyClient: /audit/log HTTP error: ${resp.status} ${resp.statusText}`);
                 return _empty_log(`proxy_http_error_${resp.status}`);
             }
-            // Every row is read the same way as a live verdict, including old rows with no
-            // assessment fields, and the summary is counted from the normalised rows.
             const body = await resp.json();
-            if (!raw)
-                return (0, assessment_js_1.normaliseAuditLog)(body);
-            // raw: stored records only. An older service ignores ?raw=true and still sends its
-            // read-time view (record_kind / assessment / read_time_fields, or top-level assessment
-            // fields it added); that is not a stored record, so say raw is unavailable.
-            const events = Array.isArray(body?.events) ? body.events : [];
-            const projected = events.some((e) => e && typeof e === "object"
-                && ("record_kind" in e || "read_time_fields" in e || "assessment" in e));
-            if (projected) {
-                return { events: [], summary: {}, error: "raw_unavailable_from_this_local_proxy" };
-            }
-            return body;
+            return (0, assessment_js_1.normaliseAuditLog)(body);
         }
         catch (e) {
             clearTimeout(timeoutId);

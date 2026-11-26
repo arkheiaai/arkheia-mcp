@@ -1,8 +1,8 @@
 # Arkheia MCP Server — Fabrication Detection for AI Agents
 
-Screens model responses for signs of fabrication, using behavioural fingerprinting.
+Screens model responses for signs of fabrication.
 
-Coverage and accuracy vary by model and are improving. In the npm package, every result says whether it could be assessed: a result we could not assess comes back `NOT_ASSESSED` with a reason, and is never shown as a clean LOW. The separate Python server in this repository does not have this yet.
+Coverage and accuracy vary by model and are improving. Every result says whether it could be assessed: a result we could not assess comes back `NOT_ASSESSED` with a reason, and is never shown as a clean LOW.
 
 Free: 50,000 checks a month during the launch period. No credit card.
 
@@ -44,7 +44,7 @@ Commands for Codex, Gemini, Grok and where each stores its configuration are in 
 
 ### The Python server in this repository
 
-This repository also contains a Python MCP server (`python -m mcp_server.server`, run from a clone with `PYTHONPATH` set to the clone). It has nine tools and does **not** include `arkheia_feedback`, `arkheia_report` or `arkheia_reports`. It also does not yet report `NOT_ASSESSED`: a result it could not assess can still read as LOW. Use the npm package above.
+This repository also contains a Python MCP server (`python -m mcp_server.server`, run from a clone with `PYTHONPATH` set to the clone). It has nine tools and does **not** include `arkheia_feedback`, `arkheia_report` or `arkheia_reports`. Like the npm package, it reports `NOT_ASSESSED` for a result it could not assess, never a clean LOW; a failure to reach the service comes back as `UNKNOWN` with `assessed: false`. Use the npm package above.
 
 ## Your First Detection
 
@@ -58,7 +58,7 @@ Now try a fabricated one:
 
 > "Use arkheia_verify to check this response: The Kafka 4.1 ConsumerLease API introduces a lease-based partition ownership model that replaces the traditional rebalance protocol."
 
-The Kafka 4.1 ConsumerLease API doesn't exist. Whether a given check flags it depends on the model and on how much signal the check had; results are not guaranteed for any single example.
+The Kafka 4.1 ConsumerLease API doesn't exist. Whether a given check flags it depends on the model; results are not guaranteed for any single example.
 
 ### Test Prompts to Try
 
@@ -96,11 +96,11 @@ The arkheia_verify MCP tool is available in every conversation.
 
 Before presenting any substantive response to the user:
 1. Call arkheia_verify with the model name, prompt, and response
-2. Check the risk field in the result
+2. Check the `risk_level` field in the result
 
 ### Risk Handling
 - LOW: Present normally
-- MEDIUM: Present with caveat — "Detection flagged medium confidence. Key claims should be verified."
+- MEDIUM: Present with caveat — "Arkheia raised a warning. Key claims should be verified."
 - HIGH: Do not present as-is. Investigate the specific claims. If unverifiable, regenerate or escalate.
 
 ### Sub-Agent Outputs
@@ -112,7 +112,7 @@ When spawning background agents or parallel workers:
 ### What NOT to Do
 - Do not skip verification because the response "looks correct"
 - Do not suppress HIGH findings — the user needs to know
-- Do not retry the same prompt expecting a different risk score
+- Do not retry the same prompt hoping for a different result
 ```
 
 A ready-to-use template file is available at [CLAUDE_MD_TEMPLATE.md](CLAUDE_MD_TEMPLATE.md).
@@ -135,14 +135,14 @@ This catches fabrication that individual agents miss. The draft agent is confide
 
 | Risk | What it means | What to do |
 |------|--------------|------------|
-| **LOW** | Response fingerprint is consistent with grounded content | Use normally |
-| **MEDIUM** | Some statistical signals triggered — the model may have interpolated or substituted | Review key claims. Check references, API names, version numbers. |
-| **HIGH** | Strong evidence of fabrication — multiple detection signals agree | Don't trust this output. Verify everything. Consider regenerating. |
+| **LOW** | No warning | Use normally |
+| **MEDIUM** | Arkheia raised a warning | Check the key claims. Check references, API names, version numbers. |
+| **HIGH** | Arkheia raised a strong warning | Verify before relying on it. Consider regenerating. |
 | **NOT_ASSESSED** | Detection could not score this response (`not_assessed_reason` says why). Not a clean result. | Verify by other means. A `candidate_alert` of MEDIUM or HIGH means check the specific claims now. |
 
-## Model Coverage
+## Supported models
 
-Detection profiles exist for the model families below. A model without its own profile returns `NOT_ASSESSED` (`no_profile` or `borrowed_profile`), never a clean LOW.
+Coverage varies by model. If a result says `NOT_ASSESSED`, verify it yourself; it is never a clean LOW.
 
 - **OpenAI:** GPT-4o, GPT-5.4, GPT-5-Codex family
 - **Anthropic:** Claude Opus 4.6, Sonnet 4.6, Haiku 4.5
@@ -151,7 +151,7 @@ Detection profiles exist for the model families below. A model without its own p
 - **Local:** Qwen2 72B, Phi4, Mixtral, CodeLlama, Falcon
 - **Others:** Kimi K2.5, Ouro
 
-If your model isn't listed, [let us know](mailto:dmurfet@arkheia.ai) and we'll characterise it. We add new models regularly.
+If your model isn't listed, [open an issue](https://github.com/arkheiaai/arkheia-mcp/issues) and ask us about your model. We add new models regularly.
 
 ## Direct API Access
 
@@ -161,7 +161,7 @@ If you have a workflow where you need to call the detection API directly (CI/CD 
 POST https://arkheia-proxy-production.up.railway.app/v1/detect
 ```
 
-The MCP tools send the same thing as a direct call: the prompt, the response and the model name, with your key in a header. Each response carries `assessed`, and `not_assessed_reason` when it could not be scored. If you're building a custom integration, [get in touch](mailto:dmurfet@arkheia.ai).
+The MCP tools send the same thing as a direct call: the prompt, the response and the model name, with your key in a header. Each response carries `assessed`, and `not_assessed_reason` when it could not be scored. If you're building a custom integration, [open an issue](https://github.com/arkheiaai/arkheia-mcp/issues).
 
 ## MCP Tools
 
@@ -185,7 +185,6 @@ We built this because we needed it. We run 151 AI agents in production and every
 If you're using it — whether you love it, hate it, or wish it did something different — we want to hear from you:
 
 - **GitHub Issues:** https://github.com/arkheiaai/arkheia-mcp/issues — bugs, feature requests, questions
-- **Email:** dmurfet@arkheia.ai — anything at all
 - **From your agent:** with the npm package installed, ask it to use `arkheia_feedback` to send short feedback, or `arkheia_report` to say whether a checked response was really wrong or fine. Each returns an id from the service on success and says plainly when it could not confirm that the message was stored. See [Sending feedback](npm-wrapper/README.md#sending-feedback).
 
 Every message is read. Every piece of feedback shapes what we build next.
@@ -199,4 +198,4 @@ Every message is read. Every piece of feedback shapes what we build next.
 
 - Website: https://arkheia.ai
 - GitHub: https://github.com/arkheiaai/arkheia-mcp
-- Support: dmurfet@arkheia.ai
+- Support: https://github.com/arkheiaai/arkheia-mcp/issues

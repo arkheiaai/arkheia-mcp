@@ -37,8 +37,9 @@ class TestLocalProxy:
         mock_response = MagicMock()
         mock_response.json.return_value = {
             "risk_level": "LOW",
+            "assessed": True,
+            "evidence_depth_limited": False,
             "confidence": 0.85,
-            "features_triggered": ["word_count"],
             "detection_id": "det_abc123",
         }
         mock_response.raise_for_status = MagicMock()
@@ -57,9 +58,8 @@ class TestLocalProxy:
             "risk": "MEDIUM",
             "confidence": 0.72,
             "detection_id": "det_hosted123",
-            "features_triggered": ["structural_anomaly"],
-            "detection_method": "profile_ensemble",
-            "evidence_depth_limited": True,
+            "assessed": True,
+            "evidence_depth_limited": False,
         }
         hosted_response.raise_for_status = MagicMock()
 
@@ -100,8 +100,7 @@ class TestLocalProxy:
             "risk": "LOW",
             "confidence": 0.80,
             "detection_id": "det_timeout_fb",
-            "features_triggered": [],
-            "detection_method": "structural",
+            "assessed": True,
             "evidence_depth_limited": False,
         }
         hosted_response.raise_for_status = MagicMock()
@@ -131,8 +130,6 @@ class TestLocalProxy:
             "risk": "LOW",
             "confidence": 0.5,
             "detection_id": "det_cb",
-            "features_triggered": [],
-            "detection_method": None,
             "evidence_depth_limited": True,
         }
         hosted_response.raise_for_status = MagicMock()
@@ -180,10 +177,10 @@ class TestHostedFallback:
             "detection_id": "det_xyz",
             "risk": "HIGH",
             "confidence": 0.95,
+            "assessed": True,
             "evidence_depth_limited": False,
             "model": "gpt-4o",
-            "detection_method": "profile_ensemble",
-            "features_triggered": ["entropy_anomaly", "structural_anomaly"],
+            "extra_field": ["f"],
             "timestamp": "2026-03-28T00:00:00Z",
         }
         hosted_response.raise_for_status = MagicMock()
@@ -194,8 +191,9 @@ class TestHostedFallback:
         assert result["risk_level"] == "HIGH"  # mapped from "risk"
         assert result["confidence"] == 0.95
         assert result["detection_id"] == "det_xyz"
-        # Mechanism a server might send never reaches the caller (signal only, 12 Nov 2026).
-        assert "features_triggered" not in result and "detection_method" not in result
+        # Anything beyond the verdict a server might send never reaches the caller.
+        assert result["assessed"] is True
+        assert not ({"extra_field", "evidence_depth_limited", "model", "timestamp"} & set(result))
         assert result["source"] == "hosted"
 
     @pytest.mark.asyncio
@@ -297,4 +295,6 @@ async def test_with_no_local_proxy_configured_verify_goes_straight_to_hosted():
         result = await client.verify("prompt", "response", "claude-opus-5-5")
     urls = [call.args[0] if call.args else call.kwargs.get("url") for call in post.call_args_list]
     assert urls and all(str(u).startswith("https://arkheia-proxy-production.up.railway.app") for u in urls)
-    assert result["risk_level"] == "LOW" and result["source"] == "hosted"
+    # No affirmative assessment from the service: never LOW.
+    assert result["risk_level"] == "NOT_ASSESSED" and result["assessed"] is False
+    assert result["source"] == "hosted"

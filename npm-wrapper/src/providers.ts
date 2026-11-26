@@ -163,8 +163,8 @@ export async function call_gemini(
     /**
      * Call Google Gemini generateContent API.
      *
-     * Note: gemini-2.5-flash and -pro are thinking models — they need
-     * max_output_tokens >= 1000 to produce content after thinking tokens.
+     * Note: gemini-2.5-flash and -pro need a larger output limit
+     * (max_output_tokens >= 1000) to return content.
      *
      * Returns: {response, model, prompt_hash, error}
      */
@@ -265,9 +265,8 @@ export async function call_together(
     /**
      * Call Together AI chat completions API (OpenAI-compatible).
      *
-     * Default model is Kimi K2.5 — a thinking model that consumes
-     * 100-500 tokens internally before producing output, so max_tokens
-     * must be >= 2048 to reliably get a response.
+     * Default model is Kimi K2.5, which needs a larger output limit
+     * (max_tokens >= 2048) to reliably return a response.
      *
      * Returns: {response, model, prompt_hash, usage, error}
      */

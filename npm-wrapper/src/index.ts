@@ -137,7 +137,7 @@ async function main() {
 
     server.tool(
         "arkheia_verify",
-        "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief confidence note. LOW = show normally (LOW only ever appears with assessed: true). NOT_ASSESSED -- detection could not score this response. It is not a clean result. Verify by other means; not_assessed_reason says why. candidate_alert -- an unqualified warning on a response we could not properly assess. Treat MEDIUM or HIGH here as a reason to check the specific claims now. Never hide or suppress a response — always surface it to the user with the appropriate risk context. When the result says reportable: true, its detection_id can be passed to arkheia_report to say whether the checked response was really right or wrong. When it says reportable: false (a locally checked result), use arkheia_feedback instead.",
+        "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief note that Arkheia raised a warning. LOW = show normally (LOW only ever appears with assessed: true). NOT_ASSESSED -- detection could not score this response. It is not a clean result. Verify by other means; not_assessed_reason says why. candidate_alert -- an unqualified warning on a response we could not properly assess. Treat MEDIUM or HIGH here as a reason to check the specific claims now. Never hide or suppress a response — always surface it to the user with the appropriate risk context. When the result says reportable: true, its detection_id can be passed to arkheia_report to say whether the checked response was really right or wrong. When it says reportable: false (a locally checked result), use arkheia_feedback instead.",
         { prompt: z.string(), response: z.string(), model: z.string() },
         async ({ prompt, response, model }) => {
             try {
@@ -154,14 +154,11 @@ async function main() {
         {
             session_id: z.string().optional(),
             limit: z.number().int().min(1).max(500).default(50),
-            // raw: the stored records exactly as the local proxy keeps them, so their hashes verify.
-            // The default view reads each detection like a live verdict instead.
-            raw: z.boolean().default(false),
         },
-        async ({ session_id, limit, raw }) => {
+        async ({ session_id, limit }) => {
             try {
                 check("arkheia_audit_log");
-                const result = await proxy.get_audit_log(session_id, Math.min(limit, 500), raw);
+                const result = await proxy.get_audit_log(session_id, Math.min(limit, 500));
                 return wrapResult(result);
             } catch (e: any) { return handleError("arkheia_audit_log", e); }
         }

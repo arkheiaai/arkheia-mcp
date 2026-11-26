@@ -35,7 +35,6 @@ class TestProxyClientVerify:
             mock_resp.json.return_value = {
                 "risk_level": "LOW",
                 "confidence": 0.9,
-                "features_triggered": [],
                 "detection_id": "test-uuid",
             }
             mock_resp.raise_for_status = MagicMock()
@@ -61,7 +60,9 @@ class TestProxyClientVerify:
         expected = {
             "risk_level": "HIGH",
             "confidence": 0.92,
-            "features_triggered": ["unique_word_ratio"],
+            "assessed": True,
+            "evidence_depth_limited": False,
+            "extra_field": ["f"],
             "detection_id": "abc-123",
         }
         with patch("httpx.AsyncClient") as mock_cls:
@@ -75,9 +76,10 @@ class TestProxyClientVerify:
             client = ProxyClient("http://localhost:8099")
             result = await client.verify("q", "a", "gpt-4o")
 
-        # The signal comes through; the feature name a server sent does not (signal only, 12 Nov 2026).
-        assert result == {"risk_level": "HIGH", "confidence": 0.92, "detection_id": "abc-123"}
-        assert "features_triggered" not in result
+        # The verdict comes through; any other field a server sent does not.
+        assert result == {"risk_level": "HIGH", "assessed": True, "confidence": 0.92,
+                          "detection_id": "abc-123", "source": "local"}
+        assert "extra_field" not in result and "evidence_depth_limited" not in result
 
     @pytest.mark.asyncio
     async def test_verify_returns_unknown_on_connect_error(self):
@@ -118,7 +120,7 @@ class TestProxyClientVerify:
             mock_cls.return_value.__aenter__.return_value = mock_client
             mock_resp = MagicMock()  # sync mock — json() and raise_for_status() are sync in httpx
             mock_resp.json.return_value = {"risk_level": "LOW", "confidence": 0.0,
-                                           "features_triggered": [], "detection_id": "x"}
+                                           "detection_id": "x"}
             mock_resp.raise_for_status = MagicMock()
             mock_client.post.return_value = mock_resp
 
@@ -182,7 +184,7 @@ class TestMCPToolBehaviour:
         from mcp_server import server as mcp_server_module
 
         expected = {"risk_level": "LOW", "confidence": 0.8,
-                    "features_triggered": [], "detection_id": "uuid-test"}
+                    "assessed": True, "detection_id": "uuid-test"}
 
         original_proxy = mcp_server_module.proxy
         mock_proxy = AsyncMock(spec=ProxyClient)
@@ -211,7 +213,6 @@ class TestMCPToolBehaviour:
         mock_proxy.verify.return_value = {
             "risk_level": "UNKNOWN",
             "confidence": 0.0,
-            "features_triggered": [],
             "error": "proxy_unavailable",
         }
         mcp_server_module.proxy = mock_proxy

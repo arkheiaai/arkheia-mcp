@@ -36,13 +36,13 @@ Call \`arkheia_verify\` on EVERY model response before surfacing it to the user.
 ## Risk Escalation
 
 - **HIGH risk**: Warn the user that the response may be fabricated. Include the \`detection_id\`. Still show the response — never hide or suppress it. Ask the user if they want to verify with a different model.
-- **MEDIUM risk**: Show the response with a brief confidence note.
+- **MEDIUM risk**: Show the response with a brief note that Arkheia raised a warning.
 - **LOW risk**: Show normally.
-- **UNKNOWN risk**: Flag for human review. Include the \`detection_id\`.
+- **NOT_ASSESSED** (or UNKNOWN): Not a clean result. Verify by other means and include the \`detection_id\`. If \`candidate_alert\` is MEDIUM or HIGH, check the specific claims now.
 
 ## Cross-Model Verification
 
-When HIGH or UNKNOWN risk is detected, offer to verify using: \`run_grok\`, \`run_gemini\`, \`run_ollama\`, \`run_together\`.
+When HIGH, NOT_ASSESSED or UNKNOWN is returned, offer to verify using: \`run_grok\`, \`run_gemini\`, \`run_ollama\`, \`run_together\`.
 
 ## Audit Trail
 
@@ -55,7 +55,7 @@ Use \`memory_store\` to persist facts, \`memory_retrieve\` to recall them, \`mem
 ## Key Rules
 
 1. Never hide a response from the user regardless of risk level
-2. Always include the \`detection_id\` when reporting HIGH or UNKNOWN risk
+2. Always include the \`detection_id\` when reporting HIGH, NOT_ASSESSED or UNKNOWN
 3. Call \`arkheia_verify\` proactively — do not wait for the user to ask
 4. Audit logging happens automatically through \`arkheia_verify\`
 `;
