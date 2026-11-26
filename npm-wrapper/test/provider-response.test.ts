@@ -94,7 +94,16 @@ test("through the tool: forwarded, never echoed or logged; bad input gets a plai
         const arr = await call({ provider_response: [marker] });
         assert.match(bad.error, /must be a JSON object/);
         assert.match(arr.error, /must be a JSON object/);
+        const others: any[] = [];
+        for (const v of [[{ note: marker }], [[marker]], JSON.stringify([marker]), JSON.stringify([{ note: marker }]), 42, -1.5, true, false]) {
+            const raw: any = await c.callTool({ name: "arkheia_verify", arguments: { prompt: "p", response: "r", model: "m", provider_response: v } });
+            assert.notEqual(raw.isError, true, JSON.stringify(v));
+            const o = JSON.parse(raw.content[0].text);
+            assert.match(o.error, /must be a JSON object/, JSON.stringify(v));
+            others.push(raw);
+        }
         assert.equal(seen.length, 2, "rejected input sent nothing");
+        for (const raw of others) assert.ok(!JSON.stringify(raw).includes(marker));
         const huge = await call({ provider_response: { blob: marker + "x".repeat(MAX_PROVIDER_RESPONSE_BYTES) } });
         assert.match(huge.error, /too large/);
         assert.equal(seen.length, 2);

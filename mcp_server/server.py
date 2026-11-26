@@ -26,6 +26,9 @@ Transport: stdio (default — Claude Code / Claude Desktop)
 
 import os
 import logging
+from typing import Annotated, Any
+
+from pydantic import Field, WithJsonSchema
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -55,6 +58,22 @@ proxy = ProxyClient(
 # Detection & audit
 # ---------------------------------------------------------------------------
 
+# provider_response is admitted as any value so that every shape reaches
+# check_provider_response, which answers with a fixed message. A typed
+# annotation would let the framework reject it first, and the framework's
+# error repeats the rejected value. The published schema still says what is
+# accepted.
+ProviderResponseArg = Annotated[
+    Any,
+    WithJsonSchema({"anyOf": [{"type": "object"}, {"type": "string"}, {"type": "null"}]}),
+    Field(description=(
+        "The full response object your model provider returned, exactly as received "
+        "(for example the JSON from a chat completions call). Optional. Including it "
+        "allows a fuller assessment."
+    )),
+]
+
+
 @mcp.tool(annotations=ToolAnnotations(
     title="Verify LLM Output for Fabrication",
     readOnlyHint=True,
@@ -62,7 +81,7 @@ proxy = ProxyClient(
     idempotentHint=True,
     openWorldHint=False,
 ))
-async def arkheia_verify(prompt: str, response: str, model: str, provider_response: dict | str | None = None) -> dict:
+async def arkheia_verify(prompt: str, response: str, model: str, provider_response: ProviderResponseArg = None) -> dict:
     """
     Verify whether an AI response shows signs of fabrication.
 
