@@ -20,9 +20,7 @@ type VerifyResult = {
     not_assessed_reason?: Reason;
     candidate_alert?: "MEDIUM" | "HIGH";
     confidence?: number;
-    features_triggered?: string[];
     detection_id?: string;
-    evidence_depth_limited?: boolean;
     source?: string;
     error?: string;
 };
@@ -152,7 +150,12 @@ export class ProxyClient {
             }
             const raw: any = await resp.json();
             // A local proxy's verdict goes through the same fail-closed reading as the hosted one.
-            return applyAssessment({ ...raw, source: raw?.source ?? "local" },
+            return applyAssessment({
+                ...(raw?.confidence !== undefined ? { confidence: raw.confidence } : {}),
+                ...(raw?.detection_id !== undefined ? { detection_id: raw.detection_id } : {}),
+                ...(raw?.error !== undefined && raw?.error !== null ? { error: raw.error } : {}),
+                source: raw?.source ?? "local",
+            },
                                    assessmentFromDetector(raw, "risk_level", model_id)) as VerifyResult;
         } catch (e: any) {
             clearTimeout(timeoutId);
@@ -216,9 +219,7 @@ export class ProxyClient {
             // says it assessed the response (Change A); otherwise NOT_ASSESSED with its reason.
             return applyAssessment({
                 confidence: data?.confidence || 0.0,
-                features_triggered: data?.features_triggered || [],
                 detection_id: data?.detection_id,
-                evidence_depth_limited: data?.evidence_depth_limited ?? true,
                 source: "hosted",
             }, assessmentFromDetector(data, "risk", model_id)) as VerifyResult;
         } catch (e: any) {

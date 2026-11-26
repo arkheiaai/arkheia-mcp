@@ -9,7 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ProxyClient } from '../src/proxy-client';
 import {
-    ALL_REASONS, CLIENT_REASONS, SERVER_REASONS, assessmentFromDetector, finishFromGemini,
+    ALL_REASONS, CLIENT_REASONS, assessmentFromDetector, finishFromGemini,
     finishFromOllama, finishFromOpenAICompatible, normaliseAuditLog,
 } from '../src/assessment';
 
@@ -23,10 +23,10 @@ test("an assessed LOW from the service is LOW", () => {
     assert.deepEqual(assessmentFromDetector(ASSESSED_LOW, "risk"), { risk_level: "LOW", assessed: true });
 });
 
-for (const reason of SERVER_REASONS) {
-    test(`service reason ${reason} is passed through as NOT_ASSESSED`, () => {
+for (const reason of ["r1", "r2", "r3"]) {
+    test(`any service reason (${reason}) becomes the single reason not_assessed`, () => {
         const a = assessmentFromDetector({ risk: "LOW", assessed: false, not_assessed_reason: reason, evidence_depth_limited: true }, "risk");
-        assert.deepEqual(a, { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: reason });
+        assert.deepEqual(a, { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "not_assessed" });
     });
 }
 
@@ -38,7 +38,7 @@ for (const edl of [true, undefined]) {
 }
 
 test("a reason is never derived on the client from evidence_depth_limited alone", () => {
-    // Corrections P3-1: limited_evidence is only ever the service's word.
+    // A reason is only ever the service's word; the client never invents one from a flag.
     const a = assessmentFromDetector({ risk: "LOW", evidence_depth_limited: true }, "risk");
     assert.equal(a.not_assessed_reason, "unknown");
 });
@@ -46,13 +46,11 @@ test("a reason is never derived on the client from evidence_depth_limited alone"
 const contradictions: Array<[string, any]> = [
     ["assessed true with evidence_depth_limited true", { ...ASSESSED_LOW, evidence_depth_limited: true }],
     ["assessed true with evidence_depth_limited absent", { risk: "LOW", assessed: true }],
-    ["assessed true with a reason", { ...ASSESSED_LOW, not_assessed_reason: "limited_evidence" }],
+    ["assessed true with a reason", { ...ASSESSED_LOW, not_assessed_reason: "not_assessed" }],
     ["assessed true with a candidate", { ...ASSESSED_LOW, candidate_alert: "HIGH" }],
     ["assessed true with no band", { ...ASSESSED_LOW, risk: "UNKNOWN" }],
-    ["assessed false with an unlisted reason", { risk: "LOW", assessed: false, not_assessed_reason: "feature_x_missing" }],
-    ["assessed false with a client-only reason", { risk: "LOW", assessed: false, not_assessed_reason: "provider_error" }],
     ["assessed false with no reason", { risk: "LOW", assessed: false }],
-    ["assessed false with a LOW candidate", { risk: "LOW", assessed: false, not_assessed_reason: "limited_evidence", candidate_alert: "LOW" }],
+    ["assessed false with a LOW candidate", { risk: "LOW", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "LOW" }],
     ["assessed as a string", { ...ASSESSED_LOW, assessed: "true" }],
 ];
 for (const [name, body] of contradictions) {
@@ -64,14 +62,14 @@ for (const [name, body] of contradictions) {
 
 for (const level of ["MEDIUM", "HIGH"] as const) {
     test(`an unassessed ${level} keeps the service's candidate_alert`, () => {
-        const a = assessmentFromDetector({ risk: "MEDIUM", ...(level === "HIGH" ? { risk_demoted_from: "HIGH" } : {}), assessed: false, not_assessed_reason: "borrowed_profile", candidate_alert: level }, "risk");
-        assert.deepEqual(a, { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "borrowed_profile", candidate_alert: level });
+        const a = assessmentFromDetector({ risk: "MEDIUM", ...(level === "HIGH" ? { risk_demoted_from: "HIGH" } : {}), assessed: false, not_assessed_reason: "not_assessed", candidate_alert: level }, "risk");
+        assert.deepEqual(a, { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: level });
     });
 }
 
 test("the reason vocabulary is exactly the spec's closed list", () => {
     assert.deepEqual([...ALL_REASONS].sort(), [
-        "borrowed_profile", "incomplete_response", "limited_evidence", "no_profile",
+        "incomplete_response", "not_assessed",
         "provider_error", "screening_disabled", "service_unavailable", "unknown"]);
     assert.deepEqual([...CLIENT_REASONS], ["screening_disabled", "provider_error", "incomplete_response", "service_unavailable", "unknown"]);
 });
@@ -82,7 +80,7 @@ test("no reason string outside the closed list appears in the public source", ()
     const used = new Set<string>();
     for (const m of src.matchAll(/notAssessed\("([a-z_]+)"/g)) used.add(m[1]);
     for (const r of used) assert.ok((ALL_REASONS as readonly string[]).includes(r), `unlisted reason ${r}`);
-    assert.deepEqual([...used].sort(), ["incomplete_response", "provider_error", "service_unavailable", "unknown"]);
+    assert.deepEqual([...used].sort(), ["incomplete_response", "not_assessed", "provider_error", "service_unavailable", "unknown"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -105,10 +103,10 @@ async function verifyWith(handler: (url: string) => Response | Promise<Response>
 }
 
 test("hosted unassessed LOW: NOT_ASSESSED, the service's reason, and the word LOW nowhere", async () => {
-    const r = await verifyWith((u) => { LOCAL_DOWN(u); return json(200, { risk: "LOW", assessed: false, not_assessed_reason: "limited_evidence", candidate_alert: null, evidence_depth_limited: true, detection_id: "det_0123456789abcdef" }); });
+    const r = await verifyWith((u) => { LOCAL_DOWN(u); return json(200, { risk: "LOW", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: null, evidence_depth_limited: true, detection_id: "det_0123456789abcdef" }); });
     assert.equal(r.risk_level, "NOT_ASSESSED");
     assert.equal(r.assessed, false);
-    assert.equal(r.not_assessed_reason, "limited_evidence");
+    assert.equal(r.not_assessed_reason, "not_assessed");
     assert.equal("candidate_alert" in r, false);
     assert.doesNotMatch(JSON.stringify(r), /LOW/);
     assert.equal(r.detection_id, "det_0123456789abcdef");
@@ -122,8 +120,8 @@ test("hosted assessed LOW: LOW", async () => {
 });
 
 test("hosted unassessed HIGH candidate survives to the caller", async () => {
-    const r = await verifyWith((u) => { LOCAL_DOWN(u); return json(200, { risk: "MEDIUM", risk_demoted_from: "HIGH", assessed: false, not_assessed_reason: "borrowed_profile", candidate_alert: "HIGH", evidence_depth_limited: true }); });
-    assert.deepEqual([r.risk_level, r.not_assessed_reason, r.candidate_alert], ["NOT_ASSESSED", "borrowed_profile", "HIGH"]);
+    const r = await verifyWith((u) => { LOCAL_DOWN(u); return json(200, { risk: "MEDIUM", risk_demoted_from: "HIGH", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "HIGH", evidence_depth_limited: true }); });
+    assert.deepEqual([r.risk_level, r.not_assessed_reason, r.candidate_alert], ["NOT_ASSESSED", "not_assessed", "HIGH"]);
 });
 
 test("an older service with no assessment fields: NOT_ASSESSED unknown, never LOW", async () => {
@@ -146,13 +144,13 @@ for (const [name, handler] of transportFailures) {
 
 test("audit rows: unassessed LOW and legacy rows are NOT_ASSESSED; the summary counts them apart", () => {
     const out = normaliseAuditLog({ events: [
-        { source: "proxy", risk_level: "LOW", assessed: false, not_assessed_reason: "limited_evidence", evidence_depth_limited: true },
+        { source: "proxy", risk_level: "LOW", assessed: false, not_assessed_reason: "not_assessed", evidence_depth_limited: true },
         { source: "proxy", risk_level: "LOW", confidence: 0.2 },  // legacy row, no assessment fields
         { source: "proxy", risk_level: "LOW", assessed: true, evidence_depth_limited: false },
-        { source: "proxy", risk_level: "MEDIUM", risk_demoted_from: "HIGH", assessed: false, not_assessed_reason: "borrowed_profile", candidate_alert: "HIGH", evidence_depth_limited: true },
+        { source: "proxy", risk_level: "MEDIUM", risk_demoted_from: "HIGH", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "HIGH", evidence_depth_limited: true },
     ] });
     assert.deepEqual(out.events.map((e: any) => e.risk_level), ["NOT_ASSESSED", "NOT_ASSESSED", "LOW", "NOT_ASSESSED"]);
-    assert.deepEqual(out.events.map((e: any) => e.not_assessed_reason), ["limited_evidence", "unknown", undefined, "borrowed_profile"]);
+    assert.deepEqual(out.events.map((e: any) => e.not_assessed_reason), ["not_assessed", "unknown", undefined, "not_assessed"]);
     assert.deepEqual(out.summary, { LOW: 1, MEDIUM: 0, HIGH: 0, NOT_ASSESSED: 3, CANDIDATE_MEDIUM: 0, CANDIDATE_HIGH: 1 });
 });
 
@@ -203,9 +201,9 @@ async function withServer(extraEnv: Record<string, string>, fn: (c: Client, log:
 const call = async (c: Client, name: string, args: any) => JSON.parse(((await c.callTool({ name, arguments: args })) as any).content[0].text);
 
 test("stdio: arkheia_verify on an unassessed hosted LOW returns NOT_ASSESSED with no LOW anywhere", async () => {
-    await withServer({ ARKHEIA_TEST_DETECT_BODY: JSON.stringify({ risk: "LOW", assessed: false, not_assessed_reason: "no_profile", candidate_alert: null, evidence_depth_limited: true }) }, async (c) => {
+    await withServer({ ARKHEIA_TEST_DETECT_BODY: JSON.stringify({ risk: "LOW", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: null, evidence_depth_limited: true }) }, async (c) => {
         const v = await call(c, "arkheia_verify", { prompt: "p", response: "r", model: "m" });
-        assert.deepEqual([v.risk_level, v.assessed, v.not_assessed_reason], ["NOT_ASSESSED", false, "no_profile"]);
+        assert.deepEqual([v.risk_level, v.assessed, v.not_assessed_reason], ["NOT_ASSESSED", false, "not_assessed"]);
         assert.doesNotMatch(JSON.stringify(v), /LOW/);
     });
 });
@@ -262,7 +260,7 @@ for (const [tool, origin] of RUNNERS) {
 
 test("stdio: arkheia_audit_log normalises rows and counts NOT_ASSESSED apart", async () => {
     const body = { events: [
-        { source: "proxy", risk_level: "LOW", assessed: false, not_assessed_reason: "limited_evidence", evidence_depth_limited: true },
+        { source: "proxy", risk_level: "LOW", assessed: false, not_assessed_reason: "not_assessed", evidence_depth_limited: true },
         { source: "proxy", risk_level: "LOW" },
         { source: "proxy", risk_level: "LOW", assessed: true, evidence_depth_limited: false },
     ], summary: { LOW: 3, MEDIUM: 0, HIGH: 0, UNKNOWN: 0 } };
@@ -282,8 +280,8 @@ const moreContradictions: Array<[string, any]> = [
     ["assessed LOW with a borrowed profile", { ...ASSESSED_LOW, profile_fingerprint_borrowed: true }],
     ["assessed LOW with model_supported false", { ...ASSESSED_LOW, model_supported: false }],
     ["assessed MEDIUM with a recorded demotion", { ...ASSESSED_LOW, risk: "MEDIUM", risk_demoted_from: "HIGH" }],
-    ["a HIGH candidate beside a live LOW with no demotion", { risk: "LOW", assessed: false, not_assessed_reason: "limited_evidence", candidate_alert: "HIGH" }],
-    ["a MEDIUM candidate beside a HIGH band", { risk: "HIGH", assessed: false, not_assessed_reason: "limited_evidence", candidate_alert: "MEDIUM" }],
+    ["a HIGH candidate beside a live LOW with no demotion", { risk: "LOW", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "HIGH" }],
+    ["a MEDIUM candidate beside a HIGH band", { risk: "HIGH", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "MEDIUM" }],
 ];
 for (const [name, body] of moreContradictions) {
     test(`fails closed: ${name}`, () => {
@@ -294,8 +292,8 @@ for (const [name, body] of moreContradictions) {
 
 test("a demoted verdict keeps its pre-demotion level as the candidate", () => {
     assert.deepEqual(
-        assessmentFromDetector({ risk: "MEDIUM", risk_demoted_from: "HIGH", assessed: false, not_assessed_reason: "borrowed_profile", candidate_alert: "HIGH" }, "risk"),
-        { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "borrowed_profile", candidate_alert: "HIGH" });
+        assessmentFromDetector({ risk: "MEDIUM", risk_demoted_from: "HIGH", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "HIGH" }, "risk"),
+        { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "HIGH" });
 });
 
 for (const level of ["MEDIUM", "HIGH"] as const) {
@@ -363,17 +361,17 @@ test("audit: a malformed row between two warnings costs neither warning", async 
 
 const LOCAL_ASSESSED = { risk_level: "LOW", assessed: true, evidence_depth_limited: false,
     not_assessed_reason: null, candidate_alert: null, model_id: "phi4:14b", profile_model_id: "phi4:14b",
-    gate_reason: null, error: null, detection_method: "profile_ensemble" };
+    gate_reason: null, error: null };
 
-test("a consistent local own-profile verdict stays assessed and keeps detection_method", () => {
+test("a consistent local verdict stays assessed", () => {
     assert.deepEqual(assessmentFromDetector(LOCAL_ASSESSED, "risk_level"), { risk_level: "LOW", assessed: true });
 });
 
 const localContradictions: Array<[string, any]> = [
-    ["a suppression gate", { ...LOCAL_ASSESSED, gate_reason: "token_count_below_80" }],
+    ["a suppression gate", { ...LOCAL_ASSESSED, gate_reason: "x" }],
     ["another model's profile", { ...LOCAL_ASSESSED, profile_model_id: "phi4:latest" }],
     ["a detector error", { ...LOCAL_ASSESSED, error: "engine_error" }],
-    ["an impossible demotion", { ...LOCAL_ASSESSED, risk_level: "LOW", assessed: false, not_assessed_reason: "limited_evidence", risk_demoted_from: "HIGH", candidate_alert: "HIGH" }],
+    ["an impossible demotion", { ...LOCAL_ASSESSED, risk_level: "LOW", assessed: false, not_assessed_reason: "not_assessed", risk_demoted_from: "HIGH", candidate_alert: "HIGH" }],
 ];
 for (const [name, body] of localContradictions) {
     test(`local verdict fails closed on ${name}`, () => {
@@ -382,10 +380,10 @@ for (const [name, body] of localContradictions) {
     });
 }
 
-test("applyAssessment keeps detection_method on assessed results only", async () => {
+test("applyAssessment keeps only the verdict and the fields it is given beside it", async () => {
     const { applyAssessment } = await import('../src/assessment.js');
-    assert.equal(applyAssessment(LOCAL_ASSESSED, { risk_level: "LOW", assessed: true }).detection_method, "profile_ensemble");
-    assert.equal("detection_method" in applyAssessment(LOCAL_ASSESSED, { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "unknown" }), false);
+    const out = applyAssessment({ detection_id: "d1", risk_level: "HIGH", assessed: true }, { risk_level: "LOW", assessed: true });
+    assert.deepEqual(out, { detection_id: "d1", risk_level: "LOW", assessed: true });
 });
 
 test("Gemini: a thought part is neither shown nor screened", async () => {
@@ -434,7 +432,7 @@ test("audit: the service's assessment object is used, and stored fields keep the
         { source: "governance_push", detection_id: "pt", risk_level: "LOW", record_kind: "delivery_receipt", delivery_status: "delivered" },
     ] });
     const [det, refusal, receipt] = out.events;
-    assert.deepEqual([det.risk_level, det.not_assessed_reason, det.candidate_alert], ["NOT_ASSESSED", "unknown", "HIGH"]);
+    assert.deepEqual([det.risk_level, det.not_assessed_reason, det.candidate_alert], ["NOT_ASSESSED", "not_assessed", "HIGH"]);
     assert.equal(det.stored_this_hash, "h1");
     assert.match(det.hash_scope, /stored record, not this view/);
     assert.equal("this_hash" in det, false);
@@ -447,8 +445,8 @@ test("audit: the service's assessment object is used, and stored fields keep the
 
 test("audit: an incoherent service assessment fails closed", () => {
     const out = normaliseAuditLog({ events: [
-        { source: "proxy", risk_level: "LOW", record_kind: "detection", assessment: { assessed: false, not_assessed_reason: "limited_evidence", candidate_alert: "HIGH" } },
-        { source: "proxy", risk_level: "HIGH", record_kind: "detection", assessment: { assessed: true, not_assessed_reason: "limited_evidence" } },
+        { source: "proxy", risk_level: "LOW", record_kind: "detection", assessment: { assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "HIGH" } },
+        { source: "proxy", risk_level: "HIGH", record_kind: "detection", assessment: { assessed: true, not_assessed_reason: "not_assessed" } },
     ] });
     assert.deepEqual(out.events.map((e: any) => [e.risk_level, e.not_assessed_reason, e.candidate_alert ?? null]),
                      [["NOT_ASSESSED", "unknown", null], ["NOT_ASSESSED", "unknown", null]]);
@@ -481,8 +479,8 @@ test("a verdict about the requested model, in another case, stays assessed", () 
 
 test("the capped-HIGH shape the local verifier now sends keeps its HIGH candidate", () => {
     assert.deepEqual(assessmentFromDetector({ risk_level: "MEDIUM", risk_demoted_from: "HIGH", assessed: false,
-        not_assessed_reason: "limited_evidence", candidate_alert: "HIGH", evidence_depth_limited: true, source: "local" }, "risk_level", "gpt-4"),
-        { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "limited_evidence", candidate_alert: "HIGH" });
+        not_assessed_reason: "not_assessed", candidate_alert: "HIGH", evidence_depth_limited: true, source: "local" }, "risk_level", "gpt-4"),
+        { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "not_assessed", candidate_alert: "HIGH" });
 });
 
 
@@ -500,7 +498,7 @@ test("audit: a clean nested assessment stays assessed", () => {
 
 for (const [name, change] of [
     ["limited evidence", { evidence_depth_limited: true }],
-    ["a suppression gate", { gate_reason: "token_count_below_80" }],
+    ["a suppression gate", { gate_reason: "x" }],
     ["a detector error", { error: "engine_error" }],
     ["another model's profile", { profile_model_id: "phi4:latest" }],
 ] as const) {
@@ -597,4 +595,25 @@ test("real boolean flags and omitted flags keep an assessed LOW", () => {
     for (const change of [{}, { profile_fingerprint_borrowed: false }, { model_supported: true }, { profile_fingerprint_borrowed: null }]) {
         assert.deepEqual(assessmentFromDetector({ ...ASSESSED_LOW, ...change }, "risk"), { risk_level: "LOW", assessed: true });
     }
+});
+
+for (const r of ["unlisted_reason", "provider_error"]) {
+    test(`assessed false with reason ${r} is still not assessed, as not_assessed`, () => {
+        assert.deepEqual(assessmentFromDetector({ risk: "LOW", assessed: false, not_assessed_reason: r }, "risk"),
+            { risk_level: "NOT_ASSESSED", assessed: false, not_assessed_reason: "not_assessed" });
+    });
+}
+
+test("audit view never carries fields that describe how a verdict was reached", () => {
+    const out = normaliseAuditLog({ events: [
+        { source: "proxy", risk_level: "HIGH", assessed: true, evidence_depth_limited: false, detection_id: "d1",
+          extra_method: "m", extra_features: ["f"], profile_version: "1", metrics: { a: 1 } },
+    ] });
+    assert.deepEqual(Object.keys(out.events[0]).sort(), ["assessed", "detection_id", "record_kind", "risk_level", "source"]);
+});
+
+test("a local verdict passes on only the verdict fields", async () => {
+    const r = await verifyWith(() => { return json(200, { risk_level: "HIGH", assessed: true, evidence_depth_limited: false,
+        confidence: 0.9, detection_id: "d9", extra_method: "m", extra_features: ["f"], model_id: "m" }); });
+    assert.deepEqual(Object.keys(r).sort(), ["assessed", "confidence", "detection_id", "risk_level", "source"]);
 });

@@ -13,9 +13,9 @@ arkheia_verify(prompt=<original prompt>, response=<model output>, model=<model i
 ## Risk Escalation
 
 - **HIGH risk**: Warn the user that the response may be fabricated. Include the `detection_id`. Still show the response — never hide or suppress it. Ask the user if they want you to verify with a different model.
-- **MEDIUM risk**: Show the response with a brief confidence note (e.g. "Arkheia flagged this at medium confidence").
+- **MEDIUM risk**: Show the response with a brief note (e.g. "Arkheia raised a warning on this").
 - **LOW risk**: Show normally. No annotation needed.
-- **UNKNOWN risk**: Flag for human review. Include the `detection_id` in your response.
+- **NOT_ASSESSED or UNKNOWN**: Not a clean result. Verify by other means. Include the `detection_id` in your response.
 
 ## Cross-Model Verification
 

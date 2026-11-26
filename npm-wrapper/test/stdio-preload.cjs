@@ -32,7 +32,7 @@ globalThis.fetch = async (url, init) => {
     if (url.startsWith("http://localhost")) throw new TypeError("fetch failed"); // local proxy down: forces the fallback path
     if (url.endsWith("/v1/detect")) {
         if (process.env.ARKHEIA_TEST_DETECT_BODY) return json(200, { detection_id: DID, ...JSON.parse(process.env.ARKHEIA_TEST_DETECT_BODY) });
-        return json(200, { risk: "LOW", confidence: 0.1, features_triggered: [], detection_id: DID });
+        return json(200, { risk: "LOW", confidence: 0.1, detection_id: DID });
     }
     if (url.endsWith("/v1/feedback")) return json(201, { feedback_id: "11111111-2222-3333-4444-555555555555", status: "received" });
     if (url.endsWith("/report")) return json(201, { report_id: "22222222-3333-4444-5555-666666666666", status: "recorded" });

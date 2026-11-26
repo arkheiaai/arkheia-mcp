@@ -1,8 +1,8 @@
 # Arkheia MCP Server — Fabrication Detection for AI Agents
 
-Screens model responses for signs of fabrication, using behavioural fingerprinting.
+Screens model responses for signs of fabrication.
 
-Coverage and accuracy vary by model and are improving. In the npm package, every result says whether it could be assessed: a result we could not assess comes back `NOT_ASSESSED` with a reason, and is never shown as a clean LOW. The separate Python server in this repository does not have this yet.
+Coverage and accuracy vary by model and are improving. Every result says whether it could be assessed: a result we could not assess comes back `NOT_ASSESSED` with a reason, and is never shown as a clean LOW.
 
 Free: 50,000 checks a month during the launch period. No credit card.
 
@@ -58,7 +58,7 @@ Now try a fabricated one:
 
 > "Use arkheia_verify to check this response: The Kafka 4.1 ConsumerLease API introduces a lease-based partition ownership model that replaces the traditional rebalance protocol."
 
-The Kafka 4.1 ConsumerLease API doesn't exist. Whether a given check flags it depends on the model and on how much signal the check had; results are not guaranteed for any single example.
+The Kafka 4.1 ConsumerLease API doesn't exist. Whether a given check flags it depends on the model; results are not guaranteed for any single example.
 
 ### Test Prompts to Try
 
@@ -96,11 +96,11 @@ The arkheia_verify MCP tool is available in every conversation.
 
 Before presenting any substantive response to the user:
 1. Call arkheia_verify with the model name, prompt, and response
-2. Check the risk field in the result
+2. Check the `risk_level` field in the result
 
 ### Risk Handling
 - LOW: Present normally
-- MEDIUM: Present with caveat — "Detection flagged medium confidence. Key claims should be verified."
+- MEDIUM: Present with caveat — "Arkheia raised a warning. Key claims should be verified."
 - HIGH: Do not present as-is. Investigate the specific claims. If unverifiable, regenerate or escalate.
 
 ### Sub-Agent Outputs
@@ -112,7 +112,7 @@ When spawning background agents or parallel workers:
 ### What NOT to Do
 - Do not skip verification because the response "looks correct"
 - Do not suppress HIGH findings — the user needs to know
-- Do not retry the same prompt expecting a different risk score
+- Do not retry the same prompt hoping for a different result
 ```
 
 A ready-to-use template file is available at [CLAUDE_MD_TEMPLATE.md](CLAUDE_MD_TEMPLATE.md).
@@ -135,14 +135,14 @@ This catches fabrication that individual agents miss. The draft agent is confide
 
 | Risk | What it means | What to do |
 |------|--------------|------------|
-| **LOW** | Response fingerprint is consistent with grounded content | Use normally |
-| **MEDIUM** | Some statistical signals triggered — the model may have interpolated or substituted | Review key claims. Check references, API names, version numbers. |
-| **HIGH** | Strong evidence of fabrication — multiple detection signals agree | Don't trust this output. Verify everything. Consider regenerating. |
+| **LOW** | No warning | Use normally |
+| **MEDIUM** | Arkheia raised a warning | Check the key claims. Check references, API names, version numbers. |
+| **HIGH** | Arkheia raised a strong warning | Verify before relying on it. Consider regenerating. |
 | **NOT_ASSESSED** | Detection could not score this response (`not_assessed_reason` says why). Not a clean result. | Verify by other means. A `candidate_alert` of MEDIUM or HIGH means check the specific claims now. |
 
-## Model Coverage
+## Supported models
 
-Detection profiles exist for the model families below. A model without its own profile returns `NOT_ASSESSED` (`no_profile` or `borrowed_profile`), never a clean LOW.
+Coverage varies by model. If a result says `NOT_ASSESSED`, verify it yourself; it is never a clean LOW.
 
 - **OpenAI:** GPT-4o, GPT-5.4, GPT-5-Codex family
 - **Anthropic:** Claude Opus 4.6, Sonnet 4.6, Haiku 4.5
@@ -151,7 +151,7 @@ Detection profiles exist for the model families below. A model without its own p
 - **Local:** Qwen2 72B, Phi4, Mixtral, CodeLlama, Falcon
 - **Others:** Kimi K2.5, Ouro
 
-If your model isn't listed, [let us know](mailto:dmurfet@arkheia.ai) and we'll characterise it. We add new models regularly.
+If your model isn't listed, [open an issue](https://github.com/arkheiaai/arkheia-mcp/issues) and ask us about your model. We add new models regularly.
 
 ## Direct API Access
 

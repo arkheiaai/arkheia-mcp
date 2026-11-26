@@ -108,7 +108,8 @@ class ProxyClient:
                     json=payload,
                 )
                 resp.raise_for_status()
-                return resp.json()
+                raw = resp.json()
+                return {**raw, **assess(raw, "risk_level"), "source": raw.get("source", "local")}
         except httpx.TimeoutException:
             logger.warning("ProxyClient: /detect/verify timed out for model=%s", model_id)
             return _unavailable("proxy_timeout")
@@ -147,12 +148,11 @@ class ProxyClient:
                 data = resp.json()
                 # Map hosted response format to local format
                 return {
-                    "risk_level": data.get("risk", "UNKNOWN"),
                     "confidence": data.get("confidence", 0.0),
                     "detection_id": data.get("detection_id"),
                     "gate_action": data.get("gate_action"),
-                    "evidence_depth_limited": data.get("evidence_depth_limited", True),
                     "source": "hosted",
+                    **assess(data, "risk"),
                 }
         except httpx.TimeoutException:
             logger.warning("ProxyClient: hosted /v1/detect timed out for model=%s", model_id)
@@ -209,21 +209,55 @@ class ProxyClient:
 
 
 
-#: The signal, and only the signal (David, 12 Nov 2026: "messenger only ... pure signal"). Whatever a
-#: server sends, a caller of this package sees these fields and nothing else: never a feature name, a
-#: method, a threshold or any other part of how detection works.
-SIGNAL_FIELDS = ("risk_level", "confidence", "detection_id", "evidence_depth_limited",
-                 "gate_action", "source", "error")
+#: The signal, and only the signal. Whatever a server sends, a caller of this package sees these
+#: fields and nothing else.
+SIGNAL_FIELDS = ("risk_level", "assessed", "not_assessed_reason", "candidate_alert", "confidence",
+                 "detection_id", "gate_action", "source", "error")
+
+_BANDS = ("LOW", "MEDIUM", "HIGH")
+
+
+def assess(raw: dict, band_field: str) -> dict:
+    """Read a server answer and fail closed: a band is passed on only when the server says it
+    assessed the response and nothing else in the answer contradicts that. Anything else is
+    NOT_ASSESSED, never LOW. Extra facts are read here and never passed on."""
+    band = raw.get(band_field)
+    clean = (
+        raw.get("assessed") is True
+        and band in _BANDS
+        and raw.get("evidence_depth_limited") is False
+        and raw.get("not_assessed_reason") is None
+        and raw.get("candidate_alert") is None
+        and raw.get("risk_demoted_from") is None
+        and raw.get("gate_reason") is None
+        and raw.get("error") is None
+        and raw.get("profile_fingerprint_borrowed") in (None, False)
+        and raw.get("model_supported") in (None, True)
+    )
+    if clean:
+        return {"risk_level": band, "assessed": True}
+    reason = raw.get("not_assessed_reason")
+    out = {
+        "risk_level": "NOT_ASSESSED",
+        "assessed": False,
+        "not_assessed_reason": "not_assessed" if raw.get("assessed") is False and isinstance(reason, str) and reason.strip() else "unknown",
+    }
+    candidate = raw.get("candidate_alert")
+    if candidate in ("MEDIUM", "HIGH"):
+        out["candidate_alert"] = candidate
+    return out
 
 
 def signal_only(result: dict) -> dict:
     """Project a verdict onto SIGNAL_FIELDS, dropping anything else a server returned."""
     return {k: result[k] for k in SIGNAL_FIELDS if k in result and result[k] is not None}
 
+
 def _unavailable(error: str) -> dict:
     """Standard UNKNOWN response when detection is unreachable."""
     return {
         "risk_level": "UNKNOWN",
+        "assessed": False,
         "confidence": 0.0,
         "error": error,
     }

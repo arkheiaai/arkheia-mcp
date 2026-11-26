@@ -103,7 +103,12 @@ class ProxyClient {
             }
             const raw = await resp.json();
             // A local proxy's verdict goes through the same fail-closed reading as the hosted one.
-            return (0, assessment_js_1.applyAssessment)({ ...raw, source: raw?.source ?? "local" }, (0, assessment_js_1.assessmentFromDetector)(raw, "risk_level", model_id));
+            return (0, assessment_js_1.applyAssessment)({
+                ...(raw?.confidence !== undefined ? { confidence: raw.confidence } : {}),
+                ...(raw?.detection_id !== undefined ? { detection_id: raw.detection_id } : {}),
+                ...(raw?.error !== undefined && raw?.error !== null ? { error: raw.error } : {}),
+                source: raw?.source ?? "local",
+            }, (0, assessment_js_1.assessmentFromDetector)(raw, "risk_level", model_id));
         }
         catch (e) {
             clearTimeout(timeoutId);
@@ -158,9 +163,7 @@ class ProxyClient {
             // says it assessed the response (Change A); otherwise NOT_ASSESSED with its reason.
             return (0, assessment_js_1.applyAssessment)({
                 confidence: data?.confidence || 0.0,
-                features_triggered: data?.features_triggered || [],
                 detection_id: data?.detection_id,
-                evidence_depth_limited: data?.evidence_depth_limited ?? true,
                 source: "hosted",
             }, (0, assessment_js_1.assessmentFromDetector)(data, "risk", model_id));
         }

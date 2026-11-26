@@ -12,7 +12,7 @@ function stubFetch(seen: Seen[]) {
         seen.push({ url: String(url), init });
         const u = String(url);
         if (u.startsWith("http://localhost:1")) throw new TypeError("fetch failed");
-        const body = u.endsWith("/v1/detect") ? { risk: "LOW", confidence: 0.1, features_triggered: [], detection_id: "det_x" }
+        const body = u.endsWith("/v1/detect") ? { risk: "LOW", confidence: 0.1, detection_id: "det_x" }
             : u.includes("generateContent") ? { candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] }
             : u.includes("/api/generate") ? { response: "ok", done: true, done_reason: "stop" }
             : { choices: [{ message: { content: "ok" }, finish_reason: "stop" }] };

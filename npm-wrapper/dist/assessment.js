@@ -2,23 +2,20 @@
 /**
  * Release pack Change A, client half: an unscored check never reads as LOW.
  *
- * The service states whether it assessed a response (`assessed`), why not
- * (`not_assessed_reason`) and any unqualified alert it still carries (`candidate_alert`). This
- * module passes those through and fails closed:
+ * The service states whether it assessed a response (`assessed`), and any unqualified alert it
+ * still carries (`candidate_alert`). This module passes the verdict through and fails closed:
  *
- *   - assessed: true is accepted only with a LOW/MEDIUM/HIGH band, `evidence_depth_limited`
- *     exactly false, and no reason or candidate beside it;
- *   - assessed: false is accepted only with a reason from the service's closed list;
+ *   - assessed: true is accepted only with a LOW/MEDIUM/HIGH band and nothing in the answer that
+ *     contradicts it (extra facts the service sends are read here and never passed on);
+ *   - assessed: false with any reason from the service becomes the single reason `not_assessed`;
  *   - anything missing or contradictory becomes NOT_ASSESSED with reason `unknown`.
  *
- * Reasons about detection (no_profile, borrowed_profile, limited_evidence) only ever come from
- * the service. The client sets a reason only where there is no detector answer to pass through,
- * in this order: screening_disabled, provider_error, incomplete_response, service_unavailable,
- * unknown. An unassessed result carries risk_level NOT_ASSESSED and the word LOW appears nowhere
- * in it.
+ * The client sets its own reason only where there is no service answer to pass through, in this
+ * order: screening_disabled, provider_error, incomplete_response, service_unavailable, unknown.
+ * An unassessed result carries risk_level NOT_ASSESSED and the word LOW appears nowhere in it.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.NOT_ASSESSED = exports.ALL_REASONS = exports.CLIENT_REASONS = exports.SERVER_REASONS = exports.ASSESSED_BANDS = void 0;
+exports.NOT_ASSESSED = exports.ALL_REASONS = exports.CLIENT_REASONS = exports.ASSESSED_BANDS = void 0;
 exports.assessmentFromDetector = assessmentFromDetector;
 exports.notAssessed = notAssessed;
 exports.applyAssessment = applyAssessment;
@@ -28,14 +25,13 @@ exports.finishFromOllama = finishFromOllama;
 exports.auditRecordKind = auditRecordKind;
 exports.normaliseAuditLog = normaliseAuditLog;
 exports.ASSESSED_BANDS = ["LOW", "MEDIUM", "HIGH"];
-exports.SERVER_REASONS = ["no_profile", "borrowed_profile", "limited_evidence", "unknown"];
 exports.CLIENT_REASONS = [
     "screening_disabled", "provider_error", "incomplete_response", "service_unavailable", "unknown",
 ];
 /** The whole vocabulary a result may carry. Nothing else is ever produced. */
 exports.ALL_REASONS = [
-    "no_profile", "borrowed_profile", "limited_evidence", "service_unavailable",
-    "incomplete_response", "provider_error", "screening_disabled", "unknown",
+    "not_assessed", "service_unavailable", "incomplete_response", "provider_error",
+    "screening_disabled", "unknown",
 ];
 exports.NOT_ASSESSED = "NOT_ASSESSED";
 const CANDIDATE_LEVELS = ["MEDIUM", "HIGH"];
@@ -72,7 +68,7 @@ function demotionIsPossible(raw, band) {
 const sameModel = (a, b) => typeof a === "string" && typeof b === "string" && a.trim().toLowerCase() === b.trim().toLowerCase();
 function localContradiction(raw, requestedModel) {
     if (!absent(raw?.gate_reason))
-        return true; // a suppression gate produced it
+        return true; // the service qualified this result
     if (!absent(raw?.error))
         return true; // the detector reported an error
     // A field the producer sends is a claim: an explicit null or non-string identity is an explicit
@@ -100,8 +96,7 @@ function assessmentFromDetector(raw, bandField, requestedModel) {
     const assessed = raw?.assessed;
     const reason = raw?.not_assessed_reason;
     if (assessed === true) {
-        // The affirmative flag is believed only when nothing else the service said contradicts it:
-        // full evidence, its own profile, a supported model, no demotion, no reason, no candidate.
+        // The affirmative flag is believed only when nothing else the service said contradicts it.
         const consistent = isBand(band)
             && raw?.evidence_depth_limited === false
             // Supplied flags must be real booleans: "true"/"false" strings are malformed and fail.
@@ -120,8 +115,8 @@ function assessmentFromDetector(raw, bandField, requestedModel) {
     const candidate = serviceCandidate(raw, band);
     if (candidate === "invalid")
         return notAssessed("unknown");
-    if (assessed === false && typeof reason === "string" && exports.SERVER_REASONS.includes(reason)) {
-        return notAssessed(reason, candidate ?? undefined);
+    if (assessed === false && typeof reason === "string" && reason.trim()) {
+        return notAssessed("not_assessed", candidate ?? undefined);
     }
     // No assessment fact, or one we cannot read: the service did not say it assessed this. An
     // explicit, coherent service-supplied candidate (an old audit row's warning) is kept.
@@ -138,24 +133,16 @@ function notAssessed(reason, candidate) {
 /**
  * Build the caller-facing result from any verdict-shaped object, keeping the non-verdict fields
  * (detection_id, source, confidence, error) and replacing every verdict field with the
- * normalised assessment. Fields that could carry a band word are dropped from unassessed results.
+ * normalised assessment.
  */
 function applyAssessment(base, a) {
-    const { risk, risk_level, assessed, not_assessed_reason, candidate_alert, features_triggered, detection_method, ...rest } = base;
+    const { risk, risk_level, assessed, not_assessed_reason, candidate_alert, ...rest } = base;
     void risk;
     void risk_level;
     void assessed;
     void not_assessed_reason;
     void candidate_alert;
-    const out = { ...rest, ...a };
-    if (a.assessed) {
-        // A scored result keeps the fields it has always carried.
-        if (features_triggered !== undefined)
-            out.features_triggered = features_triggered;
-        if (detection_method !== undefined)
-            out.detection_method = detection_method;
-    }
-    return out;
+    return { ...rest, ...a };
 }
 function finishFromOpenAICompatible(data) {
     const r = data?.choices?.[0]?.finish_reason;
@@ -183,6 +170,8 @@ function finishFromOllama(data) {
 }
 const DETECTION_SOURCES = ["proxy", "passthrough", "interception"];
 const HASH_FIELDS = ["this_hash", "prev_hash"];
+/** Keys that describe how a verdict was reached. They are read where needed and never shown. */
+const INTERNAL_KEY = /feature|profile|method|evidence|gate_reason|metric|borrowed|demoted|supported/i;
 const SERVICE_READ_TIME = ["record_kind", "assessment", "read_time_fields"];
 /** What an audit row records, by the service's own label when it sends one. */
 function auditRecordKind(e) {
@@ -212,8 +201,7 @@ function assessmentFromService(e) {
         return notAssessed("unknown");
     const band = e.risk_level;
     if (a.assessed === true) {
-        // The same checks as a live verdict, against the row's own stored facts: an affirmative
-        // assessment beside limited evidence, a gate, an error or another model's profile fails.
+        // The same checks as a live verdict, against the row's own stored facts.
         const { assessment: _a, record_kind: _k, read_time_fields: _r, ...facts } = e;
         void _a;
         void _k;
@@ -221,12 +209,11 @@ function assessmentFromService(e) {
         return assessmentFromDetector({ ...facts, assessed: true, not_assessed_reason: a.not_assessed_reason,
             candidate_alert: a.candidate_alert }, "risk_level");
     }
-    if (a.assessed === false && typeof a.not_assessed_reason === "string"
-        && exports.SERVER_REASONS.includes(a.not_assessed_reason)) {
+    if (a.assessed === false && typeof a.not_assessed_reason === "string" && a.not_assessed_reason.trim()) {
         const candidate = serviceCandidate({ candidate_alert: a.candidate_alert, risk_demoted_from: e.risk_demoted_from }, band);
         if (candidate === "invalid")
             return notAssessed("unknown");
-        return notAssessed(a.not_assessed_reason, candidate ?? undefined);
+        return notAssessed("not_assessed", candidate ?? undefined);
     }
     return notAssessed("unknown");
 }
@@ -247,6 +234,8 @@ function normaliseAuditLog(result) {
             if (HASH_FIELDS.includes(k) || SERVICE_READ_TIME.includes(k))
                 continue;
             if (["risk", "risk_level", "assessed", "not_assessed_reason", "candidate_alert"].includes(k))
+                continue;
+            if (INTERNAL_KEY.test(k))
                 continue;
             view[k] = v;
         }

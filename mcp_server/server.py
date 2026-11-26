@@ -76,15 +76,16 @@ async def arkheia_verify(prompt: str, response: str, model: str) -> dict:
                   'claude-sonnet-4-6')
 
     Returns:
-        risk_level:          LOW / MEDIUM / HIGH / UNKNOWN
+        risk_level:          LOW / MEDIUM / HIGH / NOT_ASSESSED / UNKNOWN
+        assessed:            whether Arkheia could score this response
         confidence:          0.0 to 1.0
-        evidence_depth_limited: True when the verdict rests on less evidence than usual
         detection_id:        UUID for audit log correlation
         error:               Set if detection could not complete (UNKNOWN risk)
 
     Risk level guidance:
         HIGH    -- do not surface response; log detection_id; request clarification
-        UNKNOWN -- flag for human review; include detection_id in your response
+        NOT_ASSESSED / UNKNOWN -- not a clean result; verify by other means and
+                   include detection_id in your response
         MEDIUM  -- surface with brief confidence note
         LOW     -- surface normally
     """
@@ -160,7 +161,7 @@ async def run_grok(
         response:           The model's response text
         model:              Model ID used
         prompt_hash:        SHA-256 of the prompt (for reproducibility)
-        arkheia:            Full detection result (risk_level, confidence, etc.)
+        arkheia:            Detection result (risk_level, assessed, confidence, detection_id)
         error:              Set if provider call failed
     """
     try:
@@ -303,7 +304,7 @@ async def run_together(
         model:        Model ID used
         prompt_hash:  SHA-256 of the prompt
         usage:        Token usage if available
-        arkheia:      Full detection result (risk_level, confidence, etc.)
+        arkheia:      Detection result (risk_level, assessed, confidence, detection_id)
         error:        Set if provider call failed
 
     Note: Kimi K2.5 is a thinking model — it uses 100-500 tokens internally
