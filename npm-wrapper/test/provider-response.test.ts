@@ -104,3 +104,22 @@ test("through the tool: forwarded, never echoed or logged; bad input gets a plai
         assert.ok(!logs().includes(marker));
     });
 });
+
+// ---- guidance: only an exact known public string passes ----
+const G = "For a full assessment, ask your model provider to include detailed output in its response.";
+test("guidance: the allowed message passes; any other message, including one containing it, is dropped", async () => {
+    const run = async (message: any): Promise<any> => {
+        (globalThis as any).fetch = async (url: any) => {
+            if (String(url).startsWith("http://localhost")) throw new TypeError("fetch failed");
+            return new Response(JSON.stringify({ ...HOSTED_OK, message }), { status: 200, headers: { "content-type": "application/json" } });
+        };
+        return client().verify("p", "r", "m");
+    };
+    assert.equal((await run(G)).guidance, G);
+    for (const bad of [G + " ", " " + G, G + " Also: secret.", "Note: " + G, G.toLowerCase(), G.slice(0, -1), "other", "", null, 5, [G], { m: G }]) {
+        const out = await run(bad);
+        assert.equal("guidance" in out, false, JSON.stringify(bad));
+        assert.ok(!JSON.stringify(out).includes("secret"));
+    }
+    assert.equal("guidance" in (await run(undefined)), false);
+});

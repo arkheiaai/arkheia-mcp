@@ -50,12 +50,23 @@ const rankOf = (v: unknown): number | undefined =>
 const ID_PATTERN = /^[A-Za-z0-9_.:-]{1,100}$/;
 const SOURCES = ["proxy", "local"];
 
+/** Known public guidance strings. A service message is passed on only if it equals one of these exactly. */
+export const ALLOWED_GUIDANCE: readonly string[] = [
+    "For a full assessment, ask your model provider to include detailed output in its response.",
+];
+
 /** The only non-verdict fields a result may carry, each validated, with a fixed fallback. */
-export function safeMeta(raw: any): { confidence: number; detection_id?: string } {
+export function safeMeta(raw: any): { confidence: number; detection_id?: string; guidance?: string } {
     const c = raw?.confidence;
     const confidence = typeof c === "number" && Number.isFinite(c) && c >= 0 && c <= 1 ? c : 0.0;
     const id = raw?.detection_id;
-    return { confidence, ...(typeof id === "string" && ID_PATTERN.test(id) ? { detection_id: id } : {}) };
+    const msg = raw?.message;
+    const guidance = typeof msg === "string" ? ALLOWED_GUIDANCE.find((g) => g === msg) : undefined;
+    return {
+        confidence,
+        ...(typeof id === "string" && ID_PATTERN.test(id) ? { detection_id: id } : {}),
+        ...(guidance !== undefined ? { guidance } : {}),
+    };
 }
 const MODEL_PATTERN = /^[A-Za-z0-9_.:/@+-]{1,100}$/;
 const TIME_PATTERN = /^[0-9TZ:.+ -]{1,40}$/;

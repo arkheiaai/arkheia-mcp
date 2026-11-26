@@ -5,7 +5,7 @@
  * NOT_ASSESSED, and the word LOW appears nowhere in it.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.safeSource = exports.NOT_ASSESSED = exports.ALL_REASONS = exports.CLIENT_REASONS = exports.ASSESSED_BANDS = void 0;
+exports.safeSource = exports.ALLOWED_GUIDANCE = exports.NOT_ASSESSED = exports.ALL_REASONS = exports.CLIENT_REASONS = exports.ASSESSED_BANDS = void 0;
 exports.safeMeta = safeMeta;
 exports.assessmentFromDetector = assessmentFromDetector;
 exports.notAssessed = notAssessed;
@@ -47,12 +47,22 @@ const RANK = { LOW: 1, MEDIUM: 2, HIGH: 3 };
 const rankOf = (v) => typeof v === "string" && Object.prototype.hasOwnProperty.call(RANK, v) ? RANK[v] : undefined;
 const ID_PATTERN = /^[A-Za-z0-9_.:-]{1,100}$/;
 const SOURCES = ["proxy", "local"];
+/** Known public guidance strings. A service message is passed on only if it equals one of these exactly. */
+exports.ALLOWED_GUIDANCE = [
+    "For a full assessment, ask your model provider to include detailed output in its response.",
+];
 /** The only non-verdict fields a result may carry, each validated, with a fixed fallback. */
 function safeMeta(raw) {
     const c = raw?.confidence;
     const confidence = typeof c === "number" && Number.isFinite(c) && c >= 0 && c <= 1 ? c : 0.0;
     const id = raw?.detection_id;
-    return { confidence, ...(typeof id === "string" && ID_PATTERN.test(id) ? { detection_id: id } : {}) };
+    const msg = raw?.message;
+    const guidance = typeof msg === "string" ? exports.ALLOWED_GUIDANCE.find((g) => g === msg) : undefined;
+    return {
+        confidence,
+        ...(typeof id === "string" && ID_PATTERN.test(id) ? { detection_id: id } : {}),
+        ...(guidance !== undefined ? { guidance } : {}),
+    };
 }
 const MODEL_PATTERN = /^[A-Za-z0-9_.:/@+-]{1,100}$/;
 const TIME_PATTERN = /^[0-9TZ:.+ -]{1,40}$/;

@@ -82,3 +82,21 @@ async def test_tool_never_echoes_or_logs_it(caplog):
     for o in (out, out2, bad, arr, huge):
         assert marker not in json.dumps(o)
     assert marker not in caplog.text
+
+
+G = "For a full assessment, ask your model provider to include detailed output in its response."
+
+
+@pytest.mark.asyncio
+async def test_guidance_only_for_the_exact_allowed_message():
+    async def run(message):
+        r = _hosted()
+        r.json.return_value = dict(OK, message=message)
+        with patch("httpx.AsyncClient.post", new_callable=AsyncMock, return_value=r):
+            return await _client().verify("p", "r", "m")
+
+    assert (await run(G))["guidance"] == G
+    for bad in [G + " ", " " + G, G + " Also: secret.", "Note: " + G, G.lower(), G[:-1], "other", "", None, 5, [G], {"m": G}]:
+        out = await run(bad)
+        assert "guidance" not in out, repr(bad)
+        assert "secret" not in json.dumps(out)

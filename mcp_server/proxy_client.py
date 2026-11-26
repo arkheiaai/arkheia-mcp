@@ -244,7 +244,12 @@ class ProxyClient:
 
 #: The verdict, and only the verdict. A caller sees these fields and nothing else.
 SIGNAL_FIELDS = ("risk_level", "assessed", "not_assessed_reason", "candidate_alert", "confidence",
-                 "detection_id", "gate_action", "source", "error")
+                 "detection_id", "gate_action", "source", "error", "guidance")
+
+# Known public guidance strings. A service message is passed on only if it equals one of these exactly.
+ALLOWED_GUIDANCE = (
+    "For a full assessment, ask your model provider to include detailed output in its response.",
+)
 
 _BANDS = ("LOW", "MEDIUM", "HIGH")
 _RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
@@ -350,6 +355,9 @@ def verdict_fields(raw: dict, band_field: str, requested_model=None, source=None
     did = raw.get("detection_id")
     if _safe(_ID_PATTERN, did) is not None:
         out["detection_id"] = did
+    msg = raw.get("message")
+    if isinstance(msg, str) and any(msg == g for g in ALLOWED_GUIDANCE):
+        out["guidance"] = msg
     if raw.get("gate_action") in _GATE_ACTIONS:
         out["gate_action"] = raw["gate_action"]
     if raw.get("error") is not None:
