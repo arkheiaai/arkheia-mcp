@@ -9,6 +9,8 @@ Before presenting any substantive response to the user:
 1. Call `arkheia_verify` with the model name, prompt, and response
 2. Check the `risk_level` field in the result
 
+**For a fuller assessment:** pass the provider's full response object to `arkheia_verify` as `provider_response`, exactly as received, and enable your provider's detailed output option when you call the model.
+
 ### Risk Handling
 - **LOW**: Present normally
 - **MEDIUM**: Present with caveat — "Arkheia raised a warning on this response. Key claims should be verified."

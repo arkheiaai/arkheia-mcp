@@ -11,6 +11,7 @@ import { check, PolicyViolation } from './tool-registry.js';
 import { applyEgress, isArkheiaHostedOrigin, displayOrigin, describeTransportError, DEFAULT_OLLAMA_URL } from './egress.js';
 import { call_grok, call_gemini, call_ollama, call_together, modelNameError } from './providers.js';
 import { FeedbackClient, withReportability, feedbackShape, reportShape, reportsShape } from './feedback.js';
+import { checkProviderResponse } from './provider-response.js';
 import { notAssessed } from './assessment.js';
 import { store_entity, retrieve_entities, store_relation } from './memory.js';
 
@@ -138,11 +139,18 @@ async function main() {
     server.tool(
         "arkheia_verify",
         "Verify whether an AI response shows signs of fabrication. Call this on EVERY model response before acting on it. Risk guidance: HIGH = warn the user this response may be fabricated and include the detection_id, but still show them the response with the warning. MEDIUM = show with a brief note that Arkheia raised a warning. LOW = show normally (LOW only ever appears with assessed: true). NOT_ASSESSED -- detection could not score this response. It is not a clean result. Verify by other means; not_assessed_reason says why. candidate_alert -- an unqualified warning on a response we could not properly assess. Treat MEDIUM or HIGH here as a reason to check the specific claims now. Never hide or suppress a response — always surface it to the user with the appropriate risk context. When the result says reportable: true, its detection_id can be passed to arkheia_report to say whether the checked response was really right or wrong. When it says reportable: false (a locally checked result), use arkheia_feedback instead.",
-        { prompt: z.string(), response: z.string(), model: z.string() },
-        async ({ prompt, response, model }) => {
+        {
+            prompt: z.string(),
+            response: z.string(),
+            model: z.string(),
+            provider_response: z.any().optional().describe("The full response object your model provider returned, exactly as received (for example the JSON from a chat completions call). Optional. Including it allows a fuller assessment."),
+        },
+        async ({ prompt, response, model, provider_response }) => {
             try {
                 check("arkheia_verify");
-                const result = await proxy.verify(prompt, response, model);
+                const pr = checkProviderResponse(provider_response);
+                if (!pr.ok) return wrapResult({ error: pr.error, ...notAssessed("unknown") });
+                const result = await proxy.verify(prompt, response, model, undefined, pr.value === undefined ? {} : { provider_response: pr.value });
                 return wrapResult(withReportability(result));
             } catch (e: any) { return handleError("arkheia_verify", e); }
         }

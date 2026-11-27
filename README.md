@@ -161,7 +161,11 @@ If you have a workflow where you need to call the detection API directly (CI/CD 
 POST https://arkheia-proxy-production.up.railway.app/v1/detect
 ```
 
-The MCP tools send the same thing as a direct call: the prompt, the response and the model name, with your key in a header. Each response carries `assessed`, and `not_assessed_reason` when it could not be scored. If you're building a custom integration, [open an issue](https://github.com/arkheiaai/arkheia-mcp/issues).
+The MCP tools send the same thing as a direct call: the prompt, the response and the model name, with your key in a header (plus the optional `provider_response` when you pass one). Each response carries `assessed`, and `not_assessed_reason` when it could not be scored. If you're building a custom integration, [open an issue](https://github.com/arkheiaai/arkheia-mcp/issues).
+
+### For a fuller assessment
+
+Pass the provider's full response object to `arkheia_verify` as the optional `provider_response` input, exactly as received (an object, or a JSON string that parses to one; up to about 2 MB), and enable your provider's detailed output option when you call the model. It is passed on unchanged, and it is never logged or shown in the tool's output.
 
 ## MCP Tools
 

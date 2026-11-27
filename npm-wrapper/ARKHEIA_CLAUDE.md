@@ -10,6 +10,8 @@ Call `arkheia_verify` on EVERY model response before surfacing it to the user. D
 arkheia_verify(prompt=<original prompt>, response=<model output>, model=<model id>)
 ```
 
+**For a fuller assessment:** pass the provider's full response object to `arkheia_verify` as `provider_response`, exactly as received, and enable your provider's detailed output option when you call the model.
+
 ## Risk Escalation
 
 - **HIGH risk**: Warn the user that the response may be fabricated. Include the `detection_id`. Still show the response — never hide or suppress it. Ask the user if they want you to verify with a different model.
