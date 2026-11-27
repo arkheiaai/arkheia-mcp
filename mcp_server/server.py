@@ -24,6 +24,7 @@ Transport: stdio (default — Claude Code / Claude Desktop)
            HTTP/SSE available via mcp SDK for custom integrations
 """
 
+import json
 import os
 import logging
 from typing import Annotated, Any
@@ -72,6 +73,29 @@ ProviderResponseArg = Annotated[
         "allows a fuller assessment."
     )),
 ]
+
+
+def _guard_deep_json(manager):
+    """The framework parses a JSON-looking string argument before the tool runs, and a deeply
+    nested one exhausts the parser's recursion limit there. Hand such a value on as a plain
+    non-JSON string so it reaches check_provider_response, which answers with its fixed message."""
+    inner = manager.call_tool
+
+    async def call_tool(name, arguments, *args, **kwargs):
+        value = arguments.get("provider_response") if isinstance(arguments, dict) else None
+        if isinstance(value, str):
+            try:
+                json.loads(value)
+            except RecursionError:
+                arguments = {**arguments, "provider_response": ""}
+            except ValueError:
+                pass
+        return await inner(name, arguments, *args, **kwargs)
+
+    manager.call_tool = call_tool
+
+
+_guard_deep_json(mcp._tool_manager)
 
 
 @mcp.tool(annotations=ToolAnnotations(

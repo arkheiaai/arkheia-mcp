@@ -242,3 +242,33 @@ async def test_stdio_protocol_never_echoes_malformed_and_forwards_valid():
         assert MARKER not in out
     assert "CallToolRequest" in logs, "server log was captured"
     assert MARKER not in logs
+
+
+def _deep(depth):
+    return '{"a":' * depth + "1" + "}" * depth
+
+
+def test_deeply_nested_string_is_rejected_not_raised():
+    text = _deep(12000)
+    assert len(text.encode("utf-8")) < MAX_PROVIDER_RESPONSE_BYTES
+    value, err = check_provider_response(text)
+    assert value is None and "must be a JSON object" in err
+
+
+def test_deeply_nested_object_is_rejected_not_raised():
+    obj = {}
+    node = obj
+    for _ in range(12000):
+        node["a"] = {}
+        node = node["a"]
+    value, err = check_provider_response(obj)
+    assert value is None and "must be a JSON object" in err
+
+
+@pytest.mark.asyncio
+async def test_tool_manager_returns_neutral_result_for_deep_nesting(caplog):
+    caplog.set_level(logging.DEBUG)
+    with patch.object(srv.proxy, "verify", new_callable=AsyncMock) as verify:
+        result = await srv.mcp.call_tool("arkheia_verify", _args(provider_response=_deep(12000)))
+    assert verify.await_count == 0
+    assert "must be a JSON object" in _text(result)

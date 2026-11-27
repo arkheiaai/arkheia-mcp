@@ -40,13 +40,13 @@ def check_provider_response(value):
             return None, _TOO_LARGE
         try:
             value = json.loads(value)
-        except ValueError:
+        except (ValueError, RecursionError):
             return None, _NOT_OBJECT
     if not isinstance(value, dict):
         return None, _NOT_OBJECT
     try:
         size = len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, RecursionError):
         return None, _NOT_OBJECT
     if size > MAX_PROVIDER_RESPONSE_BYTES:
         return None, _TOO_LARGE
